@@ -892,8 +892,6 @@ class MERFISHDataIntegration:
     def discover_all_regions(self):
         """
         通过坐标文件和CCF参考图谱发现所有可用的脑区
-
-        注意：MERFISH坐标需要乘以1000才能与CCF v3模板坐标匹配
         """
         self.logger.info("开始从坐标和CCF参考图谱发现脑区...")
         all_regions = set()
@@ -931,13 +929,18 @@ class MERFISHDataIntegration:
                 annotation_data, header = nrrd.read(annotation_file)
                 annotation_data = annotation_data.astype(np.uint32)
 
-                # 获取体素尺寸 (mm → μm)
+                # 获取体素尺寸 (μm)
                 if "space directions" in header:
                     voxel_size = np.diag(header["space directions"])[:3].astype(float)
                     self.logger.info(f"CCF参考图谱体素尺寸: {voxel_size} μm")
                 else:
                     voxel_size = np.array([25.0, 25.0, 25.0])  # 默认25μm
                     self.logger.warning(f"无法从头信息获取体素尺寸，使用默认值: {voxel_size} μm")
+
+                # 输出图谱形状信息
+                self.logger.info(f"CCF参考图谱形状: {annotation_data.shape}")
+                self.logger.info(
+                    f"CCF参考图谱范围 (μm): X[0-{annotation_data.shape[0] * voxel_size[0]:.0f}], Y[0-{annotation_data.shape[1] * voxel_size[1]:.0f}], Z[0-{annotation_data.shape[2] * voxel_size[2]:.0f}]")
             except Exception as e:
                 self.logger.error(f"加载CCF参考图谱失败: {e}")
                 annotation_data = None
@@ -956,20 +959,20 @@ class MERFISHDataIntegration:
                 # 创建区域ID到信息的映射
                 region_meta = {}
 
+                # 递归遍历树形结构
+                def traverse_tree(node):
+                    if isinstance(node, dict):
+                        if "id" in node:
+                            region_meta[int(node["id"])] = node
+                        if "children" in node and isinstance(node["children"], list):
+                            for child in node["children"]:
+                                traverse_tree(child)
+
                 # 处理可能的不同格式
                 if isinstance(hierarchy_data, list):
-                    # 列表格式: [{id: 1, ...}, {id: 2, ...}, ...]
-                    region_meta = {int(r.get("id", 0)): r for r in hierarchy_data}
-                elif isinstance(hierarchy_data, dict) and "msg" in hierarchy_data:
-                    # 树形格式，需要递归处理
-                    def traverse_tree(node):
-                        if isinstance(node, dict):
-                            if "id" in node:
-                                region_meta[int(node["id"])] = node
-                            if "children" in node and isinstance(node["children"], list):
-                                for child in node["children"]:
-                                    traverse_tree(child)
-
+                    for item in hierarchy_data:
+                        traverse_tree(item)
+                elif isinstance(hierarchy_data, dict):
                     traverse_tree(hierarchy_data)
 
                 self.logger.info(f"加载了{len(region_meta)}个区域元数据")
@@ -981,22 +984,10 @@ class MERFISHDataIntegration:
         # 2. 查找并处理坐标文件
         # ===============================================
 
-        # 搜索可能的坐标文件
+        # 搜索坐标文件
         coord_files = []
-
-        # 查找ccf_coordinates文件
         for i in range(1, 10):
             file_path = os.path.join(self.data_dir, f"ccf_coordinates_{i}.csv")
-            if os.path.exists(file_path):
-                coord_files.append(file_path)
-
-        # 查找可能包含坐标的其他文件
-        alternative_files = [
-            os.path.join(self.data_dir, "cell_positions.csv"),
-            os.path.join(self.data_dir, "cell_metadata.csv")
-        ]
-
-        for file_path in alternative_files:
             if os.path.exists(file_path):
                 coord_files.append(file_path)
 
@@ -1009,6 +1000,9 @@ class MERFISHDataIntegration:
                 try:
                     coords_df = pd.read_csv(file_path)
 
+                    # 检查数据大小
+                    self.logger.info(f"坐标数据形状: {coords_df.shape}")
+
                     # 识别坐标列
                     x_cols = [col for col in coords_df.columns if col.lower() in ['x', 'x_ccf', 'x_position', 'pos_x']]
                     y_cols = [col for col in coords_df.columns if col.lower() in ['y', 'y_ccf', 'y_position', 'pos_y']]
@@ -1018,37 +1012,74 @@ class MERFISHDataIntegration:
                         x_col, y_col, z_col = x_cols[0], y_cols[0], z_cols[0]
                         self.logger.info(f"使用坐标列: {x_col}, {y_col}, {z_col}")
 
+                        # 检查坐标范围
+                        x_range = (coords_df[x_col].min(), coords_df[x_col].max())
+                        y_range = (coords_df[y_col].min(), coords_df[y_col].max())
+                        z_range = (coords_df[z_col].min(), coords_df[z_col].max())
+                        self.logger.info(f"坐标范围 - X: {x_range}, Y: {y_range}, Z: {z_range}")
+
+                        # 判断坐标单位和转换因子
+                        scale_factor = 1.0
+                        if x_range[1] < 20 and y_range[1] < 20 and z_range[1] < 20:
+                            scale_factor = 1000.0  # mm to μm
+                            self.logger.info("检测到毫米坐标，应用转换因子: 1000")
+                        elif x_range[1] < 200 and y_range[1] < 200 and z_range[1] < 200:
+                            scale_factor = 100.0  # 0.1mm to μm
+                            self.logger.info("检测到0.1毫米坐标，应用转换因子: 100")
+                        else:
+                            self.logger.info("坐标似乎已经是微米单位")
+
                         # 如果有参考图谱和元数据，查询区域ID和名称
                         if annotation_data is not None and voxel_size is not None:
+                            # 创建一个采样的数据子集来避免处理所有数据
+                            sample_size = min(10000, len(coords_df))
+                            sample_indices = np.random.choice(len(coords_df), sample_size, replace=False)
+                            sample_df = coords_df.iloc[sample_indices]
+
                             region_ids = []
 
-                            # 记录MERFISH坐标转换因子
-                            self.logger.info("应用MERFISH坐标转换: 坐标值 × 1000以匹配CCF v3模板")
-
-                            # 处理每个坐标
-                            for _, row in coords_df.iterrows():
+                            # 处理采样的坐标
+                            for _, row in sample_df.iterrows():
                                 try:
-                                    # 获取物理坐标 (μm) - 将MERFISH坐标乘以1000
-                                    x = row[x_col]  # 应用转换
-                                    y = row[y_col]  # 应用转换
-                                    z = row[z_col]  # 应用转换
+                                    # 获取物理坐标 (μm) - 应用转换因子
+                                    x = float(row[x_col]) * scale_factor
+                                    y = float(row[y_col]) * scale_factor
+                                    z = float(row[z_col]) * scale_factor
 
-                                    # 转换为体素坐标 (物理坐标/体素大小)
-                                    # 注意：可能需要根据实际参考系统调整坐标轴顺序
-                                    vx = min(max(0, int(x / voxel_size[0])), annotation_data.shape[0] - 1)
-                                    vy = min(max(0, int(y / voxel_size[1])), annotation_data.shape[1] - 1)
-                                    vz = min(max(0, int(z / voxel_size[2])), annotation_data.shape[2] - 1)
+                                    # 转换为体素坐标
+                                    # CCF v3使用PIR坐标系统（Posterior-Inferior-Right）
+                                    # 可能需要调整坐标映射
+                                    vx = int(x / voxel_size[0])
+                                    vy = int(y / voxel_size[1])
+                                    vz = int(z / voxel_size[2])
 
-                                    # 获取区域ID
-                                    region_id = annotation_data[vx, vy, vz]
-                                    if region_id > 0:  # 跳过ID为0的区域（通常是背景）
-                                        region_ids.append(region_id)
+                                    # 确保坐标在有效范围内
+                                    if (0 <= vx < annotation_data.shape[0] and
+                                            0 <= vy < annotation_data.shape[1] and
+                                            0 <= vz < annotation_data.shape[2]):
+
+                                        # 获取区域ID
+                                        region_id = int(annotation_data[vx, vy, vz])
+                                        if region_id > 0:  # 跳过背景（ID=0）
+                                            region_ids.append(region_id)
                                 except Exception as e:
-                                    continue  # 跳过无效坐标
+                                    continue
 
                             # 获取唯一区域ID
                             unique_region_ids = set(region_ids)
-                            self.logger.info(f"找到{len(unique_region_ids)}个唯一区域ID")
+                            self.logger.info(f"从{sample_size}个采样点中找到{len(unique_region_ids)}个唯一区域ID")
+
+                            # 显示前10个最常见的区域ID
+                            if region_ids:
+                                from collections import Counter
+                                region_counts = Counter(region_ids)
+                                top_regions = region_counts.most_common(10)
+                                self.logger.info("最常见的区域ID:")
+                                for rid, count in top_regions:
+                                    if rid in region_meta:
+                                        meta = region_meta[rid]
+                                        name = meta.get("acronym", meta.get("name", f"ID_{rid}"))
+                                        self.logger.info(f"  {rid}: {name} ({count}次)")
 
                             # 将ID映射到名称
                             for region_id in unique_region_ids:
@@ -1074,9 +1105,9 @@ class MERFISHDataIntegration:
                            'AI', 'RSP', 'PTLp', 'VISp', 'VISl', 'VISal', 'VISam',
                            'VISpm', 'TEa', 'PERI', 'ECT'}
 
-        # 过滤掉非皮层区域（如果需要）
+        # 过滤掉非皮层区域
         cortical_prefixes = ['MO', 'SS', 'VIS', 'ACA', 'AI', 'RSP', 'PTL', 'TEa', 'PERI', 'ECT', 'PL', 'ILA', 'ORB']
-        if len(all_regions) > 50:  # 如果区域太多，只保留皮层区域
+        if len(all_regions) > 100:  # 如果区域太多，只保留皮层区域
             self.logger.info(f"筛选皮层区域（从{len(all_regions)}个区域中）")
             cortical_regions = {r for r in all_regions if any(r.startswith(p) for p in cortical_prefixes)}
             if cortical_regions:
@@ -1088,6 +1119,163 @@ class MERFISHDataIntegration:
         self.logger.info(f"发现{len(result)}个脑区: {', '.join(result[:10])}" +
                          (f"... 等{len(result) - 10}个" if len(result) > 10 else ""))
         return result
+
+    def transform_merfish_to_ccf(self, x, y, z, scale_factor=1.0):
+        """
+        将MERFISH坐标转换为CCF v3坐标
+
+        Args:
+            x, y, z: MERFISH坐标
+            scale_factor: 单位转换因子（例如1000表示mm到μm）
+
+        Returns:
+            ccf_x, ccf_y, ccf_z: CCF坐标（微米）
+        """
+        # 应用缩放因子
+        x_um = x * scale_factor
+        y_um = y * scale_factor
+        z_um = z * scale_factor
+
+        # MERFISH和CCF可能使用不同的坐标系统
+        # CCF v3使用PIR（Posterior-Inferior-Right）坐标系
+        # 可能需要调整轴的映射或方向
+
+        # 默认映射（可能需要根据实际数据调整）
+        ccf_x = x_um
+        ccf_y = y_um
+        ccf_z = z_um
+
+        return ccf_x, ccf_y, ccf_z
+
+    def ccf_to_voxel(self, ccf_x, ccf_y, ccf_z, voxel_size):
+        """
+        将CCF物理坐标（微米）转换为体素坐标
+
+        Args:
+            ccf_x, ccf_y, ccf_z: CCF坐标（微米）
+            voxel_size: 体素尺寸数组 [vx, vy, vz]（微米）
+
+        Returns:
+            vx, vy, vz: 体素坐标（整数）
+        """
+        vx = int(ccf_x / voxel_size[0])
+        vy = int(ccf_y / voxel_size[1])
+        vz = int(ccf_z / voxel_size[2])
+
+        return vx, vy, vz
+
+    def validate_ccf_coordinates(self, coords_df, x_col, y_col, z_col, annotation_shape, voxel_size):
+        """
+        验证坐标转换是否正确
+
+        Args:
+            coords_df: 坐标数据框
+            x_col, y_col, z_col: 坐标列名
+            annotation_shape: 注释图谱的形状
+            voxel_size: 体素尺寸
+
+        Returns:
+            scale_factor: 推荐的缩放因子
+            axis_mapping: 推荐的轴映射
+        """
+        # 计算坐标范围
+        x_range = (coords_df[x_col].min(), coords_df[x_col].max())
+        y_range = (coords_df[y_col].min(), coords_df[y_col].max())
+        z_range = (coords_df[z_col].min(), coords_df[z_col].max())
+
+        # CCF v3的物理范围（微米）
+        ccf_x_max = annotation_shape[0] * voxel_size[0]
+        ccf_y_max = annotation_shape[1] * voxel_size[1]
+        ccf_z_max = annotation_shape[2] * voxel_size[2]
+
+        self.logger.info(f"CCF物理范围 (μm): X[0-{ccf_x_max:.0f}], Y[0-{ccf_y_max:.0f}], Z[0-{ccf_z_max:.0f}]")
+        self.logger.info(f"输入坐标范围: X{x_range}, Y{y_range}, Z{z_range}")
+
+        # 估算缩放因子
+        scale_factors = []
+
+        # 检查每个轴
+        for coord_range, ccf_max in [(x_range, ccf_x_max), (y_range, ccf_y_max), (z_range, ccf_z_max)]:
+            if coord_range[1] > 0:
+                # 估算需要的缩放因子使坐标落在CCF范围内
+                estimated_scale = ccf_max / (coord_range[1] * 1.2)  # 留20%余量
+
+                # 找到最接近的标准缩放因子
+                standard_scales = [1, 10, 100, 1000, 10000]
+                closest_scale = min(standard_scales, key=lambda x: abs(x - estimated_scale))
+                scale_factors.append(closest_scale)
+
+        # 使用最常见的缩放因子
+        from collections import Counter
+        scale_counter = Counter(scale_factors)
+        scale_factor = scale_counter.most_common(1)[0][0] if scale_factors else 1.0
+
+        self.logger.info(f"推荐缩放因子: {scale_factor}")
+
+        # 测试一些采样点
+        sample_size = min(100, len(coords_df))
+        sample_df = coords_df.sample(n=sample_size)
+
+        valid_count = 0
+        for _, row in sample_df.iterrows():
+            x = row[x_col] * scale_factor
+            y = row[y_col] * scale_factor
+            z = row[z_col] * scale_factor
+
+            vx = int(x / voxel_size[0])
+            vy = int(y / voxel_size[1])
+            vz = int(z / voxel_size[2])
+
+            if (0 <= vx < annotation_shape[0] and
+                    0 <= vy < annotation_shape[1] and
+                    0 <= vz < annotation_shape[2]):
+                valid_count += 1
+
+        valid_ratio = valid_count / sample_size
+        self.logger.info(f"验证结果: {valid_ratio:.1%}的采样点落在有效范围内")
+
+        return scale_factor, None  # axis_mapping暂时返回None
+
+    def detect_coordinate_system(self, coords_df, metadata_df=None):
+        """
+        检测坐标系统类型
+
+        Args:
+            coords_df: 坐标数据
+            metadata_df: 元数据（可选）
+
+        Returns:
+            coord_system: 坐标系统类型 ('merfish', 'ccf', 'unknown')
+            scale_factor: 推荐的缩放因子
+        """
+        # 检查列名
+        columns = coords_df.columns.tolist()
+
+        # MERFISH特征
+        merfish_indicators = ['cell_id', 'gene', 'transcript_id']
+        ccf_indicators = ['x_ccf', 'y_ccf', 'z_ccf', 'ccf_x', 'ccf_y', 'ccf_z']
+
+        has_merfish = any(ind in columns for ind in merfish_indicators)
+        has_ccf = any(ind in columns for ind in ccf_indicators)
+
+        if has_ccf:
+            return 'ccf', 1.0
+        elif has_merfish:
+            # MERFISH通常需要缩放
+            return 'merfish', 1000.0
+        else:
+            # 基于坐标范围判断
+            x_cols = [col for col in columns if col.lower() == 'x']
+            if x_cols:
+                x_max = coords_df[x_cols[0]].max()
+                if x_max < 20:
+                    return 'merfish', 1000.0  # 毫米
+                elif x_max < 200:
+                    return 'merfish', 100.0  # 0.1毫米
+                elif x_max > 5000:
+                    return 'ccf', 1.0  # 已经是微米
+
+            return 'unknown', 1.0
 
     def _validate_coordinates(self, coords_df, x_col, y_col, z_col):
         """验证坐标数据并确定是否需要转换"""

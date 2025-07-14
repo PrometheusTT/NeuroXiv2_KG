@@ -12,6 +12,8 @@ import time
 import sys
 import csv
 import re
+import h5py
+from scipy import stats
 
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -124,6 +126,10 @@ class MERFISHDataIntegration:
             'NP': re.compile(r'(NP|near[- ]projecting)', re.IGNORECASE)
         }
 
+    def _create_sample_data(self, region_acronym: str) -> None:
+        """Removed sample data creation - now raises error when real data is missing"""
+        raise FileNotFoundError(f"无法获取{region_acronym}的真实MERFISH数据。请确保数据文件存在并路径正确。")
+
     def load_merfish_data(self, region_acronym: str) -> pd.DataFrame:
         """加载特定脑区的MERFISH数据"""
         cache_file = self.cache_dir / f"merfish_{region_acronym}{self.job_id}.pkl"
@@ -137,57 +143,119 @@ class MERFISHDataIntegration:
 
         cell_df = None
 
-        # 尝试使用AllenSDK获取数据
-        if self.allen_api is not None:
+        # 首先尝试从本地cell_metadata文件加载
+        try:
+            metadata_files = []
+            for i in range(1, 5):
+                filepath = f"cell_metadata_with_cluster_annotation_{i}.csv"
+                if os.path.exists(filepath):
+                    metadata_files.append(filepath)
+
+            if metadata_files:
+                # 读取并合并所有元数据文件
+                dfs = []
+                for file in metadata_files:
+                    logger.info(f"从本地文件{file}加载数据")
+                    df = pd.read_csv(file)
+                    # 检查是否有区域信息列
+                    if 'region' in df.columns:
+                        dfs.append(df)
+                    elif 'Region' in df.columns:
+                        df = df.rename(columns={'Region': 'region'})
+                        dfs.append(df)
+                    elif 'region_acronym' in df.columns:
+                        df = df.rename(columns={'region_acronym': 'region'})
+                        dfs.append(df)
+                    else:
+                        logger.warning(f"文件{file}中未找到区域信息列")
+
+                if dfs:
+                    # 合并所有DataFrame
+                    cell_df = pd.concat(dfs, ignore_index=True)
+                    # 筛选指定区域
+                    cell_df = cell_df[cell_df['region'].str.contains(region_acronym, na=False)]
+                    logger.info(f"从本地文件加载{region_acronym}数据，共{len(cell_df)}个细胞")
+        except Exception as e:
+            logger.warning(f"从本地文件加载{region_acronym}数据失败: {e}")
+
+        # 尝试加载坐标数据并合并
+        if cell_df is not None:
             try:
-                # 尝试使用AllenSDK获取数据
-                cells = self.allen_api.get_cells(require_morphology=False, require_reconstruction=False)
-                cell_df = pd.DataFrame(cells)
+                coord_files = []
+                for i in range(1, 5):
+                    filepath = f"ccf_coordinates_{i}.csv"
+                    if os.path.exists(filepath):
+                        coord_files.append(filepath)
 
-                # 筛选区域
-                if 'structure_area_abbrev' in cell_df.columns:
-                    cell_df = cell_df[cell_df['structure_area_abbrev'] == region_acronym]
-                elif 'region' in cell_df.columns:
-                    cell_df = cell_df[cell_df['region'] == region_acronym]
+                if coord_files:
+                    # 读取并合并所有坐标文件
+                    coord_dfs = []
+                    for file in coord_files:
+                        logger.info(f"从本地文件{file}加载坐标数据")
+                        coord_df = pd.read_csv(file)
+                        coord_dfs.append(coord_df)
 
-                logger.info(f"使用AllenSDK成功获取{region_acronym}数据，共{len(cell_df)}个细胞")
+                    if coord_dfs:
+                        # 合并所有坐标DataFrame
+                        all_coords = pd.concat(coord_dfs, ignore_index=True)
+
+                        # 确保有细胞ID列用于合并
+                        if 'cell_id' in all_coords.columns and 'cell_id' in cell_df.columns:
+                            cell_df = pd.merge(cell_df, all_coords, on='cell_id', how='left')
+                            logger.info(f"合并了{len(all_coords)}条坐标数据")
+                        elif 'cell_id' in all_coords.columns:
+                            # 尝试其他可能的ID列名
+                            for id_col in ['id', 'ID', 'CellID', 'cell_ID']:
+                                if id_col in cell_df.columns:
+                                    cell_df = cell_df.rename(columns={id_col: 'cell_id'})
+                                    cell_df = pd.merge(cell_df, all_coords, on='cell_id', how='left')
+                                    logger.info(f"使用{id_col}列合并了坐标数据")
+                                    break
             except Exception as e:
-                logger.warning(f"使用AllenSDK获取{region_acronym}数据失败: {e}")
-                cell_df = None
+                logger.warning(f"加载坐标数据失败: {e}")
 
-        # 尝试使用ABC Atlas API获取数据
-        if cell_df is None and self.abc_cache is not None:
+        # 尝试加载h5ad文件中的基因表达数据
+        if cell_df is not None:
             try:
-                # 获取该区域的细胞数据
-                cell_df = self.abc_cache.get_cells_by_region(region_acronym)
-                logger.info(f"使用ABC Atlas成功获取{region_acronym}数据，共{len(cell_df)}个细胞")
+                h5ad_files = []
+                for i in range(1, 5):
+                    log2_file = f"Zhuang-ABCA-{i}-log2.h5ad"
+                    if os.path.exists(log2_file):
+                        h5ad_files.append(log2_file)
+
+                if h5ad_files:
+                    try:
+                        import scanpy as sc
+                        import anndata
+
+                        # 读取h5ad文件并提取基因表达数据
+                        for file in h5ad_files:
+                            logger.info(f"从{file}加载基因表达数据")
+                            adata = sc.read_h5ad(file)
+
+                            # 尝试匹配细胞ID
+                            common_cells = set(adata.obs.index).intersection(set(cell_df['cell_id']))
+                            if common_cells:
+                                # 提取共同细胞的基因表达
+                                adata = adata[list(common_cells)]
+                                expr_df = pd.DataFrame(adata.X.toarray(), index=adata.obs.index,
+                                                       columns=adata.var.index)
+
+                                # 将基因表达数据合并到cell_df
+                                for gene in adata.var.index:
+                                    cell_df.loc[cell_df['cell_id'].isin(common_cells), gene] = expr_df[gene]
+
+                                logger.info(f"合并了{len(common_cells)}个细胞的基因表达数据")
+                    except ImportError:
+                        logger.warning("未安装scanpy或anndata，无法读取h5ad文件")
+                    except Exception as e:
+                        logger.warning(f"读取h5ad文件失败: {e}")
             except Exception as e:
-                logger.warning(f"使用ABC Atlas获取{region_acronym}数据失败: {e}")
-                cell_df = None
+                logger.warning(f"加载基因表达数据失败: {e}")
 
-        # 如果以上方法都失败，尝试加载本地数据
-        if cell_df is None:
-            try:
-                # 尝试从多个可能的本地位置加载
-                local_paths = [
-                    f"data/{region_acronym}_cells.csv",
-                    f"data/merfish/{region_acronym}.csv",
-                    f"merfish_data/{region_acronym}.csv",
-                    f"merfish_data/{region_acronym}_cells.csv"
-                ]
-
-                for path in local_paths:
-                    if os.path.exists(path):
-                        cell_df = pd.read_csv(path)
-                        logger.info(f"从本地文件{path}加载{region_acronym}数据，共{len(cell_df)}个细胞")
-                        break
-            except Exception as e:
-                logger.warning(f"加载本地{region_acronym}数据失败: {e}")
-
-        # 如果仍然无法获取数据，创建空的DataFrame但添加样本数据
+        # 如果未获取到数据，报错
         if cell_df is None or len(cell_df) == 0:
-            logger.warning(f"无法获取{region_acronym}的真实数据，创建示例数据。在生产环境中请提供真实MERFISH数据！")
-            cell_df = self._create_sample_data(region_acronym)
+            raise FileNotFoundError(f"无法获取{region_acronym}的真实MERFISH数据。请确保数据文件存在并路径正确。")
 
         # 确保有基本列
         for col in ['layer', 'class', 'subclass', 'cluster']:
@@ -199,80 +267,6 @@ class MERFISHDataIntegration:
             pickle.dump(cell_df, f)
 
         return cell_df
-
-    def _create_sample_data(self, region_acronym: str) -> pd.DataFrame:
-        """创建示例MERFISH数据（仅用于测试）"""
-        # 定义常见的细胞类和亚类
-        classes = ['Glutamatergic', 'GABAergic', 'Non-Neuronal']
-        subclasses = {
-            'Glutamatergic': ['L2/3 IT', 'L4 IT', 'L5 IT', 'L5 ET', 'L6 IT', 'L6 CT', 'L6b'],
-            'GABAergic': ['Pvalb', 'Sst', 'Vip', 'Lamp5', 'Sncg'],
-            'Non-Neuronal': ['Astro', 'Oligo', 'OPC', 'Micro', 'Endo']
-        }
-
-        # 创建细胞样本数据
-        rows = []
-
-        # 为每一层创建一些细胞
-        for layer in self.layer_boundaries.keys():
-            # 每个层的细胞数量
-            num_cells = np.random.randint(20, 100)
-
-            for i in range(num_cells):
-                # 随机选择类
-                cell_class = np.random.choice(classes, p=[0.7, 0.25, 0.05])
-
-                # 根据类选择亚类
-                cell_subclass = np.random.choice(subclasses[cell_class])
-
-                # 创建基因表达数据
-                gene_expr = {}
-
-                # IT/ET/CT相关基因表达
-                for gene_type, genes in self.projection_markers.items():
-                    expr_prob = 0.1  # 基础表达概率
-
-                    # 根据亚类调整表达概率
-                    if gene_type == 'IT' and 'IT' in cell_subclass:
-                        expr_prob = 0.9
-                    elif gene_type == 'ET' and 'ET' in cell_subclass:
-                        expr_prob = 0.9
-                    elif gene_type == 'CT' and 'CT' in cell_subclass:
-                        expr_prob = 0.9
-
-                    for gene in genes:
-                        gene_expr[gene] = 1 if np.random.random() < expr_prob else 0
-
-                # 添加GABAergic标记基因
-                if cell_class == 'GABAergic':
-                    if 'Pvalb' in cell_subclass:
-                        gene_expr['Pvalb'] = 1
-                    if 'Sst' in cell_subclass:
-                        gene_expr['Sst'] = 1
-                    if 'Vip' in cell_subclass:
-                        gene_expr['Vip'] = 1
-                    if 'Lamp5' in cell_subclass:
-                        gene_expr['Lamp5'] = 1
-
-                # 基本细胞属性
-                cell_data = {
-                    'id': f"{region_acronym}_{layer}_{i}",
-                    'region': region_acronym,
-                    'layer': layer,
-                    'x': np.random.random() * 1000,
-                    'y': np.random.random() * 1000,
-                    'z': np.random.random() * 100,
-                    'class': cell_class,
-                    'subclass': cell_subclass,
-                    'cluster': f"{cell_subclass}_{np.random.randint(1, 5)}"
-                }
-
-                # 合并基因表达数据
-                cell_data.update(gene_expr)
-
-                rows.append(cell_data)
-
-        return pd.DataFrame(rows)
 
     def assign_layer_to_cells(self, cell_df: pd.DataFrame, region_name: str) -> pd.DataFrame:
         """为细胞分配层信息"""
@@ -387,6 +381,436 @@ class MERFISHDataIntegration:
 
         return 'UNK'
 
+    def calculate_gene_coexpression(self, cell_df: pd.DataFrame,
+                                    core_genes: List[str] = None) -> pd.DataFrame:
+        """计算基因间共表达关系"""
+        logger.info("计算基因共表达关系...")
+
+        # 如果未指定核心基因，使用投射类型标记基因
+        if core_genes is None:
+            core_genes = []
+            for genes in self.projection_markers.values():
+                core_genes.extend(genes)
+            # 添加一些重要的神经元类型标记基因
+            core_genes.extend(['Pvalb', 'Sst', 'Vip', 'Lamp5', 'Chodl', 'Calb2', 'Nos1'])
+            # 添加Fezf2模块基因
+            core_genes.extend(['Fezf2', 'Sox5', 'Zfpm2', 'Rxfp1', 'Ctgf'])
+            # 去重
+            core_genes = list(set(core_genes))
+
+        # 筛选细胞数据中存在的基因列
+        available_genes = [gene for gene in core_genes if gene in cell_df.columns]
+
+        if len(available_genes) < 2:
+            logger.warning(f"可用基因数量不足，无法计算共表达关系。找到{len(available_genes)}个基因。")
+            return pd.DataFrame()
+
+        logger.info(f"使用{len(available_genes)}个基因计算共表达关系")
+
+        # 提取基因表达数据
+        gene_expr = cell_df[available_genes]
+
+        # 计算Spearman相关系数
+        corr_matrix = gene_expr.corr(method='spearman')
+
+        # 计算p值
+        p_values = pd.DataFrame(index=corr_matrix.index, columns=corr_matrix.columns)
+
+        for i, gene1 in enumerate(available_genes):
+            for j, gene2 in enumerate(available_genes):
+                if i >= j:  # 只计算矩阵的上三角部分
+                    continue
+
+                # 获取非零表达值
+                mask = (gene_expr[gene1].notna()) & (gene_expr[gene2].notna())
+                x = gene_expr.loc[mask, gene1]
+                y = gene_expr.loc[mask, gene2]
+
+                if len(x) > 5:  # 确保有足够的数据点
+                    _, p_value = stats.spearmanr(x, y)
+                    p_values.loc[gene1, gene2] = p_value
+                    p_values.loc[gene2, gene1] = p_value
+                else:
+                    p_values.loc[gene1, gene2] = np.nan
+                    p_values.loc[gene2, gene1] = np.nan
+
+        # 计算FDR校正的p值
+        flat_p_values = p_values.values[np.triu_indices_from(p_values.values, k=1)]
+        flat_p_values = flat_p_values[~np.isnan(flat_p_values)]
+
+        if len(flat_p_values) > 0:
+            # 执行FDR校正
+            try:
+                _, flat_fdr = stats.false_discovery_control(flat_p_values)
+
+                # 重建FDR矩阵
+                fdr_values = pd.DataFrame(np.nan, index=p_values.index, columns=p_values.columns)
+                idx = 0
+                for i in range(len(available_genes)):
+                    for j in range(i + 1, len(available_genes)):
+                        if not np.isnan(p_values.iloc[i, j]):
+                            fdr_values.iloc[i, j] = flat_fdr[idx]
+                            fdr_values.iloc[j, i] = flat_fdr[idx]
+                            idx += 1
+            except:
+                # 如果stats.false_discovery_control不可用，使用简单的Bonferroni校正
+                fdr_values = p_values.copy() * len(flat_p_values)
+                fdr_values = fdr_values.clip(upper=1.0)
+        else:
+            fdr_values = pd.DataFrame(np.nan, index=p_values.index, columns=p_values.columns)
+
+        # 转换为边列表格式
+        coexpr_edges = []
+
+        for i, gene1 in enumerate(available_genes):
+            for j, gene2 in enumerate(available_genes):
+                if i >= j:  # 只使用矩阵的上三角部分
+                    continue
+
+                rho = corr_matrix.loc[gene1, gene2]
+                p_val = p_values.loc[gene1, gene2]
+                fdr = fdr_values.loc[gene1, gene2]
+
+                if pd.notna(rho) and pd.notna(p_val) and pd.notna(fdr):
+                    coexpr_edges.append({
+                        'gene1': gene1,
+                        'gene2': gene2,
+                        'rho': rho,
+                        'p_value': p_val,
+                        'fdr': fdr
+                    })
+
+        # 转换为DataFrame
+        result_df = pd.DataFrame(coexpr_edges)
+
+        # 按相关系数绝对值排序
+        if not result_df.empty:
+            result_df['abs_rho'] = result_df['rho'].abs()
+            result_df = result_df.sort_values('abs_rho', ascending=False)
+            result_df = result_df.drop('abs_rho', axis=1)
+
+        return result_df
+
+    def calculate_gene_expression_by_regionlayer(self, cell_df: pd.DataFrame) -> pd.DataFrame:
+        """计算每个RegionLayer中基因的平均表达量"""
+        logger.info("计算RegionLayer基因表达...")
+
+        # 首先确定哪些列是基因
+        all_columns = set(cell_df.columns)
+        non_gene_columns = {'cell_id', 'region', 'layer', 'x', 'y', 'z', 'depth',
+                            'class', 'subclass', 'cluster', 'relative_depth',
+                            'proj_type', 'depth_position'}
+
+        gene_columns = list(all_columns - non_gene_columns)
+
+        # 检查是否有基因列
+        if not gene_columns:
+            logger.warning("未找到基因表达列，无法计算RegionLayer基因表达")
+            return pd.DataFrame()
+
+        # 对数据进行分组并计算平均表达量
+        logger.info(f"计算{len(gene_columns)}个基因在各RegionLayer的平均表达量")
+
+        # 按region和layer分组
+        grouped = cell_df.groupby(['region', 'layer'])
+
+        # 初始化结果列表
+        results = []
+
+        # 为每个region-layer计算基因表达
+        for (region, layer), group in grouped:
+            rl_id = f"{region}_{layer}"
+
+            # 计算每个基因的平均表达量（使用logCPM值或原始值）
+            for gene in gene_columns:
+                expr_values = group[gene].dropna()
+
+                if len(expr_values) > 0:
+                    # 计算平均值
+                    mean_expr = expr_values.mean()
+
+                    # 只保留有表达的基因
+                    if mean_expr > 0:
+                        results.append({
+                            'rl_id': rl_id,
+                            'region': region,
+                            'layer': layer,
+                            'gene': gene,
+                            'mean_logCPM': mean_expr,
+                            'n_cells': len(expr_values)
+                        })
+
+        return pd.DataFrame(results)
+
+    def calculate_gene_coexpression(self, cell_df: pd.DataFrame,
+                                    core_genes: List[str] = None) -> pd.DataFrame:
+        """计算基因间共表达关系"""
+        logger.info("计算基因共表达关系...")
+
+        # 如果未指定核心基因，使用投射类型标记基因
+        if core_genes is None:
+            core_genes = []
+            for genes in self.projection_markers.values():
+                core_genes.extend(genes)
+            # 添加一些重要的神经元类型标记基因
+            core_genes.extend(['Pvalb', 'Sst', 'Vip', 'Lamp5', 'Chodl', 'Calb2', 'Nos1'])
+            # 添加Fezf2模块基因
+            core_genes.extend(['Fezf2', 'Sox5', 'Zfpm2', 'Rxfp1', 'Ctgf'])
+            # 去重
+            core_genes = list(set(core_genes))
+
+        # 筛选细胞数据中存在的基因列
+        available_genes = [gene for gene in core_genes if gene in cell_df.columns]
+
+        if len(available_genes) < 2:
+            logger.warning(f"可用基因数量不足，无法计算共表达关系。找到{len(available_genes)}个基因。")
+            return pd.DataFrame()
+
+        logger.info(f"使用{len(available_genes)}个基因计算共表达关系")
+
+        # 提取基因表达数据
+        gene_expr = cell_df[available_genes]
+
+        # 计算Spearman相关系数
+        corr_matrix = gene_expr.corr(method='spearman')
+
+        # 计算p值
+        p_values = pd.DataFrame(index=corr_matrix.index, columns=corr_matrix.columns)
+
+        for i, gene1 in enumerate(available_genes):
+            for j, gene2 in enumerate(available_genes):
+                if i >= j:  # 只计算矩阵的上三角部分
+                    continue
+
+                # 获取非零表达值
+                mask = (gene_expr[gene1].notna()) & (gene_expr[gene2].notna())
+                x = gene_expr.loc[mask, gene1]
+                y = gene_expr.loc[mask, gene2]
+
+                if len(x) > 5:  # 确保有足够的数据点
+                    rho, p_value = stats.spearmanr(x, y)
+                    p_values.loc[gene1, gene2] = p_value
+                    p_values.loc[gene2, gene1] = p_value
+                else:
+                    p_values.loc[gene1, gene2] = np.nan
+                    p_values.loc[gene2, gene1] = np.nan
+
+        # 计算FDR校正的p值
+        flat_p_values = p_values.values[np.triu_indices_from(p_values.values, k=1)]
+        flat_p_values = flat_p_values[~np.isnan(flat_p_values)]
+
+        if len(flat_p_values) > 0:
+            # 执行FDR校正
+            try:
+                _, flat_fdr = stats.false_discovery_control(flat_p_values)
+
+                # 重建FDR矩阵
+                fdr_values = pd.DataFrame(np.nan, index=p_values.index, columns=p_values.columns)
+                idx = 0
+                for i in range(len(available_genes)):
+                    for j in range(i + 1, len(available_genes)):
+                        if not np.isnan(p_values.iloc[i, j]):
+                            fdr_values.iloc[i, j] = flat_fdr[idx]
+                            fdr_values.iloc[j, i] = flat_fdr[idx]
+                            idx += 1
+            except:
+                # 如果stats.false_discovery_control不可用，使用Benjamini-Hochberg校正
+                sorted_idx = np.argsort(flat_p_values)
+                sorted_p = flat_p_values[sorted_idx]
+
+                # Benjamini-Hochberg校正
+                n = len(sorted_p)
+                bh_thresholds = np.arange(1, n + 1) / n * 0.05
+                significant = sorted_p <= bh_thresholds
+
+                # 找到最大显著索引
+                max_idx = np.max(np.where(significant)[0]) if any(significant) else -1
+
+                # 计算校正后的p值
+                flat_fdr = np.ones_like(flat_p_values)
+                flat_fdr[sorted_idx[:max_idx + 1]] = sorted_p[:max_idx + 1]
+
+                # 重建FDR矩阵
+                fdr_values = pd.DataFrame(np.nan, index=p_values.index, columns=p_values.columns)
+                idx = 0
+                for i in range(len(available_genes)):
+                    for j in range(i + 1, len(available_genes)):
+                        if not np.isnan(p_values.iloc[i, j]):
+                            fdr_values.iloc[i, j] = flat_fdr[idx]
+                            fdr_values.iloc[j, i] = flat_fdr[idx]
+                            idx += 1
+        else:
+            fdr_values = pd.DataFrame(np.nan, index=p_values.index, columns=p_values.columns)
+
+        # 转换为边列表格式
+        coexpr_edges = []
+
+        for i, gene1 in enumerate(available_genes):
+            for j, gene2 in enumerate(available_genes):
+                if i >= j:  # 只使用矩阵的上三角部分
+                    continue
+
+                rho = corr_matrix.loc[gene1, gene2]
+                p_val = p_values.loc[gene1, gene2]
+                fdr = fdr_values.loc[gene1, gene2]
+
+                if pd.notna(rho) and pd.notna(p_val) and pd.notna(fdr):
+                    coexpr_edges.append({
+                        'gene1': gene1,
+                        'gene2': gene2,
+                        'rho': float(rho),  # 确保是Python原生类型
+                        'p_value': float(p_val),
+                        'fdr': float(fdr)
+                    })
+
+        # 转换为DataFrame
+        result_df = pd.DataFrame(coexpr_edges)
+
+        # 按相关系数绝对值排序
+        if not result_df.empty:
+            result_df['abs_rho'] = result_df['rho'].abs()
+            result_df = result_df.sort_values('abs_rho', ascending=False)
+            result_df = result_df.drop('abs_rho', axis=1)
+
+        return result_df
+
+    def export_transcriptomic_relationships(self, distributions: Dict[str, Dict[str, Any]],
+                                            region_id_map: Dict[str, str] = None) -> Dict[str, pd.DataFrame]:
+        """导出转录组关系数据为CSV文件"""
+        logger.info("导出转录组关系数据...")
+
+        # 创建各关系类型的空DataFrame
+        relationship_dfs = {
+            'has_class': pd.DataFrame(columns=['rl_id', 'class_name', 'pct_cells', 'rank', 'n_cells']),
+            'has_subclass': pd.DataFrame(
+                columns=['rl_id', 'subclass_name', 'pct_cells', 'rank', 'n_cells', 'proj_type']),
+            'has_cluster': pd.DataFrame(columns=['rl_id', 'cluster_name', 'pct_cells', 'rank', 'n_cells'])
+        }
+
+        # RegionLayer节点属性
+        region_layer_df = pd.DataFrame(columns=['rl_id', 'region_name', 'layer', 'region_id',
+                                                'it_pct', 'et_pct', 'ct_pct', 'lr_pct', 'lr_prior', 'total_cells'])
+
+        # 导出亚类-投射类型映射
+        subclass_projtype_df = pd.DataFrame(columns=['subclass_name', 'proj_type'])
+        subclass_projtype_map = {}
+
+        # 将分布数据转换为DataFrame
+        for rl_id, dist_data in distributions.items():
+            # RegionLayer属性
+            region_name = dist_data.get('region_name', '')
+            layer = dist_data.get('layer', '')
+            region_id = region_id_map.get(region_name, '') if region_id_map else ''
+
+            region_layer_df = pd.concat([region_layer_df, pd.DataFrame([{
+                'rl_id': rl_id,
+                'region_name': region_name,
+                'layer': layer,
+                'region_id': region_id,
+                'it_pct': dist_data.get('it_pct', 0.0),
+                'et_pct': dist_data.get('et_pct', 0.0),
+                'ct_pct': dist_data.get('ct_pct', 0.0),
+                'lr_pct': dist_data.get('lr_pct', 0.0),
+                'lr_prior': dist_data.get('lr_prior', 0.0),
+                'total_cells': dist_data.get('total_cells', 0)
+            }])], ignore_index=True)
+
+            # 处理Class关系
+            if 'classes' in dist_data:
+                for class_info in dist_data['classes']:
+                    relationship_dfs['has_class'] = pd.concat([relationship_dfs['has_class'], pd.DataFrame([{
+                        'rl_id': rl_id,
+                        'class_name': class_info['class_name'],
+                        'pct_cells': class_info['pct_cells'],
+                        'rank': class_info['rank'],
+                        'n_cells': class_info['count']
+                    }])], ignore_index=True)
+
+            # 处理Subclass关系
+            if 'subclasses' in dist_data:
+                for subclass_info in dist_data['subclasses']:
+                    relationship_dfs['has_subclass'] = pd.concat([relationship_dfs['has_subclass'], pd.DataFrame([{
+                        'rl_id': rl_id,
+                        'subclass_name': subclass_info['subclass_name'],
+                        'pct_cells': subclass_info['pct_cells'],
+                        'rank': subclass_info['rank'],
+                        'n_cells': subclass_info['count'],
+                        'proj_type': subclass_info['proj_type']
+                    }])], ignore_index=True)
+
+                    # 更新亚类-投射类型映射
+                    subclass_name = subclass_info['subclass_name']
+                    proj_type = subclass_info['proj_type']
+
+                    if subclass_name not in subclass_projtype_map:
+                        subclass_projtype_map[subclass_name] = proj_type
+                        subclass_projtype_df = pd.concat([subclass_projtype_df, pd.DataFrame([{
+                            'subclass_name': subclass_name,
+                            'proj_type': proj_type
+                        }])], ignore_index=True)
+
+            # 处理Cluster关系
+            if 'clusters' in dist_data:
+                for cluster_info in dist_data['clusters']:
+                    relationship_dfs['has_cluster'] = pd.concat([relationship_dfs['has_cluster'], pd.DataFrame([{
+                        'rl_id': rl_id,
+                        'cluster_name': cluster_info['cluster_name'],
+                        'pct_cells': cluster_info['pct_cells'],
+                        'rank': cluster_info['rank'],
+                        'n_cells': cluster_info['count']
+                    }])], ignore_index=True)
+
+        # 保存到CSV文件
+        output_files = {}
+
+        for rel_type, df in relationship_dfs.items():
+            if not df.empty:
+                output_file = self.output_dir / f"{rel_type}.csv"
+                df.to_csv(output_file, index=False)
+                output_files[rel_type] = output_file
+                logger.info(f"已导出{len(df)}条{rel_type}关系到{output_file}")
+
+        # 保存RegionLayer属性
+        if not region_layer_df.empty:
+            rl_output_file = self.output_dir / "region_layer_props.csv"
+            region_layer_df.to_csv(rl_output_file, index=False)
+            output_files['region_layer_props'] = rl_output_file
+            logger.info(f"已导出{len(region_layer_df)}个RegionLayer属性到{rl_output_file}")
+
+        # 保存亚类-投射类型映射
+        if not subclass_projtype_df.empty:
+            proj_type_file = self.output_dir / "subclass_projtype.csv"
+            subclass_projtype_df.to_csv(proj_type_file, index=False)
+            output_files['subclass_projtype'] = proj_type_file
+            logger.info(f"已导出{len(subclass_projtype_df)}个亚类-投射类型映射到{proj_type_file}")
+
+        # 导出基因共表达关系
+        # 从每个区域收集细胞数据
+        all_cells = []
+        for region in set(region_layer_df['region_name']):
+            try:
+                cells = self.load_merfish_data(region)
+                all_cells.append(cells)
+                logger.info(f"从{region}加载了{len(cells)}个细胞用于计算基因共表达")
+            except Exception as e:
+                logger.warning(f"无法加载{region}的细胞数据: {e}")
+
+        if all_cells:
+            # 合并所有细胞数据
+            all_cells_df = pd.concat(all_cells, ignore_index=True)
+            logger.info(f"共合并{len(all_cells_df)}个细胞数据计算基因共表达")
+
+            # 计算共表达关系
+            coexpr_df = self.calculate_gene_coexpression(all_cells_df)
+
+            if not coexpr_df.empty:
+                # 保存共表达关系
+                coexpr_file = self.output_dir / "gene_coexpression.csv"
+                coexpr_df.to_csv(coexpr_file, index=False)
+                output_files['gene_coexpression'] = coexpr_file
+                logger.info(f"已导出{len(coexpr_df)}条基因共表达关系到{coexpr_file}")
+
+        return output_files
     def calculate_cell_type_distribution(self, region_name: str) -> Dict[str, Dict[str, float]]:
         """计算特定脑区各层的细胞类型分布"""
         # 加载MERFISH数据
@@ -401,6 +825,26 @@ class MERFISHDataIntegration:
 
         # 添加投射类型
         cell_df['proj_type'] = cell_df.apply(self.determine_projection_type, axis=1)
+
+        # 计算基因共表达关系
+        try:
+            gene_coexpr_df = self.calculate_gene_coexpression(cell_df)
+            if not gene_coexpr_df.empty:
+                coexpr_file = self.output_dir / f"{region_name}_gene_coexpression.csv"
+                gene_coexpr_df.to_csv(coexpr_file, index=False)
+                logger.info(f"保存{len(gene_coexpr_df)}条基因共表达关系到{coexpr_file}")
+        except Exception as e:
+            logger.error(f"计算{region_name}的基因共表达关系失败: {e}")
+
+        # 计算RegionLayer基因表达
+        try:
+            gene_expr_df = self.calculate_gene_expression_by_regionlayer(cell_df)
+            if not gene_expr_df.empty:
+                expr_file = self.output_dir / f"{region_name}_gene_expression.csv"
+                gene_expr_df.to_csv(expr_file, index=False)
+                logger.info(f"保存{len(gene_expr_df)}条RegionLayer基因表达数据到{expr_file}")
+        except Exception as e:
+            logger.error(f"计算{region_name}的RegionLayer基因表达失败: {e}")
 
         # 计算每层的细胞类型分布
         distributions = {}
@@ -644,6 +1088,52 @@ class MERFISHDataIntegration:
             subclass_projtype_df.to_csv(proj_type_file, index=False)
             output_files['subclass_projtype'] = proj_type_file
             logger.info(f"已导出{len(subclass_projtype_df)}个亚类-投射类型映射到{proj_type_file}")
+
+        # 汇总所有区域的基因共表达关系
+        try:
+            coexpr_files = list(self.output_dir.glob("*_gene_coexpression.csv"))
+            if coexpr_files:
+                all_coexpr_dfs = []
+                for file in coexpr_files:
+                    coexpr_df = pd.read_csv(file)
+                    all_coexpr_dfs.append(coexpr_df)
+
+                if all_coexpr_dfs:
+                    combined_coexpr = pd.concat(all_coexpr_dfs, ignore_index=True)
+                    # 按gene1, gene2分组并取平均值
+                    grouped = combined_coexpr.groupby(['gene1', 'gene2']).agg({
+                        'rho': 'mean',
+                        'p_value': 'min',
+                        'fdr': 'min'
+                    }).reset_index()
+
+                    # 保存汇总的共表达关系
+                    coexpr_output = self.output_dir / "gene_coexpression.csv"
+                    grouped.to_csv(coexpr_output, index=False)
+                    output_files['gene_coexpression'] = coexpr_output
+                    logger.info(f"已导出{len(grouped)}条合并的基因共表达关系到{coexpr_output}")
+        except Exception as e:
+            logger.error(f"汇总基因共表达关系失败: {e}")
+
+        # 汇总所有区域的基因表达数据
+        try:
+            expr_files = list(self.output_dir.glob("*_gene_expression.csv"))
+            if expr_files:
+                all_expr_dfs = []
+                for file in expr_files:
+                    expr_df = pd.read_csv(file)
+                    all_expr_dfs.append(expr_df)
+
+                if all_expr_dfs:
+                    combined_expr = pd.concat(all_expr_dfs, ignore_index=True)
+
+                    # 保存汇总的基因表达数据
+                    expr_output = self.output_dir / "gene_expression.csv"
+                    combined_expr.to_csv(expr_output, index=False)
+                    output_files['gene_expression'] = expr_output
+                    logger.info(f"已导出{len(combined_expr)}条合并的基因表达数据到{expr_output}")
+        except Exception as e:
+            logger.error(f"汇总基因表达数据失败: {e}")
 
         return output_files
 

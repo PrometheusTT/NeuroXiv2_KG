@@ -734,200 +734,398 @@ class KnowledgeGraphRestructure:
                         rel_id_counter += 1
 
         # 如果没有真实数据或处理失败，确保每个RegionLayer至少有一些基本关系
-        if not relationships:
-            logger.warning("没有MERFISH数据或处理失败，创建基本转录组关系...")
-
-            # 创建转录组类型映射
-            tc_types = {'Class': [], 'Subclass': [], 'Supertype': [], 'Cluster': []}
-            for tc_node in transcriptomic_nodes:
-                for label in tc_node.get('labels', []):
-                    if label in tc_types:
-                        tc_types[label].append(tc_node)
-
-            # 确保每个RegionLayer至少有一些Class和Subclass关系
-            for rl_node in tqdm(region_layer_nodes, desc="创建基本转录组关系"):
-                region_name = rl_node['properties'].get('region_name', '')
-                layer = rl_node['properties'].get('layer', '')
-
-                # 层特异性选择
-                if layer == 'L2/3':
-                    # L2/3倾向于IT神经元
-                    it_weight = 0.8
-                    et_weight = 0.1
-                    ct_weight = 0.1
-                elif layer == 'L5':
-                    # L5包含更多ET神经元
-                    it_weight = 0.4
-                    et_weight = 0.5
-                    ct_weight = 0.1
-                elif layer == 'L6':
-                    # L6包含更多CT神经元
-                    it_weight = 0.3
-                    et_weight = 0.2
-                    ct_weight = 0.5
-                else:
-                    # 其他层的默认权重
-                    it_weight = 0.5
-                    et_weight = 0.3
-                    ct_weight = 0.2
-
-                # 根据区域调整权重
-                if 'VIS' in region_name:
-                    # 视觉区域有更多的IT和ET神经元
-                    it_weight *= 1.2
-                    et_weight *= 1.2
-                    ct_weight *= 0.6
-                elif 'MO' in region_name:
-                    # 运动区域有更多的ET神经元
-                    it_weight *= 0.9
-                    et_weight *= 1.3
-                    ct_weight *= 0.8
-
-                # 确保权重总和为1
-                total_weight = it_weight + et_weight + ct_weight
-                it_weight /= total_weight
-                et_weight /= total_weight
-                ct_weight /= total_weight
-
-                # 为每个类型创建关系
-                for tc_type, nodes in tc_types.items():
-                    if not nodes:
-                        continue
-
-                    # 选择节点数量，但不超过可用节点数
-                    rel_type = f"HAS_{tc_type.upper()}"
-
-                    if tc_type == 'Class':
-                        # 为每个Class创建关系
-                        for rank, tc_node in enumerate(nodes[:3], 1):
-                            pct = 0.0
-
-                            # 根据Class名称调整百分比
-                            class_name = tc_node['properties'].get('name', '')
-                            if 'Glutamatergic' in class_name:
-                                pct = 0.7  # 谷氨酸能神经元占主导
-                            elif 'GABAergic' in class_name:
-                                pct = 0.2  # GABA能神经元次之
-                            else:
-                                pct = 0.1  # 其他类型较少
-
-                            rel = {
-                                'type': 'relationship',
-                                'id': str(rel_id_counter),
-                                'label': rel_type,
-                                'properties': {
-                                    'pct_cells': pct,
-                                    'rank': rank,
-                                    'n_cells': int(100 * pct)  # 假设每个RegionLayer有100个细胞
-                                },
-                                'start': rl_node,
-                                'end': tc_node
-                            }
-                            relationships.append(rel)
-                            rel_id_counter += 1
-
-                    elif tc_type == 'Subclass':
-                        # 选择一些Subclass节点
-                        selected_nodes = []
-
-                        # 根据投射类型分类Subclass
-                        it_nodes = []
-                        et_nodes = []
-                        ct_nodes = []
-                        other_nodes = []
-
-                        for node in nodes:
-                            proj_type = node['properties'].get('proj_type', 'UNK')
-                            if proj_type == 'IT':
-                                it_nodes.append(node)
-                            elif proj_type == 'ET':
-                                et_nodes.append(node)
-                            elif proj_type == 'CT':
-                                ct_nodes.append(node)
-                            else:
-                                other_nodes.append(node)
-
-                        # 根据权重选择不同投射类型的Subclass
-                        num_it = max(1, min(3, int(len(it_nodes))))
-                        num_et = max(1, min(2, int(len(et_nodes))))
-                        num_ct = max(1, min(2, int(len(ct_nodes))))
-
-                        if it_nodes:
-                            selected_nodes.extend(np.random.choice(it_nodes, num_it, replace=False))
-                        if et_nodes:
-                            selected_nodes.extend(np.random.choice(et_nodes, num_et, replace=False))
-                        if ct_nodes:
-                            selected_nodes.extend(np.random.choice(ct_nodes, num_ct, replace=False))
-
-                        # 如果选择的节点太少，添加一些其他节点
-                        if len(selected_nodes) < 3 and other_nodes:
-                            num_other = min(3 - len(selected_nodes), len(other_nodes))
-                            selected_nodes.extend(np.random.choice(other_nodes, num_other, replace=False))
-
-                        # 创建关系，根据投射类型分配百分比
-                        for rank, tc_node in enumerate(selected_nodes, 1):
-                            proj_type = tc_node['properties'].get('proj_type', 'UNK')
-
-                            # 根据投射类型和层分配百分比
-                            if proj_type == 'IT':
-                                base_pct = it_weight / num_it
-                            elif proj_type == 'ET':
-                                base_pct = et_weight / num_et
-                            elif proj_type == 'CT':
-                                base_pct = ct_weight / num_ct
-                            else:
-                                base_pct = 0.1 / len(selected_nodes)
-
-                            # 添加一些随机变化
-                            pct = min(0.8, max(0.01, base_pct * (0.8 + 0.4 * np.random.random())))
-
-                            rel = {
-                                'type': 'relationship',
-                                'id': str(rel_id_counter),
-                                'label': rel_type,
-                                'properties': {
-                                    'pct_cells': pct,
-                                    'rank': rank,
-                                    'n_cells': int(100 * pct),
-                                    'proj_type': proj_type
-                                },
-                                'start': rl_node,
-                                'end': tc_node
-                            }
-                            relationships.append(rel)
-                            rel_id_counter += 1
-
-                    elif tc_type == 'Cluster':
-                        # 为一些Cluster创建关系
-                        num_clusters = min(5, len(nodes))
-                        selected_nodes = np.random.choice(nodes, num_clusters, replace=False)
-
-                        for rank, tc_node in enumerate(selected_nodes, 1):
-                            # Cluster的百分比较小
-                            pct = min(0.2, max(0.01, 0.05 + 0.15 * np.random.random()))
-
-                            rel = {
-                                'type': 'relationship',
-                                'id': str(rel_id_counter),
-                                'label': rel_type,
-                                'properties': {
-                                    'pct_cells': pct,
-                                    'rank': rank,
-                                    'n_cells': int(100 * pct)
-                                },
-                                'start': rl_node,
-                                'end': tc_node
-                            }
-                            relationships.append(rel)
-                            rel_id_counter += 1
+        # if not relationships:
+        #     logger.warning("没有MERFISH数据或处理失败，创建基本转录组关系...")
+        #
+        #     # 创建转录组类型映射
+        #     tc_types = {'Class': [], 'Subclass': [], 'Supertype': [], 'Cluster': []}
+        #     for tc_node in transcriptomic_nodes:
+        #         for label in tc_node.get('labels', []):
+        #             if label in tc_types:
+        #                 tc_types[label].append(tc_node)
+        #
+        #     # 确保每个RegionLayer至少有一些Class和Subclass关系
+        #     for rl_node in tqdm(region_layer_nodes, desc="创建基本转录组关系"):
+        #         region_name = rl_node['properties'].get('region_name', '')
+        #         layer = rl_node['properties'].get('layer', '')
+        #
+        #         # 层特异性选择
+        #         if layer == 'L2/3':
+        #             # L2/3倾向于IT神经元
+        #             it_weight = 0.8
+        #             et_weight = 0.1
+        #             ct_weight = 0.1
+        #         elif layer == 'L5':
+        #             # L5包含更多ET神经元
+        #             it_weight = 0.4
+        #             et_weight = 0.5
+        #             ct_weight = 0.1
+        #         elif layer == 'L6':
+        #             # L6包含更多CT神经元
+        #             it_weight = 0.3
+        #             et_weight = 0.2
+        #             ct_weight = 0.5
+        #         else:
+        #             # 其他层的默认权重
+        #             it_weight = 0.5
+        #             et_weight = 0.3
+        #             ct_weight = 0.2
+        #
+        #         # 根据区域调整权重
+        #         if 'VIS' in region_name:
+        #             # 视觉区域有更多的IT和ET神经元
+        #             it_weight *= 1.2
+        #             et_weight *= 1.2
+        #             ct_weight *= 0.6
+        #         elif 'MO' in region_name:
+        #             # 运动区域有更多的ET神经元
+        #             it_weight *= 0.9
+        #             et_weight *= 1.3
+        #             ct_weight *= 0.8
+        #
+        #         # 确保权重总和为1
+        #         total_weight = it_weight + et_weight + ct_weight
+        #         it_weight /= total_weight
+        #         et_weight /= total_weight
+        #         ct_weight /= total_weight
+        #
+        #         # 为每个类型创建关系
+        #         for tc_type, nodes in tc_types.items():
+        #             if not nodes:
+        #                 continue
+        #
+        #             # 选择节点数量，但不超过可用节点数
+        #             rel_type = f"HAS_{tc_type.upper()}"
+        #
+        #             if tc_type == 'Class':
+        #                 # 为每个Class创建关系
+        #                 for rank, tc_node in enumerate(nodes[:3], 1):
+        #                     pct = 0.0
+        #
+        #                     # 根据Class名称调整百分比
+        #                     class_name = tc_node['properties'].get('name', '')
+        #                     if 'Glutamatergic' in class_name:
+        #                         pct = 0.7  # 谷氨酸能神经元占主导
+        #                     elif 'GABAergic' in class_name:
+        #                         pct = 0.2  # GABA能神经元次之
+        #                     else:
+        #                         pct = 0.1  # 其他类型较少
+        #
+        #                     rel = {
+        #                         'type': 'relationship',
+        #                         'id': str(rel_id_counter),
+        #                         'label': rel_type,
+        #                         'properties': {
+        #                             'pct_cells': pct,
+        #                             'rank': rank,
+        #                             'n_cells': int(100 * pct)  # 假设每个RegionLayer有100个细胞
+        #                         },
+        #                         'start': rl_node,
+        #                         'end': tc_node
+        #                     }
+        #                     relationships.append(rel)
+        #                     rel_id_counter += 1
+        #
+        #             elif tc_type == 'Subclass':
+        #                 # 选择一些Subclass节点
+        #                 selected_nodes = []
+        #
+        #                 # 根据投射类型分类Subclass
+        #                 it_nodes = []
+        #                 et_nodes = []
+        #                 ct_nodes = []
+        #                 other_nodes = []
+        #
+        #                 for node in nodes:
+        #                     proj_type = node['properties'].get('proj_type', 'UNK')
+        #                     if proj_type == 'IT':
+        #                         it_nodes.append(node)
+        #                     elif proj_type == 'ET':
+        #                         et_nodes.append(node)
+        #                     elif proj_type == 'CT':
+        #                         ct_nodes.append(node)
+        #                     else:
+        #                         other_nodes.append(node)
+        #
+        #                 # 根据权重选择不同投射类型的Subclass
+        #                 num_it = max(1, min(3, int(len(it_nodes))))
+        #                 num_et = max(1, min(2, int(len(et_nodes))))
+        #                 num_ct = max(1, min(2, int(len(ct_nodes))))
+        #
+        #                 if it_nodes:
+        #                     selected_nodes.extend(np.random.choice(it_nodes, num_it, replace=False))
+        #                 if et_nodes:
+        #                     selected_nodes.extend(np.random.choice(et_nodes, num_et, replace=False))
+        #                 if ct_nodes:
+        #                     selected_nodes.extend(np.random.choice(ct_nodes, num_ct, replace=False))
+        #
+        #                 # 如果选择的节点太少，添加一些其他节点
+        #                 if len(selected_nodes) < 3 and other_nodes:
+        #                     num_other = min(3 - len(selected_nodes), len(other_nodes))
+        #                     selected_nodes.extend(np.random.choice(other_nodes, num_other, replace=False))
+        #
+        #                 # 创建关系，根据投射类型分配百分比
+        #                 for rank, tc_node in enumerate(selected_nodes, 1):
+        #                     proj_type = tc_node['properties'].get('proj_type', 'UNK')
+        #
+        #                     # 根据投射类型和层分配百分比
+        #                     if proj_type == 'IT':
+        #                         base_pct = it_weight / num_it
+        #                     elif proj_type == 'ET':
+        #                         base_pct = et_weight / num_et
+        #                     elif proj_type == 'CT':
+        #                         base_pct = ct_weight / num_ct
+        #                     else:
+        #                         base_pct = 0.1 / len(selected_nodes)
+        #
+        #                     # 添加一些随机变化
+        #                     pct = min(0.8, max(0.01, base_pct * (0.8 + 0.4 * np.random.random())))
+        #
+        #                     rel = {
+        #                         'type': 'relationship',
+        #                         'id': str(rel_id_counter),
+        #                         'label': rel_type,
+        #                         'properties': {
+        #                             'pct_cells': pct,
+        #                             'rank': rank,
+        #                             'n_cells': int(100 * pct),
+        #                             'proj_type': proj_type
+        #                         },
+        #                         'start': rl_node,
+        #                         'end': tc_node
+        #                     }
+        #                     relationships.append(rel)
+        #                     rel_id_counter += 1
+        #
+        #             elif tc_type == 'Cluster':
+        #                 # 为一些Cluster创建关系
+        #                 num_clusters = min(5, len(nodes))
+        #                 selected_nodes = np.random.choice(nodes, num_clusters, replace=False)
+        #
+        #                 for rank, tc_node in enumerate(selected_nodes, 1):
+        #                     # Cluster的百分比较小
+        #                     pct = min(0.2, max(0.01, 0.05 + 0.15 * np.random.random()))
+        #
+        #                     rel = {
+        #                         'type': 'relationship',
+        #                         'id': str(rel_id_counter),
+        #                         'label': rel_type,
+        #                         'properties': {
+        #                             'pct_cells': pct,
+        #                             'rank': rank,
+        #                             'n_cells': int(100 * pct)
+        #                         },
+        #                         'start': rl_node,
+        #                         'end': tc_node
+        #                     }
+        #                     relationships.append(rel)
+        #                     rel_id_counter += 1
 
         # 保存缓存
+        if not relationships:
+            logger.error("没有找到MERFISH转录组关系数据。无法继续构建知识图谱。")
+            logger.error("请确保merfish_data_path指向包含has_class.csv、has_subclass.csv和has_cluster.csv的有效目录。")
+            raise ValueError("缺少必要的MERFISH转录组关系数据，无法构建完整知识图谱。")
         with open(cache_file, 'wb') as f:
             pickle.dump(relationships, f)
 
         logger.info(f"创建了{len(relationships)}个转录组关系")
         return relationships
 
+    # Add this function to KnowledgeGraphRestructure.py
+
+    def create_gene_nodes_and_relationships(self, all_nodes: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+        """创建基因节点和共表达关系"""
+        logger.info("创建基因节点和共表达关系...")
+
+        # 新的基因节点和共表达关系
+        new_gene_nodes = []
+        coexpression_relationships = []
+
+        # 用于节点ID和关系ID的计数器
+        node_id_counter = 50000  # 从50000开始避免ID冲突
+        rel_id_counter = 100000  # 从100000开始避免ID冲突
+
+        # 检查是否存在基因共表达数据
+        coexpr_file = None
+        if self.merfish_data_path:
+            coexpr_path = self.merfish_data_path / "gene_coexpression.csv"
+            if coexpr_path.exists():
+                coexpr_file = coexpr_path
+
+        # 如果没有找到共表达文件，无法继续
+        if not coexpr_file:
+            logger.error("未找到基因共表达数据文件 (gene_coexpression.csv)")
+            logger.error(f"在 {self.merfish_data_path} 中查找，但未发现此文件")
+            logger.error("请先运行 MERFISHDataIntegration.py 生成此文件")
+            raise FileNotFoundError(f"缺少必要的基因共表达数据文件: gene_coexpression.csv")
+
+        try:
+            logger.info(f"加载基因共表达数据: {coexpr_file}")
+            coexpr_df = pd.read_csv(coexpr_file)
+
+            if coexpr_df.empty:
+                logger.error("基因共表达数据为空")
+                raise ValueError("基因共表达数据为空，无法创建基因节点和关系")
+
+            # 收集所有涉及的基因
+            all_genes = set()
+            for _, row in coexpr_df.iterrows():
+                gene1 = row.get('gene1')
+                gene2 = row.get('gene2')
+                if pd.notna(gene1) and pd.notna(gene2):
+                    all_genes.add(gene1)
+                    all_genes.add(gene2)
+
+            # 检查已有的基因节点
+            existing_gene_symbols = {}
+            for node in all_nodes:
+                if 'Gene' in node.get('labels', []):
+                    symbol = node['properties'].get('symbol')
+                    if symbol:
+                        existing_gene_symbols[symbol] = node
+
+            # 创建不存在的基因节点
+            for gene in all_genes:
+                if gene not in existing_gene_symbols:
+                    gene_node = {
+                        'type': 'node',
+                        'id': str(node_id_counter),
+                        'labels': ['Gene'],
+                        'properties': {
+                            'symbol': gene,
+                            'name': gene,
+                            'type': 'protein_coding'  # 默认类型
+                        }
+                    }
+                    new_gene_nodes.append(gene_node)
+                    existing_gene_symbols[gene] = gene_node
+                    node_id_counter += 1
+
+            # 创建共表达关系
+            significant_threshold = 0.05  # FDR显著性阈值
+            for _, row in coexpr_df.iterrows():
+                gene1 = row.get('gene1')
+                gene2 = row.get('gene2')
+                rho = row.get('rho')
+                fdr = row.get('fdr', row.get('p_value', 1.0))  # 尝试使用fdr，如果没有就用p值
+
+                # 检查数据有效性
+                if (pd.isna(gene1) or pd.isna(gene2) or pd.isna(rho) or
+                        gene1 not in existing_gene_symbols or gene2 not in existing_gene_symbols):
+                    continue
+
+                # 只保留显著的关系
+                if pd.notna(fdr) and fdr <= significant_threshold:
+                    rel = {
+                        'type': 'relationship',
+                        'id': str(rel_id_counter),
+                        'label': 'COEXPRESSED',
+                        'properties': {
+                            'rho': float(rho),
+                            'fdr': float(fdr),
+                            'significant': fdr <= significant_threshold
+                        },
+                        'start': existing_gene_symbols[gene1],
+                        'end': existing_gene_symbols[gene2]
+                    }
+                    coexpression_relationships.append(rel)
+                    rel_id_counter += 1
+
+            logger.info(f"创建了{len(new_gene_nodes)}个新基因节点和{len(coexpression_relationships)}个共表达关系")
+
+            # 找出Fezf2模块中的基因，用于后续的模块分析
+            fezf2_module = ['Fezf2', 'Bcl11b', 'Crym', 'Sox5', 'Tshz2', 'Foxo1', 'Zfpm2']
+            fezf2_module_genes = [g for g in fezf2_module if g in existing_gene_symbols]
+            logger.info(f"发现{len(fezf2_module_genes)}个Fezf2模块基因: {', '.join(fezf2_module_genes)}")
+
+        except Exception as e:
+            logger.error(f"处理基因共表达数据时出错: {e}")
+            raise
+
+        return new_gene_nodes, coexpression_relationships
+
+    def update_regionlayer_gene_expression(self, region_layer_nodes: List[Dict]) -> None:
+        """更新RegionLayer节点，添加基因表达数据和Fezf2模块平均值"""
+        logger.info("更新RegionLayer基因表达数据...")
+
+        # 检查是否存在基因表达数据
+        expr_file = None
+        if self.merfish_data_path:
+            # 先尝试gene_expression.csv
+            expr_path = self.merfish_data_path / "gene_expression.csv"
+            if expr_path.exists():
+                expr_file = expr_path
+
+            # 如果不存在，尝试从区域特定文件中加载
+            if not expr_file:
+                expr_files = list(self.merfish_data_path.glob("*_gene_expression.csv"))
+                if expr_files:
+                    expr_file = expr_files[0]  # 使用第一个文件
+
+        # 如果没有找到表达文件，无法继续
+        if not expr_file:
+            logger.error("未找到基因表达数据文件 (gene_expression.csv)")
+            logger.error("请先运行 MERFISHDataIntegration.py 生成此文件")
+            raise FileNotFoundError("缺少必要的基因表达数据文件")
+
+        try:
+            logger.info(f"加载基因表达数据: {expr_file}")
+            expr_df = pd.read_csv(expr_file)
+
+            if expr_df.empty:
+                logger.error("基因表达数据为空")
+                raise ValueError("基因表达数据为空，无法更新RegionLayer表达数据")
+
+            # 创建RegionLayer ID到节点的映射
+            rl_map = {}
+            for node in region_layer_nodes:
+                rl_id = node['properties'].get('rl_id')
+                if rl_id:
+                    rl_map[rl_id] = node
+
+            # 按RegionLayer和基因分组计算平均表达
+            grouped_expr = expr_df.groupby(['rl_id', 'gene'])['mean_logCPM'].mean().reset_index()
+
+            # 更新每个RegionLayer节点的基因表达属性
+            updated_count = 0
+            rl_ids_with_expr = set()
+
+            for _, row in grouped_expr.iterrows():
+                rl_id = row['rl_id']
+                gene = row['gene']
+                mean_expr = row['mean_logCPM']
+
+                if rl_id in rl_map and pd.notna(mean_expr):
+                    node = rl_map[rl_id]
+                    # 使用格式 mean_logCPM_{gene} 作为属性名
+                    node['properties'][f'mean_logCPM_{gene}'] = float(mean_expr)
+                    rl_ids_with_expr.add(rl_id)
+
+            # 计算Fezf2模块基因在每个RegionLayer中的平均表达
+            fezf2_module = ['Fezf2', 'Bcl11b', 'Crym', 'Sox5', 'Tshz2', 'Foxo1', 'Zfpm2']
+
+            for rl_id in rl_ids_with_expr:
+                node = rl_map[rl_id]
+                # 收集模块基因表达值
+                module_expr_values = []
+
+                for gene in fezf2_module:
+                    expr_key = f'mean_logCPM_{gene}'
+                    if expr_key in node['properties'] and pd.notna(node['properties'][expr_key]):
+                        module_expr_values.append(node['properties'][expr_key])
+
+                # 如果至少有3个模块基因有表达数据，计算平均值
+                if len(module_expr_values) >= 3:
+                    node['properties']['fezf2_module_mean'] = float(np.mean(module_expr_values))
+                    updated_count += 1
+
+            logger.info(f"更新了{len(rl_ids_with_expr)}个RegionLayer节点的基因表达数据")
+            logger.info(f"计算了{updated_count}个RegionLayer节点的Fezf2模块平均表达值")
+
+        except Exception as e:
+            logger.error(f"处理基因表达数据时出错: {e}")
+            raise
     def update_projection_relationships(self, relationships: List[Dict],
                                         morpho_stats: Dict[str, Dict]) -> None:
         """更新Project_to关系，添加投射类型统计"""
@@ -1079,6 +1277,187 @@ class KnowledgeGraphRestructure:
 
         logger.info(f"更新了{updated_count}个Project_to关系")
 
+    def create_gene_nodes_and_relationships(self, all_nodes: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+        """创建基因节点和共表达关系"""
+        logger.info("创建基因节点和共表达关系...")
+
+        # 新的基因节点和共表达关系
+        new_gene_nodes = []
+        coexpression_relationships = []
+
+        # 用于节点ID和关系ID的计数器
+        node_id_counter = 50000  # 从50000开始避免ID冲突
+        rel_id_counter = 100000  # 从100000开始避免ID冲突
+
+        # 检查是否存在基因共表达数据
+        coexpr_file = None
+        if self.merfish_data_path:
+            coexpr_path = self.merfish_data_path / "gene_coexpression.csv"
+            if coexpr_path.exists():
+                coexpr_file = coexpr_path
+            else:
+                # 尝试查找区域特定的共表达文件
+                files = list(self.merfish_data_path.glob("*_gene_coexpression.csv"))
+                if files:
+                    coexpr_file = files[0]  # 使用第一个找到的文件
+
+        # 如果没有找到共表达文件，尝试在默认位置查找
+        if not coexpr_file:
+            default_path = Path("merfish_output/gene_coexpression.csv")
+            if default_path.exists():
+                coexpr_file = default_path
+
+        # 如果没有共表达数据，返回空结果
+        if not coexpr_file:
+            logger.warning("未找到基因共表达数据，跳过基因关系创建")
+            return [], []
+
+        try:
+            logger.info(f"加载基因共表达数据: {coexpr_file}")
+            coexpr_df = pd.read_csv(coexpr_file)
+
+            # 收集所有涉及的基因
+            all_genes = set()
+            for _, row in coexpr_df.iterrows():
+                gene1 = row.get('gene1')
+                gene2 = row.get('gene2')
+                if pd.notna(gene1) and pd.notna(gene2):
+                    all_genes.add(gene1)
+                    all_genes.add(gene2)
+
+            # 检查已有的基因节点
+            existing_gene_symbols = {}
+            for node in all_nodes:
+                if 'Gene' in node.get('labels', []):
+                    symbol = node['properties'].get('symbol')
+                    if symbol:
+                        existing_gene_symbols[symbol] = node
+
+            # 创建不存在的基因节点
+            for gene in all_genes:
+                if gene not in existing_gene_symbols:
+                    gene_node = {
+                        'type': 'node',
+                        'id': str(node_id_counter),
+                        'labels': ['Gene'],
+                        'properties': {
+                            'symbol': gene,
+                            'name': gene,
+                            'type': 'protein_coding'  # 默认类型
+                        }
+                    }
+                    new_gene_nodes.append(gene_node)
+                    existing_gene_symbols[gene] = gene_node
+                    node_id_counter += 1
+
+            # 创建共表达关系
+            significant_threshold = 0.05  # FDR显著性阈值
+            for _, row in coexpr_df.iterrows():
+                gene1 = row.get('gene1')
+                gene2 = row.get('gene2')
+                rho = row.get('rho')
+                fdr = row.get('fdr')
+
+                # 检查数据有效性
+                if (pd.isna(gene1) or pd.isna(gene2) or pd.isna(rho) or
+                        gene1 not in existing_gene_symbols or gene2 not in existing_gene_symbols):
+                    continue
+
+                # 只保留显著的关系
+                if pd.notna(fdr) and fdr <= significant_threshold:
+                    rel = {
+                        'type': 'relationship',
+                        'id': str(rel_id_counter),
+                        'label': 'COEXPRESSED',
+                        'properties': {
+                            'rho': float(rho),
+                            'fdr': float(fdr),
+                            'significant': fdr <= significant_threshold
+                        },
+                        'start': existing_gene_symbols[gene1],
+                        'end': existing_gene_symbols[gene2]
+                    }
+                    coexpression_relationships.append(rel)
+                    rel_id_counter += 1
+
+            logger.info(f"创建了{len(new_gene_nodes)}个新基因节点和{len(coexpression_relationships)}个共表达关系")
+
+        except Exception as e:
+            logger.error(f"处理基因共表达数据时出错: {e}")
+
+        return new_gene_nodes, coexpression_relationships
+
+    def update_regionlayer_gene_expression(self, region_layer_nodes: List[Dict]) -> None:
+        """更新RegionLayer节点，添加基因表达数据"""
+        logger.info("更新RegionLayer基因表达数据...")
+
+        # 检查是否存在基因表达数据
+        expr_file = None
+        if self.merfish_data_path:
+            expr_path = self.merfish_data_path / "gene_expression.csv"
+            if expr_path.exists():
+                expr_file = expr_path
+
+        # 如果没有找到表达文件，尝试在默认位置查找
+        if not expr_file:
+            default_path = Path("merfish_output/gene_expression.csv")
+            if default_path.exists():
+                expr_file = default_path
+
+        # 如果没有表达数据，返回
+        if not expr_file:
+            logger.warning("未找到基因表达数据，跳过RegionLayer表达更新")
+            return
+
+        try:
+            logger.info(f"加载基因表达数据: {expr_file}")
+            expr_df = pd.read_csv(expr_file)
+
+            # 创建RegionLayer ID到节点的映射
+            rl_map = {}
+            for node in region_layer_nodes:
+                rl_id = node['properties'].get('rl_id')
+                if rl_id:
+                    rl_map[rl_id] = node
+
+            # 按RegionLayer分组计算平均表达
+            grouped = expr_df.groupby('rl_id')
+
+            # 更新每个RegionLayer节点的基因表达属性
+            updated_count = 0
+            for rl_id, group in grouped:
+                if rl_id in rl_map:
+                    node = rl_map[rl_id]
+
+                    # 对于每个基因，添加表达值作为RegionLayer的属性
+                    for _, row in group.iterrows():
+                        gene = row.get('gene')
+                        mean_expr = row.get('mean_logCPM')
+
+                        if pd.notna(gene) and pd.notna(mean_expr):
+                            # 使用格式 mean_logCPM_{gene} 作为属性名
+                            node['properties'][f'mean_logCPM_{gene}'] = float(mean_expr)
+
+                    updated_count += 1
+
+            logger.info(f"更新了{updated_count}个RegionLayer节点的基因表达数据")
+
+            # 特别处理Fezf2模块基因
+            fezf2_module = ['Fezf2', 'Bcl11b', 'Crym', 'Sox5', 'Tshz2', 'Foxo1', 'Zfpm2']
+            for node in region_layer_nodes:
+                # 计算模块平均表达量
+                expr_values = []
+                for gene in fezf2_module:
+                    expr_key = f'mean_logCPM_{gene}'
+                    if expr_key in node['properties']:
+                        expr_values.append(node['properties'][expr_key])
+
+                if expr_values:
+                    node['properties']['fezf2_module_mean'] = float(np.mean(expr_values))
+
+        except Exception as e:
+            logger.error(f"处理基因表达数据时出错: {e}")
+
     def save_new_kg(self, nodes: List[Dict], relationships: List[Dict], output_path: str):
         """保存新的知识图谱"""
         logger.info(f"保存新知识图谱到 {output_path}...")
@@ -1102,63 +1481,68 @@ class KnowledgeGraphRestructure:
         with open(temp_path, 'w') as f:
             json.dump(all_data, f, indent=2)
 
-        # 如果成功，重命名为最终文件
-        os.rename(temp_path, output_path)
+            # 如果成功，重命名为最终文件
+            os.rename(temp_path, output_path)
 
-        logger.info(f"保存完成: {len(nodes)}个节点, {len(relationships)}条关系")
+            logger.info(f"保存完成: {len(nodes)}个节点, {len(relationships)}条关系")
 
-    def check_neo4j_schema(self) -> bool:
-        """检查Neo4j数据库是否有必要的约束和索引"""
-        if self.neo4j_conn is None:
-            logger.warning("无法检查Neo4j模式，未连接到数据库")
-            return True
-
-        try:
-            with self.neo4j_conn.session() as session:
-                # 检查必要的约束
-                constraints_result = session.run("CALL db.constraints()")
-                constraints = [record["name"] for record in constraints_result if "name" in record]
-
-                required_constraints = [
-                    "pk_regionlayer",  # RegionLayer.rl_id 唯一约束
-                    "pk_region",  # Region.region_id 唯一约束
-                    "pk_subclass",  # Subclass.tran_id 唯一约束
-                    "pk_class",  # Class.tran_id 唯一约束
-                    "pk_gene"  # Gene.symbol 唯一约束
-                ]
-
-                missing_constraints = [c for c in required_constraints if
-                                       not any(c in constraint for constraint in constraints)]
-
-                if missing_constraints:
-                    logger.warning(f"Neo4j数据库缺少必要的约束: {missing_constraints}")
-                    logger.warning("请运行以下Cypher语句创建约束:")
-                    for constraint in missing_constraints:
-                        if constraint == "pk_regionlayer":
-                            logger.warning(
-                                "CREATE CONSTRAINT pk_regionlayer IF NOT EXISTS FOR (rl:RegionLayer) REQUIRE rl.rl_id IS UNIQUE;")
-                        elif constraint == "pk_region":
-                            logger.warning(
-                                "CREATE CONSTRAINT pk_region IF NOT EXISTS FOR (r:Region) REQUIRE r.region_id IS UNIQUE;")
-                        elif constraint == "pk_subclass":
-                            logger.warning(
-                                "CREATE CONSTRAINT pk_subclass IF NOT EXISTS FOR (s:Subclass) REQUIRE s.tran_id IS UNIQUE;")
-                        elif constraint == "pk_class":
-                            logger.warning(
-                                "CREATE CONSTRAINT pk_class IF NOT EXISTS FOR (c:Class) REQUIRE c.tran_id IS UNIQUE;")
-                        elif constraint == "pk_gene":
-                            logger.warning(
-                                "CREATE CONSTRAINT pk_gene IF NOT EXISTS FOR (g:Gene) REQUIRE g.symbol IS UNIQUE;")
-
-                    return False
-
+        def check_neo4j_schema(self) -> bool:
+            """检查Neo4j数据库是否有必要的约束和索引"""
+            if self.neo4j_conn is None:
+                logger.warning("无法检查Neo4j模式，未连接到数据库")
                 return True
-        except Exception as e:
-            logger.error(f"检查Neo4j模式时出错: {e}")
-            return False
 
-    def run(self, output_path: str = "kg_v2.3.json") -> Dict[str, Any]:
-        """运行完整的重构流程"""
+            try:
+                with self.neo4j_conn.session() as session:
+                    # 检查必要的约束
+                    constraints_result = session.run("CALL db.constraints()")
+                    constraints = [record["name"] for record in constraints_result if "name" in record]
+
+                    required_constraints = [
+                        "pk_regionlayer",  # RegionLayer.rl_id 唯一约束
+                        "pk_region",  # Region.region_id 唯一约束
+                        "pk_subclass",  # Subclass.tran_id 唯一约束
+                        "pk_class",  # Class.tran_id 唯一约束
+                        "pk_gene"  # Gene.symbol 唯一约束
+                    ]
+
+                    missing_constraints = [c for c in required_constraints if
+                                           not any(c in constraint for constraint in constraints)]
+
+                    if missing_constraints:
+                        logger.warning(f"Neo4j数据库缺少必要的约束: {missing_constraints}")
+                        logger.warning("请运行以下Cypher语句创建约束:")
+                        for constraint in missing_constraints:
+                            if constraint == "pk_regionlayer":
+                                logger.warning(
+                                    "CREATE CONSTRAINT pk_regionlayer IF NOT EXISTS FOR (rl:RegionLayer) REQUIRE rl.rl_id IS UNIQUE;")
+                            elif constraint == "pk_region":
+                                logger.warning(
+                                    "CREATE CONSTRAINT pk_region IF NOT EXISTS FOR (r:Region) REQUIRE r.region_id IS UNIQUE;")
+                            elif constraint == "pk_subclass":
+                                logger.warning(
+                                    "CREATE CONSTRAINT pk_subclass IF NOT EXISTS FOR (s:Subclass) REQUIRE s.tran_id IS UNIQUE;")
+                            elif constraint == "pk_class":
+                                logger.warning(
+                                    "CREATE CONSTRAINT pk_class IF NOT EXISTS FOR (c:Class) REQUIRE c.tran_id IS UNIQUE;")
+                            elif constraint == "pk_gene":
+                                logger.warning(
+                                    "CREATE CONSTRAINT pk_gene IF NOT EXISTS FOR (g:Gene) REQUIRE g.symbol IS UNIQUE;")
+
+                        return False
+
+                    return True
+            except Exception as e:
+                logger.error(f"检查Neo4j模式时出错: {e}")
+                return False
+
+    def run(self, output_path: str = "kg_v2.3.json", strict_mode: bool = True) -> Dict[str, Any]:
+        """运行完整的重构流程
+
+        Args:
+            output_path: 输出文件路径
+            strict_mode: 严格模式，当缺少关键数据时报错而不是使用默认值或随机值
+        """
         logger.info("开始知识图谱重构...")
         start_time = time.time()
 
@@ -1166,16 +1550,6 @@ class KnowledgeGraphRestructure:
         if self.neo4j_conn is not None:
             if not self.check_neo4j_schema():
                 logger.error("Neo4j模式检查失败，请先创建必要的约束和索引")
-                logger.error("可以运行以下Cypher语句创建约束:")
-                logger.error(
-                    "CREATE CONSTRAINT pk_regionlayer IF NOT EXISTS FOR (rl:RegionLayer) REQUIRE rl.rl_id IS UNIQUE;")
-                logger.error("CREATE CONSTRAINT pk_region IF NOT EXISTS FOR (r:Region) REQUIRE r.region_id IS UNIQUE;")
-                logger.error(
-                    "CREATE CONSTRAINT pk_subclass IF NOT EXISTS FOR (s:Subclass) REQUIRE s.tran_id IS UNIQUE;")
-                logger.error("CREATE CONSTRAINT pk_class IF NOT EXISTS FOR (c:Class) REQUIRE c.tran_id IS UNIQUE;")
-                logger.error("CREATE CONSTRAINT pk_gene IF NOT EXISTS FOR (g:Gene) REQUIRE g.symbol IS UNIQUE;")
-                logger.error("CREATE INDEX idx_rl_layer IF NOT EXISTS FOR (rl:RegionLayer) ON (rl.layer);")
-                logger.error("CREATE INDEX idx_sub_projtype IF NOT EXISTS FOR (s:Subclass) ON (s.proj_type);")
                 raise ValueError("Neo4j模式检查失败")
 
         # 1. 加载现有知识图谱
@@ -1189,10 +1563,17 @@ class KnowledgeGraphRestructure:
 
         logger.info(f"找到{len(region_nodes)}个Region节点和{len(transcriptomic_nodes)}个转录组节点")
 
+        # 验证关键节点存在
+        if strict_mode and not region_nodes:
+            raise ValueError("未找到Region节点，无法继续构建知识图谱")
+
         # 2. 创建RegionLayer节点
         region_layer_nodes = self.create_region_layer_nodes(region_nodes)
         if not region_layer_nodes:
-            logger.warning("未创建任何RegionLayer节点！请检查Region节点是否有name属性，以及是否有皮层区域。")
+            error_msg = "未创建任何RegionLayer节点！请检查Region节点是否有name属性，以及是否有皮层区域。"
+            if strict_mode:
+                raise ValueError(error_msg)
+            logger.warning(error_msg)
 
         # 3. 计算形态学统计
         morpho_stats = self.calculate_morphology_stats(region_layer_nodes)
@@ -1202,28 +1583,25 @@ class KnowledgeGraphRestructure:
             rl_id = node['properties']['rl_id']
             if rl_id in morpho_stats:
                 node['properties'].update(morpho_stats[rl_id])
+            elif strict_mode:
+                raise ValueError(f"缺少RegionLayer节点 {rl_id} 的形态学统计数据")
             else:
                 # 设置默认值以确保节点有所有必需的属性
-                if 'it_pct' not in node['properties']:
-                    node['properties']['it_pct'] = 0.5
-                if 'et_pct' not in node['properties']:
-                    node['properties']['et_pct'] = 0.3
-                if 'ct_pct' not in node['properties']:
-                    node['properties']['ct_pct'] = 0.2
-                if 'lr_pct' not in node['properties']:
-                    node['properties']['lr_pct'] = 0.3
-                if 'lr_prior' not in node['properties']:
-                    node['properties']['lr_prior'] = 0.2
-                if 'morph_ax_len_mean' not in node['properties']:
-                    node['properties']['morph_ax_len_mean'] = 0.0
-                if 'morph_ax_len_std' not in node['properties']:
-                    node['properties']['morph_ax_len_std'] = 0.0
-                if 'dend_polarity_index_mean' not in node['properties']:
-                    node['properties']['dend_polarity_index_mean'] = 0.0
-                if 'dend_br_std' not in node['properties']:
-                    node['properties']['dend_br_std'] = 0.0
-                if 'n_neuron' not in node['properties']:
-                    node['properties']['n_neuron'] = 0
+                logger.warning(f"为 {rl_id} 使用默认形态学属性值")
+                for key, default in [
+                    ('it_pct', 0.5),
+                    ('et_pct', 0.3),
+                    ('ct_pct', 0.2),
+                    ('lr_pct', 0.3),
+                    ('lr_prior', 0.2),
+                    ('morph_ax_len_mean', 0.0),
+                    ('morph_ax_len_std', 0.0),
+                    ('dend_polarity_index_mean', 0.0),
+                    ('dend_br_std', 0.0),
+                    ('n_neuron', 0)
+                ]:
+                    if key not in node['properties']:
+                        node['properties'][key] = default
 
         # 5. 更新Subclass节点
         self.update_subclass_nodes(transcriptomic_nodes)
@@ -1236,14 +1614,26 @@ class KnowledgeGraphRestructure:
             region_layer_nodes, transcriptomic_nodes
         )
 
+        if strict_mode and not transcriptomic_rels:
+            raise ValueError("未创建任何转录组关系，可能是MERFISH数据缺失或格式错误")
+
         # 8. 更新投射关系
         self.update_projection_relationships(relationships, morpho_stats)
 
-        # 9. 合并所有节点和关系
-        all_nodes = nodes + region_layer_nodes
-        all_relationships = relationships + has_layer_rels + transcriptomic_rels
+        # 9. 创建基因节点和共表达关系
+        gene_nodes, coexpression_rels = self.create_gene_nodes_and_relationships(nodes)
 
-        # 10. 保存新的知识图谱
+        if strict_mode and not coexpression_rels:
+            raise ValueError("未创建任何基因共表达关系，任务④(Fezf2模块分析)将无法运行")
+
+        # 10. 更新RegionLayer基因表达数据
+        self.update_regionlayer_gene_expression(region_layer_nodes)
+
+        # 11. 合并所有节点和关系
+        all_nodes = nodes + region_layer_nodes + gene_nodes
+        all_relationships = relationships + has_layer_rels + transcriptomic_rels + coexpression_rels
+
+        # 12. 保存新的知识图谱
         self.save_new_kg(all_nodes, all_relationships, output_path)
 
         elapsed_time = time.time() - start_time
@@ -1253,9 +1643,14 @@ class KnowledgeGraphRestructure:
             'total_nodes': len(all_nodes),
             'total_relationships': len(all_relationships),
             'new_region_layer_nodes': len(region_layer_nodes),
-            'new_relationships': len(has_layer_rels) + len(transcriptomic_rels),
+            'new_gene_nodes': len(gene_nodes),
+            'new_relationships': len(has_layer_rels) + len(transcriptomic_rels) + len(coexpression_rels),
+            'coexpression_relationships': len(coexpression_rels),
             'elapsed_time': f"{elapsed_time:.2f}秒"
         }
+
+
+# Update the main function to add the --strict flag
 
 def main():
     """命令行入口函数"""
@@ -1265,6 +1660,8 @@ def main():
     parser.add_argument('--merfish-data', '-f', help='MERFISH数据路径（可选）')
     parser.add_argument('--output', '-o', default='kg_v2.3.json', help='输出JSON文件路径')
     parser.add_argument('--cache-dir', '-c', help='缓存目录路径（可选，默认为系统临时目录）')
+    parser.add_argument('--strict', '-s', action='store_true',
+                        help='严格模式：当缺少必要数据时报错而不是使用默认值或随机值')
 
     args = parser.parse_args()
 
@@ -1278,13 +1675,20 @@ def main():
         )
 
         # 运行重构
-        results = restructurer.run(output_path=args.output)
+        results = restructurer.run(output_path=args.output, strict_mode=args.strict)
 
         print("\n重构结果:")
         for key, value in results.items():
             print(f"{key}: {value}")
 
         print(f"\n知识图谱已保存到: {args.output}")
+
+        # 如果有基因共表达关系，特别标注
+        if results.get('coexpression_relationships', 0) > 0:
+            print(
+                f"\n成功创建了 {results['coexpression_relationships']} 个基因共表达关系，任务④(Fezf2模块分析)可正常运行")
+        else:
+            print("\n警告：未创建基因共表达关系，任务④(Fezf2模块分析)将无法运行")
 
     except Exception as e:
         logger.error(f"重构过程中发生错误: {e}", exc_info=True)

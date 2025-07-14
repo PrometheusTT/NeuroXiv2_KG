@@ -811,6 +811,56 @@ class MERFISHDataIntegration:
                 logger.info(f"已导出{len(coexpr_df)}条基因共表达关系到{coexpr_file}")
 
         return output_files
+
+    def discover_all_regions(self):
+        """自动发现所有可用的脑区"""
+        all_regions = set()
+
+        # 方法1: 从元数据文件中提取脑区信息
+        for i in range(1, 6):  # 尝试读取所有可能的元数据文件
+            filepath = os.path.join(self.data_dir, f"cell_metadata_with_cluster_annotation_{i}.csv")
+            if os.path.exists(filepath):
+                try:
+                    df = pd.read_csv(filepath)
+                    # 尝试不同可能的列名
+                    region_col = None
+                    for col in ['region', 'Region', 'region_acronym', 'RegionAcronym', 'acronym']:
+                        if col in df.columns:
+                            region_col = col
+                            break
+
+                    if region_col:
+                        # 提取唯一区域并添加到集合中
+                        regions = df[region_col].dropna().unique()
+                        all_regions.update([r for r in regions if isinstance(r, str) and len(r) > 0])
+                        self.logger.info(f"从{filepath}发现了{len(regions)}个脑区")
+                except Exception as e:
+                    self.logger.warning(f"从{filepath}读取区域失败: {e}")
+
+        # 方法2: 从投射数据中提取区域信息
+        morpho_dir = os.path.join(self.data_dir, "morpho_data")
+        proj_file = os.path.join(morpho_dir, "Proj_Axon_Final.csv")
+        if os.path.exists(proj_file):
+            try:
+                # 只读取列名以识别区域
+                df_cols = pd.read_csv(proj_file, nrows=0).columns
+                # 提取区域名称
+                abs_cols = [col for col in df_cols if '_abs' in col]
+                regions = [col.split('_')[2] for col in abs_cols if len(col.split('_')) > 2]
+                all_regions.update(regions)
+                self.logger.info(f"从投射数据中发现了{len(regions)}个脑区")
+            except Exception as e:
+                self.logger.warning(f"从投射数据读取区域失败: {e}")
+
+        # 方法3: 如果前两种方法未能提供区域，使用已知的主要皮层区域
+        if not all_regions:
+            self.logger.warning("未能自动发现区域，使用预定义的主要皮层区域")
+            all_regions = {'MOp', 'MOs', 'SSp', 'SSs', 'ACA', 'PL', 'ILA', 'ORB',
+                           'AI', 'RSP', 'PTLp', 'VISp', 'VISl', 'VISal', 'VISam',
+                           'VISpm', 'TEa', 'PERI', 'ECT'}
+
+        # 排序结果以确保一致性
+        return sorted(list(all_regions))
     def calculate_cell_type_distribution(self, region_name: str) -> Dict[str, Dict[str, float]]:
         """计算特定脑区各层的细胞类型分布"""
         # 加载MERFISH数据
@@ -1163,46 +1213,40 @@ class MERFISHDataIntegration:
 
 
 def main():
-    """命令行入口函数"""
     parser = argparse.ArgumentParser(description='MERFISH数据集成工具')
-    parser.add_argument('--regions', '-r', nargs='+', default=['MOp', 'SSp', 'VISp'],
-                        help='要处理的脑区列表')
-    parser.add_argument('--cache-dir', '-c', help='缓存目录路径，默认使用系统临时目录')
-    parser.add_argument('--output-dir', '-o', default='merfish_output',
-                        help='输出CSV文件的目录')
-    parser.add_argument('--region-id-map', '-m', help='区域名称到ID的映射文件（CSV格式）')
-    parser.add_argument('--no-job-id', action='store_true',
-                        help='不在缓存文件名中包含作业ID')
-
+    parser.add_argument('--regions', nargs='+', default=['ALL'],
+                        help='要处理的脑区列表，使用"ALL"处理所有脑区')
+    parser.add_argument('--output-dir', default='merfish_output', help='输出目录')
+    parser.add_argument('--job-id', default='', help='可选的作业ID后缀')
     args = parser.parse_args()
 
-    # 加载区域ID映射
-    region_id_map = None
-    if args.region_id_map and os.path.exists(args.region_id_map):
-        try:
-            region_map_df = pd.read_csv(args.region_id_map)
-            if 'name' in region_map_df.columns and 'id' in region_map_df.columns:
-                region_id_map = dict(zip(region_map_df['name'], region_map_df['id']))
-                logger.info(f"已加载{len(region_id_map)}个区域ID映射")
-        except Exception as e:
-            logger.warning(f"加载区域ID映射失败: {e}")
+    try:
+        # 初始化集成器
+        integrator = MERFISHDataIntegration(output_dir=args.output_dir, job_id=args.job_id)
 
-    # 初始化MERFISH集成器
-    integrator = MERFISHDataIntegration(
-        cache_dir=args.cache_dir,
-        include_job_id=not args.no_job_id,
-        output_dir=args.output_dir
-    )
+        # 确定要处理的区域
+        if 'ALL' in args.regions or not args.regions:
+            regions_to_process = integrator.discover_all_regions()
+            logger.info(f"将处理所有可用脑区: {', '.join(regions_to_process)}")
+        else:
+            regions_to_process = args.regions
+            logger.info(f"将处理指定脑区: {', '.join(regions_to_process)}")
 
-    # 处理脑区
-    results = integrator.process_regions(args.regions, region_id_map)
+        # 处理每个区域
+        for region in regions_to_process:
+            try:
+                logger.info(f"开始处理脑区: {region}")
+                integrator.process_region(region)
+            except Exception as e:
+                logger.error(f"处理脑区{region}时发生错误: {e}", exc_info=True)
 
-    # 打印摘要
-    print("\n处理摘要:")
-    print(f"处理了 {len(args.regions)} 个脑区")
-    print(f"生成了 {len(results['distributions'])} 个RegionLayer分布")
-    print(f"输出文件保存在: {args.output_dir}")
-    print(f"总耗时: {results['elapsed_time']:.2f}秒")
+        # 运行额外分析
+        integrator.calculate_cross_region_statistics()
+        logger.info("所有脑区处理完成")
+
+    except Exception as e:
+        logger.error(f"处理过程中发生错误: {e}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

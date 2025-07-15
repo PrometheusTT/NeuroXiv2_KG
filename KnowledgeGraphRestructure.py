@@ -101,7 +101,7 @@ class KnowledgeGraphRestructure:
         return uri, username, password
 
     def load_kg(self) -> Tuple[List[Dict], List[Dict]]:
-        """加载现有知识图谱 - 修复版本"""
+        """加载现有知识图谱"""
         logger.info("加载现有知识图谱...")
 
         # 检查是否从Neo4j读取
@@ -118,62 +118,67 @@ class KnowledgeGraphRestructure:
                 logger.info(f"从CSV文件加载: {nodes_csv}, {rels_csv}")
                 return self._load_from_csv(nodes_csv, rels_csv)
 
-        # 否则假定是单一JSON文件
+        # 尝试解析KG文件
         try:
-            # 读取文件内容
+            nodes = []
+            relationships = []
+
+            # 使用ast.literal_eval解析Python字典格式
             with open(self.kg_path, 'r', encoding='utf-8') as f:
-                content = f.read()
+                line_num = 0
+                successful = 0
+                failed = 0
 
-            # 预处理内容，处理您的特殊格式
-            content = content.strip()
+                for line in f:
+                    line_num += 1
+                    line = line.strip()
+                    if not line:
+                        continue
 
-            # 检查是否是您的特殊格式（以{开始，没有[）
-            if content.startswith('{') and not content.startswith('['):
-                logger.info("检测到非标准JSON格式，进行预处理...")
-
-                # 方法1：将整个内容包装在数组中
-                content = '[' + content + ']'
-
-                # 修复可能的尾随逗号
-                content = re.sub(r',\s*]', ']', content)
-
-            try:
-                kg_data = json.loads(content)
-            except json.JSONDecodeError as e:
-                logger.warning(f"JSON解析失败: {e}")
-
-                # 方法2：逐个对象解析
-                logger.info("尝试逐个解析JSON对象...")
-                kg_data = []
-
-                # 使用正则表达式分割对象
-                # 匹配完整的JSON对象
-                object_pattern = re.compile(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}')
-                objects = object_pattern.findall(content)
-
-                for obj_str in objects:
                     try:
-                        obj = json.loads(obj_str)
-                        kg_data.append(obj)
-                    except json.JSONDecodeError:
-                        logger.warning(f"无法解析对象: {obj_str[:100]}...")
+                        # 使用ast.literal_eval安全地解析Python字典
+                        import ast
+                        item = ast.literal_eval(line)
 
-                logger.info(f"成功解析了{len(kg_data)}个对象")
+                        if not isinstance(item, dict):
+                            continue
 
-            # 确保kg_data是列表
-            if not isinstance(kg_data, list):
-                kg_data = [kg_data]
+                        # 确定对象类型并加入相应列表
+                        item_type = item.get('type', '')
+                        if item_type == 'node':
+                            nodes.append(item)
+                            successful += 1
+                        elif item_type == 'relationship':
+                            # 处理嵌套的节点引用 - 提取节点ID而不是使用整个节点
+                            if isinstance(item.get('start'), dict):
+                                start_id = item['start'].get('id')
+                                item['start'] = start_id
 
-            nodes = [item for item in kg_data if item.get('type') == 'node']
-            relationships = [item for item in kg_data if item.get('type') == 'relationship']
+                            if isinstance(item.get('end'), dict):
+                                end_id = item['end'].get('id')
+                                item['end'] = end_id
+
+                            relationships.append(item)
+                            successful += 1
+                        else:
+                            failed += 1
+                    except Exception as e:
+                        failed += 1
+                        if line_num <= 20 or line_num % 1000 == 0:
+                            logger.warning(f"第{line_num}行无法解析为JSON: {line[:50]}...")
+
+                logger.info(f"逐行解析: 加载了 {len(nodes)} 个节点和 {len(relationships)} 个关系")
+                logger.info(f"成功: {successful}, 失败: {failed}")
+
+            if not nodes:
+                raise ValueError(f"未能从{self.kg_path}加载任何节点，请检查文件格式是否正确")
 
             logger.info(f"加载完成: {len(nodes)}个节点, {len(relationships)}条关系")
             return nodes, relationships
-
         except Exception as e:
             logger.error(f"加载知识图谱失败: {e}")
             logger.error(f"文件路径: {self.kg_path}")
-            raise
+            raise  # 直接抛出异常，不返回空列表
 
     def _load_from_neo4j(self) -> Tuple[List[Dict], List[Dict]]:
         """直接从Neo4j数据库加载知识图谱"""
@@ -553,90 +558,166 @@ class KnowledgeGraphRestructure:
 
         logger.info(f"从投射数据中提取了{len(region_projections)}对区域间的连接")
         return dict(region_projections)
+
     def create_region_layer_nodes(self, regions: List[Dict]) -> List[Dict]:
         """创建RegionLayer节点"""
         cache_file = self.cache_dir / "region_layer_nodes.pkl"
 
-        if cache_file.exists():
-            logger.info("从缓存加载RegionLayer节点...")
-            with open(cache_file, 'rb') as f:
-                return pickle.load(f)
-
         logger.info("创建RegionLayer节点...")
         region_layer_nodes = []
-        node_id_counter = 10000  # 从10000开始避免ID冲突
+        node_id_counter = 10000
 
-        # 从MERFISH数据加载已有的RegionLayer属性（如果有）
-        merfish_rl_props = {}
-        if self.merfish_data_path and (self.merfish_data_path / "region_layer_props.csv").exists():
-            try:
-                rl_props_df = pd.read_csv(self.merfish_data_path / "region_layer_props.csv")
-                for _, row in rl_props_df.iterrows():
-                    rl_id = row.get('rl_id')
-                    if rl_id:
-                        merfish_rl_props[rl_id] = row.to_dict()
-            except Exception as e:
-                logger.warning(f"加载MERFISH RegionLayer属性失败: {e}")
+        # 从MERFISH数据分析RegionLayer ID格式
+        merfish_rl_ids = set()
+        merfish_region_patterns = set()
 
-        # 创建区域到节点的映射
-        region_map = {}
+        if self.merfish_data_path:
+            for filename in ['has_class.csv', 'has_subclass.csv', 'has_cluster.csv']:
+                filepath = self.merfish_data_path / filename
+                if filepath.exists():
+                    try:
+                        df = pd.read_csv(filepath)
+                        if 'rl_id' in df.columns:
+                            ids = df['rl_id'].unique()
+                            merfish_rl_ids.update(ids)
+
+                            # 分析ID模式以提取可能的区域名称格式
+                            for rl_id in ids:
+                                if '_' in rl_id:
+                                    region_part = rl_id.split('_')[0]
+                                    # 提取可能的基础区域名称（去除数字和字母后缀）
+                                    import re
+                                    base_region = re.sub(r'[0-9]+[a-z]*$', '', region_part)
+                                    if base_region:
+                                        merfish_region_patterns.add(base_region)
+                    except Exception as e:
+                        logger.warning(f"读取{filepath}失败: {e}")
+
+        if merfish_rl_ids:
+            logger.info(f"从MERFISH数据中发现{len(merfish_rl_ids)}个不同的RegionLayer ID")
+            sample_ids = list(merfish_rl_ids)[:5]
+            logger.info(f"示例RegionLayer ID: {', '.join(sample_ids)}")
+
+            if merfish_region_patterns:
+                logger.info(f"从MERFISH数据提取了{len(merfish_region_patterns)}个基础区域名称模式")
+                logger.info(f"示例区域名称模式: {', '.join(list(merfish_region_patterns)[:10])}")
+
+        # 创建区域名称到ID的映射，用于快速查找
+        region_name_to_id = {}
         for region in regions:
-            region_name = region['properties'].get('name', '')
-            if region_name:
-                region_map[region_name] = region
+            name = region['properties'].get('name', '')
+            if name:
+                region_name_to_id[name] = region['id']
 
-        # 为每个区域创建所有层的RegionLayer节点
+        # 为每个区域创建RegionLayer节点
+        created_regions = set()
+
         for region in tqdm(regions, desc="创建RegionLayer节点"):
             region_name = region['properties'].get('name', '')
             region_id = region['id']
 
-            # 如果名称不存在，跳过
             if not region_name:
                 continue
 
-            # 检查名称中是否已包含层信息
-            layer_suffix = None
+            # 检查是否是皮层区域
+            if not self._is_cortical_region(region_name):
+                continue
+
+            created_regions.add(region_name)
+
+            # 创建标准RegionLayer节点
             for layer in self.layers:
-                if region_name.endswith(f"_{layer}"):
-                    layer_suffix = layer
-                    region_name = region_name.replace(f"_{layer}", "")
-                    break
+                # 标准格式: 区域名_层名
+                standard_rl_id = f"{region_name}_{layer}"
 
-            # 只为皮层区域创建layer节点
-            if self._is_cortical_region(region_name):
-                # 如果有层后缀，只创建该层的节点
-                if layer_suffix:
-                    layers_to_create = [layer_suffix]
-                else:
-                    # 否则为所有层创建节点
-                    layers_to_create = self.layers
+                properties = {
+                    'rl_id': standard_rl_id,
+                    'region_name': region_name,
+                    'layer': layer,
+                    'region_id': region_id,
+                    'alt_rl_ids': [standard_rl_id]
+                }
 
-                for layer in layers_to_create:
-                    rl_id = f"{region_id}_{layer}"
+                # 添加MERFISH格式的变体
+                # 模式1: 区域名+数字+字母+_+层名 (例如 RSPv6a_L6)
+                digit_letter_variants = []
+                for i in range(1, 7):  # 数字1-6
+                    for suffix in ['', 'a', 'b']:  # 可能的字母后缀
+                        variant = f"{region_name}{i}{suffix}_{layer}"
+                        digit_letter_variants.append(variant)
+                        properties['alt_rl_ids'].append(variant)
 
-                    # 创建基本属性
-                    properties = {
-                        'rl_id': rl_id,
-                        'region_name': region_name,
-                        'layer': layer,
-                        'region_id': region_id
-                    }
+                # 模式2: 处理带连字符的区域名 (例如 SSp-n4_L2/3)
+                if '-' in region_name:
+                    base, sub = region_name.split('-', 1)
+                    for i in range(1, 7):
+                        variant = f"{base}-{sub}{i}_{layer}"
+                        properties['alt_rl_ids'].append(variant)
 
-                    # 添加MERFISH数据中的属性（如果有）
-                    if rl_id in merfish_rl_props:
-                        merfish_props = merfish_rl_props[rl_id]
-                        for key, value in merfish_props.items():
-                            if key not in ['rl_id', 'region_name', 'layer', 'region_id'] and pd.notna(value):
-                                properties[key] = value
+                # 创建节点
+                node = {
+                    'type': 'node',
+                    'id': str(node_id_counter),
+                    'labels': ['RegionLayer'],
+                    'properties': properties
+                }
+                region_layer_nodes.append(node)
+                node_id_counter += 1
 
-                    node = {
-                        'type': 'node',
-                        'id': str(node_id_counter),
-                        'labels': ['RegionLayer'],
-                        'properties': properties
-                    }
-                    region_layer_nodes.append(node)
-                    node_id_counter += 1
+        # 检查是否覆盖了MERFISH中的所有区域
+        if merfish_region_patterns:
+            missing_regions = merfish_region_patterns - created_regions
+            if missing_regions:
+                logger.warning(f"有{len(missing_regions)}个MERFISH区域名称模式未被覆盖")
+                logger.warning(f"示例未覆盖区域: {', '.join(list(missing_regions)[:10])}")
+
+                # 为缺失的区域创建额外的RegionLayer节点
+                for region_name in missing_regions:
+                    # 尝试找到最接近的区域名称
+                    best_match = None
+                    best_score = 0
+                    for known_region in created_regions:
+                        # 简单的字符串包含检查
+                        if region_name in known_region or known_region in region_name:
+                            score = len(region_name) / max(len(region_name), len(known_region))
+                            if score > best_score:
+                                best_score = score
+                                best_match = known_region
+
+                    if best_match and best_score > 0.5:
+                        logger.info(f"为未覆盖区域{region_name}找到最佳匹配: {best_match}")
+                        region_id = region_name_to_id.get(best_match, f"virtual_{best_match}")
+                    else:
+                        # 如果没有找到好的匹配，创建一个虚拟区域ID
+                        region_id = f"virtual_{region_name}"
+
+                    # 为这个缺失的区域创建所有层的节点
+                    for layer in self.layers:
+                        standard_rl_id = f"{region_name}_{layer}"
+
+                        properties = {
+                            'rl_id': standard_rl_id,
+                            'region_name': region_name,
+                            'layer': layer,
+                            'region_id': region_id,
+                            'alt_rl_ids': [standard_rl_id],
+                            'is_virtual': True
+                        }
+
+                        # 添加与MERFISH匹配的变体
+                        for i in range(1, 7):
+                            for suffix in ['', 'a', 'b']:
+                                variant = f"{region_name}{i}{suffix}_{layer}"
+                                properties['alt_rl_ids'].append(variant)
+
+                        node = {
+                            'type': 'node',
+                            'id': str(node_id_counter),
+                            'labels': ['RegionLayer'],
+                            'properties': properties
+                        }
+                        region_layer_nodes.append(node)
+                        node_id_counter += 1
 
         # 保存缓存
         with open(cache_file, 'wb') as f:
@@ -646,9 +727,49 @@ class KnowledgeGraphRestructure:
         return region_layer_nodes
 
     def _is_cortical_region(self, region_name: str) -> bool:
-        """判断是否为皮层区域"""
-        cortical_prefixes = ['MO', 'SS', 'VIS', 'ACA', 'AI', 'RSP', 'PTL', 'TEa', 'PERI', 'ECT']
-        return any(region_name.startswith(prefix) for prefix in cortical_prefixes)
+        """判断区域是否为皮层区域"""
+        if not region_name:
+            return False
+
+        # 规范化区域名称
+        region_name = region_name.strip().upper()
+
+        # 扩展的皮层区域前缀列表
+        cortical_prefixes = [
+            'MO', 'SS', 'VIS', 'ACA', 'AUD', 'AI', 'RSP', 'PTL', 'TEA', 'PERI', 'ECT',
+            'PL', 'ILA', 'ORB', 'FRP', 'AId', 'AIp', 'AIv', 'VISC', 'GU', 'ACA', 'PL',
+            'MOp', 'MOs', 'SSp', 'SSs', 'VISC', 'TEa', 'ECT', 'AUDp', 'AUDd', 'AUDv'
+        ]
+
+        # 明确的皮层区域完全匹配
+        cortical_regions = [
+            'MOp', 'MOs', 'SSp', 'SSs', 'ACAd', 'ACAv', 'PL', 'ILA', 'ORB', 'AI', 'RSP',
+            'VISp', 'VISl', 'VISal', 'VISam', 'VISpm', 'TEa', 'PERI', 'ECT', 'VISC', 'GU'
+        ]
+
+        # 检查是否直接匹配
+        if region_name in cortical_regions:
+            return True
+
+        # 检查前缀
+        for prefix in cortical_prefixes:
+            if region_name.startswith(prefix):
+                return True
+
+        # 检查是否包含皮层区域的关键词
+        cortical_keywords = ['CORTEX', 'CTX', 'ISOCORTEX', 'NEOCORTEX']
+        for keyword in cortical_keywords:
+            if keyword in region_name:
+                return True
+
+        # 额外的区域名检查，处理特殊情况如SSp-bfd, SSp-ll等
+        if '-' in region_name:
+            base_name = region_name.split('-')[0]
+            if base_name in cortical_prefixes or any(region_name.startswith(p) for p in cortical_prefixes):
+                return True
+
+        # 默认不是皮层区域
+        return False
 
     def _layer_num_to_name(self, layer_num, layer_map) -> str:
         """将层数字转换为层名称 - 修复版本"""
@@ -1018,7 +1139,7 @@ class KnowledgeGraphRestructure:
         """创建RegionLayer到转录组类型的关系"""
         cache_file = self.cache_dir / "transcriptomic_relationships.pkl"
 
-        if cache_file.exists():
+        if cache_file.exists() and not getattr(self, 'force_refresh', False):
             logger.info("从缓存加载转录组关系...")
             with open(cache_file, 'rb') as f:
                 return pickle.load(f)
@@ -1027,7 +1148,7 @@ class KnowledgeGraphRestructure:
         relationships = []
         rel_id_counter = 30000
 
-        # 检查是否有MERFISH数据
+        # 检查MERFISH关系数据
         merfish_rels = {}
         has_real_data = False
 
@@ -1044,6 +1165,15 @@ class KnowledgeGraphRestructure:
                     merfish_rels['HAS_CLASS'] = has_class_df
                     has_real_data = True
                     logger.info(f"加载了{len(has_class_df)}个HAS_CLASS关系数据")
+
+                    # 显示样本数据，帮助诊断
+                    if len(has_class_df) > 0:
+                        sample = has_class_df.iloc[0].to_dict()
+                        logger.info(f"HAS_CLASS样本: {sample}")
+
+                    # 分析存在哪些class_name
+                    unique_classes = has_class_df['class_name'].unique()
+                    logger.info(f"MERFISH中的Class名称: {unique_classes}")
                 except Exception as e:
                     logger.warning(f"加载HAS_CLASS关系失败: {e}")
 
@@ -1065,296 +1195,384 @@ class KnowledgeGraphRestructure:
                 except Exception as e:
                     logger.warning(f"加载HAS_CLUSTER关系失败: {e}")
 
-        # 如果有真实的MERFISH数据，使用它创建关系
-        if has_real_data:
-            logger.info("使用MERFISH数据创建转录组关系...")
+        # 创建转录组名称到节点的映射
+        trans_map = {
+            'class': {},
+            'subclass': {},
+            'cluster': {}
+        }
 
-            # 创建转录组名称到节点的映射
-            trans_map = {
-                'class': {},
-                'subclass': {},
-                'cluster': {}
-            }
+        # 直接为特殊的类名创建映射
+        special_class_names = ['Glutamatergic', 'GABAergic']
+        special_class_nodes = {}
 
+        # 首先，尝试查找最匹配的节点
+        for class_name in special_class_names:
+            best_match = None
             for node in transcriptomic_nodes:
-                node_name = node['properties'].get('name', '')
-                if not node_name:
+                if 'Class' not in node.get('labels', []):
                     continue
 
-                if 'Class' in node.get('labels', []):
-                    trans_map['class'][node_name] = node
-                elif 'Subclass' in node.get('labels', []):
-                    trans_map['subclass'][node_name] = node
-                elif 'Cluster' in node.get('labels', []):
-                    trans_map['cluster'][node_name] = node
+                node_name = node['properties'].get('name', '')
+                # 检查名称中是否包含关键词
+                if class_name.lower() in node_name.lower():
+                    best_match = node
+                    logger.info(f"为{class_name}找到匹配节点: {node_name}")
+                    break
 
-            # 创建RegionLayer ID到节点的映射
-            rl_map = {node['properties']['rl_id']: node for node in region_layer_nodes}
+            special_class_nodes[class_name] = best_match
 
-            # 创建HAS_CLASS关系
-            if 'HAS_CLASS' in merfish_rels:
-                for _, row in merfish_rels['HAS_CLASS'].iterrows():
-                    rl_id = row.get('rl_id')
-                    class_name = row.get('class_name')
+        # 如果没有直接匹配，尝试从属性查找
+        for class_name in special_class_names:
+            if class_name not in special_class_nodes or special_class_nodes[class_name] is None:
+                for node in transcriptomic_nodes:
+                    if 'Class' not in node.get('labels', []):
+                        continue
 
-                    if rl_id in rl_map and class_name in trans_map['class']:
-                        rel = {
-                            'type': 'relationship',
-                            'id': str(rel_id_counter),
-                            'label': 'HAS_CLASS',
-                            'properties': {
-                                'pct_cells': float(row.get('pct_cells', 0)),
-                                'rank': int(row.get('rank', 0)),
-                                'n_cells': int(row.get('n_cells', 0))
-                            },
-                            'start': rl_map[rl_id],
-                            'end': trans_map['class'][class_name]
+                    # 检查节点属性
+                    props = node['properties']
+                    for prop_key, prop_value in props.items():
+                        if isinstance(prop_value, str) and class_name.lower() in prop_value.lower():
+                            special_class_nodes[class_name] = node
+                            logger.info(
+                                f"从属性中为{class_name}找到匹配节点: {props.get('name', '')}, 属性: {prop_key}={prop_value}")
+                            break
+
+                    if class_name in special_class_nodes and special_class_nodes[class_name] is not None:
+                        break
+
+        # 如果仍然没有找到，使用基于神经递质的推断
+        if 'Glutamatergic' not in special_class_nodes or special_class_nodes['Glutamatergic'] is None:
+            # 查找可能的Glutamatergic类
+            for node in transcriptomic_nodes:
+                if 'Class' not in node.get('labels', []):
+                    continue
+
+                node_name = node['properties'].get('name', '')
+                if 'glut' in node_name.lower() or 'excitatory' in node_name.lower():
+                    special_class_nodes['Glutamatergic'] = node
+                    logger.info(f"为Glutamatergic推断匹配节点: {node_name}")
+                    break
+
+        if 'GABAergic' not in special_class_nodes or special_class_nodes['GABAergic'] is None:
+            # 查找可能的GABAergic类
+            for node in transcriptomic_nodes:
+                if 'Class' not in node.get('labels', []):
+                    continue
+
+                node_name = node['properties'].get('name', '')
+                if 'gaba' in node_name.lower() or 'inhibitory' in node_name.lower():
+                    special_class_nodes['GABAergic'] = node
+                    logger.info(f"为GABAergic推断匹配节点: {node_name}")
+                    break
+
+        # 如果实在找不到，创建虚拟节点作为最后的手段
+        if has_real_data:
+            for class_name in special_class_names:
+                if class_name not in special_class_nodes or special_class_nodes[class_name] is None:
+                    virtual_node_id = f"virtual_{class_name.lower()}"
+                    virtual_node = {
+                        'type': 'node',
+                        'id': virtual_node_id,
+                        'labels': ['Transcriptomic', 'Class'],
+                        'properties': {
+                            'name': class_name,
+                            'tran_id': 9000 + len(special_class_nodes),
+                            'is_virtual': True
                         }
-                        relationships.append(rel)
-                        rel_id_counter += 1
+                    }
+                    special_class_nodes[class_name] = virtual_node
+                    transcriptomic_nodes.append(virtual_node)
+                    logger.warning(f"为{class_name}创建虚拟节点: {virtual_node_id}")
 
-            # 创建HAS_SUBCLASS关系
-            if 'HAS_SUBCLASS' in merfish_rels:
-                for _, row in merfish_rels['HAS_SUBCLASS'].iterrows():
-                    rl_id = row.get('rl_id')
-                    subclass_name = row.get('subclass_name')
+        # 将特殊类名添加到映射中
+        for class_name, node in special_class_nodes.items():
+            if node is not None:
+                trans_map['class'][class_name] = node
+                logger.info(f"已添加特殊Class名称映射: {class_name} -> {node['properties'].get('name', '')}")
 
-                    if rl_id in rl_map and subclass_name in trans_map['subclass']:
-                        rel = {
-                            'type': 'relationship',
-                            'id': str(rel_id_counter),
-                            'label': 'HAS_SUBCLASS',
-                            'properties': {
-                                'pct_cells': float(row.get('pct_cells', 0)),
-                                'rank': int(row.get('rank', 0)),
-                                'n_cells': int(row.get('n_cells', 0)),
-                                'proj_type': row.get('proj_type', 'UNK')
-                            },
-                            'start': rl_map[rl_id],
-                            'end': trans_map['subclass'][subclass_name]
-                        }
-                        relationships.append(rel)
-                        rel_id_counter += 1
+        # 为所有转录组节点创建标准映射
+        for node in transcriptomic_nodes:
+            node_name = node['properties'].get('name', '')
+            if not node_name:
+                continue
 
-            # 创建HAS_CLUSTER关系
-            if 'HAS_CLUSTER' in merfish_rels:
-                for _, row in merfish_rels['HAS_CLUSTER'].iterrows():
-                    rl_id = row.get('rl_id')
-                    cluster_name = row.get('cluster_name')
+            if 'Class' in node.get('labels', []):
+                trans_map['class'][node_name] = node
 
-                    if rl_id in rl_map and cluster_name in trans_map['cluster']:
-                        rel = {
-                            'type': 'relationship',
-                            'id': str(rel_id_counter),
-                            'label': 'HAS_CLUSTER',
-                            'properties': {
-                                'pct_cells': float(row.get('pct_cells', 0)),
-                                'rank': int(row.get('rank', 0)),
-                                'n_cells': int(row.get('n_cells', 0))
-                            },
-                            'start': rl_map[rl_id],
-                            'end': trans_map['cluster'][cluster_name]
-                        }
-                        relationships.append(rel)
-                        rel_id_counter += 1
+                # 添加一些常见的简化映射
+                if 'Glut' in node_name:
+                    trans_map['class']['Glut'] = node
+                if 'GABA' in node_name:
+                    trans_map['class']['GABA'] = node
 
-        # 如果没有真实数据或处理失败，确保每个RegionLayer至少有一些基本关系
-        # if not relationships:
-        #     logger.warning("没有MERFISH数据或处理失败，创建基本转录组关系...")
-        #
-        #     # 创建转录组类型映射
-        #     tc_types = {'Class': [], 'Subclass': [], 'Supertype': [], 'Cluster': []}
-        #     for tc_node in transcriptomic_nodes:
-        #         for label in tc_node.get('labels', []):
-        #             if label in tc_types:
-        #                 tc_types[label].append(tc_node)
-        #
-        #     # 确保每个RegionLayer至少有一些Class和Subclass关系
-        #     for rl_node in tqdm(region_layer_nodes, desc="创建基本转录组关系"):
-        #         region_name = rl_node['properties'].get('region_name', '')
-        #         layer = rl_node['properties'].get('layer', '')
-        #
-        #         # 层特异性选择
-        #         if layer == 'L2/3':
-        #             # L2/3倾向于IT神经元
-        #             it_weight = 0.8
-        #             et_weight = 0.1
-        #             ct_weight = 0.1
-        #         elif layer == 'L5':
-        #             # L5包含更多ET神经元
-        #             it_weight = 0.4
-        #             et_weight = 0.5
-        #             ct_weight = 0.1
-        #         elif layer == 'L6':
-        #             # L6包含更多CT神经元
-        #             it_weight = 0.3
-        #             et_weight = 0.2
-        #             ct_weight = 0.5
-        #         else:
-        #             # 其他层的默认权重
-        #             it_weight = 0.5
-        #             et_weight = 0.3
-        #             ct_weight = 0.2
-        #
-        #         # 根据区域调整权重
-        #         if 'VIS' in region_name:
-        #             # 视觉区域有更多的IT和ET神经元
-        #             it_weight *= 1.2
-        #             et_weight *= 1.2
-        #             ct_weight *= 0.6
-        #         elif 'MO' in region_name:
-        #             # 运动区域有更多的ET神经元
-        #             it_weight *= 0.9
-        #             et_weight *= 1.3
-        #             ct_weight *= 0.8
-        #
-        #         # 确保权重总和为1
-        #         total_weight = it_weight + et_weight + ct_weight
-        #         it_weight /= total_weight
-        #         et_weight /= total_weight
-        #         ct_weight /= total_weight
-        #
-        #         # 为每个类型创建关系
-        #         for tc_type, nodes in tc_types.items():
-        #             if not nodes:
-        #                 continue
-        #
-        #             # 选择节点数量，但不超过可用节点数
-        #             rel_type = f"HAS_{tc_type.upper()}"
-        #
-        #             if tc_type == 'Class':
-        #                 # 为每个Class创建关系
-        #                 for rank, tc_node in enumerate(nodes[:3], 1):
-        #                     pct = 0.0
-        #
-        #                     # 根据Class名称调整百分比
-        #                     class_name = tc_node['properties'].get('name', '')
-        #                     if 'Glutamatergic' in class_name:
-        #                         pct = 0.7  # 谷氨酸能神经元占主导
-        #                     elif 'GABAergic' in class_name:
-        #                         pct = 0.2  # GABA能神经元次之
-        #                     else:
-        #                         pct = 0.1  # 其他类型较少
-        #
-        #                     rel = {
-        #                         'type': 'relationship',
-        #                         'id': str(rel_id_counter),
-        #                         'label': rel_type,
-        #                         'properties': {
-        #                             'pct_cells': pct,
-        #                             'rank': rank,
-        #                             'n_cells': int(100 * pct)  # 假设每个RegionLayer有100个细胞
-        #                         },
-        #                         'start': rl_node,
-        #                         'end': tc_node
-        #                     }
-        #                     relationships.append(rel)
-        #                     rel_id_counter += 1
-        #
-        #             elif tc_type == 'Subclass':
-        #                 # 选择一些Subclass节点
-        #                 selected_nodes = []
-        #
-        #                 # 根据投射类型分类Subclass
-        #                 it_nodes = []
-        #                 et_nodes = []
-        #                 ct_nodes = []
-        #                 other_nodes = []
-        #
-        #                 for node in nodes:
-        #                     proj_type = node['properties'].get('proj_type', 'UNK')
-        #                     if proj_type == 'IT':
-        #                         it_nodes.append(node)
-        #                     elif proj_type == 'ET':
-        #                         et_nodes.append(node)
-        #                     elif proj_type == 'CT':
-        #                         ct_nodes.append(node)
-        #                     else:
-        #                         other_nodes.append(node)
-        #
-        #                 # 根据权重选择不同投射类型的Subclass
-        #                 num_it = max(1, min(3, int(len(it_nodes))))
-        #                 num_et = max(1, min(2, int(len(et_nodes))))
-        #                 num_ct = max(1, min(2, int(len(ct_nodes))))
-        #
-        #                 if it_nodes:
-        #                     selected_nodes.extend(np.random.choice(it_nodes, num_it, replace=False))
-        #                 if et_nodes:
-        #                     selected_nodes.extend(np.random.choice(et_nodes, num_et, replace=False))
-        #                 if ct_nodes:
-        #                     selected_nodes.extend(np.random.choice(ct_nodes, num_ct, replace=False))
-        #
-        #                 # 如果选择的节点太少，添加一些其他节点
-        #                 if len(selected_nodes) < 3 and other_nodes:
-        #                     num_other = min(3 - len(selected_nodes), len(other_nodes))
-        #                     selected_nodes.extend(np.random.choice(other_nodes, num_other, replace=False))
-        #
-        #                 # 创建关系，根据投射类型分配百分比
-        #                 for rank, tc_node in enumerate(selected_nodes, 1):
-        #                     proj_type = tc_node['properties'].get('proj_type', 'UNK')
-        #
-        #                     # 根据投射类型和层分配百分比
-        #                     if proj_type == 'IT':
-        #                         base_pct = it_weight / num_it
-        #                     elif proj_type == 'ET':
-        #                         base_pct = et_weight / num_et
-        #                     elif proj_type == 'CT':
-        #                         base_pct = ct_weight / num_ct
-        #                     else:
-        #                         base_pct = 0.1 / len(selected_nodes)
-        #
-        #                     # 添加一些随机变化
-        #                     pct = min(0.8, max(0.01, base_pct * (0.8 + 0.4 * np.random.random())))
-        #
-        #                     rel = {
-        #                         'type': 'relationship',
-        #                         'id': str(rel_id_counter),
-        #                         'label': rel_type,
-        #                         'properties': {
-        #                             'pct_cells': pct,
-        #                             'rank': rank,
-        #                             'n_cells': int(100 * pct),
-        #                             'proj_type': proj_type
-        #                         },
-        #                         'start': rl_node,
-        #                         'end': tc_node
-        #                     }
-        #                     relationships.append(rel)
-        #                     rel_id_counter += 1
-        #
-        #             elif tc_type == 'Cluster':
-        #                 # 为一些Cluster创建关系
-        #                 num_clusters = min(5, len(nodes))
-        #                 selected_nodes = np.random.choice(nodes, num_clusters, replace=False)
-        #
-        #                 for rank, tc_node in enumerate(selected_nodes, 1):
-        #                     # Cluster的百分比较小
-        #                     pct = min(0.2, max(0.01, 0.05 + 0.15 * np.random.random()))
-        #
-        #                     rel = {
-        #                         'type': 'relationship',
-        #                         'id': str(rel_id_counter),
-        #                         'label': rel_type,
-        #                         'properties': {
-        #                             'pct_cells': pct,
-        #                             'rank': rank,
-        #                             'n_cells': int(100 * pct)
-        #                         },
-        #                         'start': rl_node,
-        #                         'end': tc_node
-        #                     }
-        #                     relationships.append(rel)
-        #                     rel_id_counter += 1
+            elif 'Subclass' in node.get('labels', []):
+                trans_map['subclass'][node_name] = node
+            elif 'Cluster' in node.get('labels', []):
+                trans_map['cluster'][node_name] = node
+
+        # 为模糊匹配添加额外的映射
+        for node_name, node in list(trans_map['class'].items()):
+            node_name_lower = node_name.lower()
+            if 'glutamatergic' in node_name_lower and 'Glutamatergic' not in trans_map['class']:
+                trans_map['class']['Glutamatergic'] = node
+            if 'gabaergic' in node_name_lower and 'GABAergic' not in trans_map['class']:
+                trans_map['class']['GABAergic'] = node
+            if 'glut' in node_name_lower and 'Glut' not in trans_map['class']:
+                trans_map['class']['Glut'] = node
+            if 'gaba' in node_name_lower and 'GABA' not in trans_map['class']:
+                trans_map['class']['GABA'] = node
+
+        logger.info(f"Class节点映射: {len(trans_map['class'])}个")
+        logger.info(f"Subclass节点映射: {len(trans_map['subclass'])}个")
+        logger.info(f"Cluster节点映射: {len(trans_map['cluster'])}个")
+
+        # 创建RegionLayer ID到节点的映射（更全面的匹配）
+        rl_map = {}
+        rl_id_to_node = {}
+
+        for node in region_layer_nodes:
+            props = node['properties']
+            # 主ID
+            rl_id = props.get('rl_id')
+            if rl_id:
+                rl_map[rl_id] = node
+                rl_id_to_node[rl_id] = node
+
+            # 备选ID
+            alt_ids = props.get('alt_rl_ids', [])
+            for alt_id in alt_ids:
+                if alt_id and alt_id not in rl_map:
+                    rl_map[alt_id] = node
+
+        logger.info(f"RegionLayer节点映射: {len(rl_id_to_node)}个主ID, 共{len(rl_map)}个映射")
+
+        # 检查MERFISH中rl_id的覆盖情况
+        if 'HAS_CLASS' in merfish_rels:
+            all_merfish_rl_ids = set(merfish_rels['HAS_CLASS']['rl_id'].unique())
+            matched_ids = all_merfish_rl_ids.intersection(set(rl_map.keys()))
+            missing_rl_ids = all_merfish_rl_ids - set(rl_map.keys())
+
+            logger.info(
+                f"MERFISH RegionLayer ID匹配情况: 总数={len(all_merfish_rl_ids)}, 匹配={len(matched_ids)}, 缺失={len(missing_rl_ids)}")
+
+            if missing_rl_ids:
+                logger.warning(f"示例缺失rl_id: {', '.join(list(missing_rl_ids)[:10])}")
+
+                # 尝试进一步的匹配
+                additional_matches = 0
+                for missing_id in missing_rl_ids:
+                    # 解析RegionLayer ID格式
+                    parts = missing_id.split('_')
+                    if len(parts) != 2:
+                        continue
+
+                    region_part, layer_part = parts
+
+                    # 尝试匹配相似的区域名称
+                    for known_id in rl_map.keys():
+                        if '_' not in known_id:
+                            continue
+
+                        known_region, known_layer = known_id.split('_')
+
+                        # 如果层相同，检查区域名称相似性
+                        if layer_part == known_layer:
+                            # 去除区域名称中的数字和字母后缀
+                            import re
+                            base_missing = re.sub(r'[0-9]+[a-z]*$', '', region_part)
+                            base_known = re.sub(r'[0-9]+[a-z]*$', '', known_region)
+
+                            if base_missing == base_known:
+                                rl_map[missing_id] = rl_map[known_id]
+                                additional_matches += 1
+                                if additional_matches <= 20:  # 限制日志输出
+                                    logger.info(f"为{missing_id}找到匹配: {known_id}")
+
+                if additional_matches > 0:
+                    logger.info(f"通过相似性匹配找到额外{additional_matches}个RegionLayer ID")
+
+                # 为剩余的缺失ID创建通配符匹配
+                still_missing = set()
+                for missing_id in missing_rl_ids:
+                    if missing_id not in rl_map:
+                        still_missing.add(missing_id)
+
+                        # 尝试基于层的匹配
+                        if '_' in missing_id:
+                            region_part, layer_part = missing_id.split('_')
+
+                            # 尝试匹配任何具有相同层的RegionLayer
+                            for known_id, node in rl_id_to_node.items():
+                                if known_id.endswith(f"_{layer_part}"):
+                                    rl_map[missing_id] = node
+                                    break
+
+                if still_missing:
+                    logger.warning(f"仍有{len(still_missing)}个RegionLayer ID无法匹配")
+
+        # 创建HAS_CLASS关系
+        class_rel_count = 0
+        missing_rl_class = set()
+        missing_class_names = set()
+
+        if 'HAS_CLASS' in merfish_rels:
+            for _, row in merfish_rels['HAS_CLASS'].iterrows():
+                rl_id = row.get('rl_id')
+                class_name = row.get('class_name')
+
+                if rl_id in rl_map and class_name in trans_map['class']:
+                    rel = {
+                        'type': 'relationship',
+                        'id': str(rel_id_counter),
+                        'label': 'HAS_CLASS',
+                        'properties': {
+                            'pct_cells': float(row.get('pct_cells', 0)),
+                            'rank': int(row.get('rank', 0)),
+                            'n_cells': int(row.get('n_cells', 0))
+                        },
+                        'start': rl_map[rl_id]['id'],  # 只存储ID
+                        'end': trans_map['class'][class_name]['id']  # 只存储ID
+                    }
+                    relationships.append(rel)
+                    rel_id_counter += 1
+                    class_rel_count += 1
+                else:
+                    if rl_id not in rl_map:
+                        missing_rl_class.add(rl_id)
+                    if class_name not in trans_map['class']:
+                        missing_class_names.add(class_name)
+
+            logger.info(f"创建了{class_rel_count}个HAS_CLASS关系")
+
+            # 如果没有创建关系，报详细错误
+            if class_rel_count == 0:
+                error_msg = "无法创建任何HAS_CLASS关系。\n"
+                if missing_rl_class:
+                    error_msg += f"找不到的RegionLayer ID ({len(missing_rl_class)}个): {', '.join(list(missing_rl_class)[:10])}"
+                    if len(missing_rl_class) > 10:
+                        error_msg += f"... 等{len(missing_rl_class) - 10}个"
+                if missing_class_names:
+                    error_msg += f"\n找不到的Class名称 ({len(missing_class_names)}个): {', '.join(missing_class_names)}"
+
+                raise ValueError(error_msg)
+
+        # 创建HAS_SUBCLASS关系
+        subclass_rel_count = 0
+        missing_rl_subclass = set()
+        missing_subclass_names = set()
+
+        if 'HAS_SUBCLASS' in merfish_rels:
+            for _, row in merfish_rels['HAS_SUBCLASS'].iterrows():
+                rl_id = row.get('rl_id')
+                subclass_name = row.get('subclass_name')
+
+                # 跳过没有子类名的关系
+                if not subclass_name or pd.isna(subclass_name):
+                    continue
+
+                if rl_id in rl_map and subclass_name in trans_map['subclass']:
+                    properties = {
+                        'pct_cells': float(row.get('pct_cells', 0)),
+                        'rank': int(row.get('rank', 0)),
+                        'n_cells': int(row.get('n_cells', 0))
+                    }
+
+                    # 如果有proj_type属性，也添加它
+                    if 'proj_type' in row and not pd.isna(row['proj_type']):
+                        properties['proj_type'] = row['proj_type']
+
+                    rel = {
+                        'type': 'relationship',
+                        'id': str(rel_id_counter),
+                        'label': 'HAS_SUBCLASS',
+                        'properties': properties,
+                        'start': rl_map[rl_id]['id'],  # 只存储ID
+                        'end': trans_map['subclass'][subclass_name]['id']  # 只存储ID
+                    }
+                    relationships.append(rel)
+                    rel_id_counter += 1
+                    subclass_rel_count += 1
+                else:
+                    if rl_id not in rl_map:
+                        missing_rl_subclass.add(rl_id)
+                    if subclass_name not in trans_map['subclass']:
+                        missing_subclass_names.add(subclass_name)
+
+            logger.info(f"创建了{subclass_rel_count}个HAS_SUBCLASS关系")
+
+            if missing_subclass_names and len(missing_subclass_names) < 20:
+                logger.warning(f"找不到的Subclass名称: {missing_subclass_names}")
+
+        # 创建HAS_CLUSTER关系
+        cluster_rel_count = 0
+        missing_rl_cluster = set()
+        missing_cluster_names = set()
+
+        if 'HAS_CLUSTER' in merfish_rels:
+            for _, row in merfish_rels['HAS_CLUSTER'].iterrows():
+                rl_id = row.get('rl_id')
+                cluster_name = row.get('cluster_name')
+
+                # 跳过没有类名的关系
+                if not cluster_name or pd.isna(cluster_name):
+                    continue
+
+                if rl_id in rl_map and cluster_name in trans_map['cluster']:
+                    rel = {
+                        'type': 'relationship',
+                        'id': str(rel_id_counter),
+                        'label': 'HAS_CLUSTER',
+                        'properties': {
+                            'pct_cells': float(row.get('pct_cells', 0)),
+                            'rank': int(row.get('rank', 0)),
+                            'n_cells': int(row.get('n_cells', 0))
+                        },
+                        'start': rl_map[rl_id]['id'],  # 只存储ID
+                        'end': trans_map['cluster'][cluster_name]['id']  # 只存储ID
+                    }
+                    relationships.append(rel)
+                    rel_id_counter += 1
+                    cluster_rel_count += 1
+                else:
+                    if rl_id not in rl_map:
+                        missing_rl_cluster.add(rl_id)
+                    if cluster_name not in trans_map['cluster']:
+                        missing_cluster_names.add(cluster_name)
+
+            logger.info(f"创建了{cluster_rel_count}个HAS_CLUSTER关系")
+
+            if missing_cluster_names and len(missing_cluster_names) < 20:
+                logger.warning(f"找不到的Cluster名称: {missing_cluster_names}")
+
+        # 统计信息
+        total_relations = class_rel_count + subclass_rel_count + cluster_rel_count
+        logger.info(f"总计创建了{total_relations}个转录组关系")
+
+        # 检查是否创建了任何关系
+        if total_relations == 0:
+            logger.error("未能创建任何转录组关系！")
+
+            # 如果MERFISH数据存在但没有创建关系，这是一个错误
+            if has_real_data:
+                error_msg = "尽管MERFISH数据存在，但未能创建任何转录组关系。"
+
+                if missing_rl_class or missing_rl_subclass or missing_rl_cluster:
+                    error_msg += "\n找不到的RegionLayer ID示例: "
+                    missing_rl_all = list(missing_rl_class.union(missing_rl_subclass).union(missing_rl_cluster))
+                    error_msg += f"{', '.join(missing_rl_all[:10])}"
+
+                if missing_class_names or missing_subclass_names or missing_cluster_names:
+                    error_msg += "\n找不到的转录组名称示例: "
+                    missing_all = list(missing_class_names.union(missing_subclass_names).union(missing_cluster_names))
+                    error_msg += f"{', '.join(missing_all[:10])}"
+
+                raise ValueError(error_msg)
 
         # 保存缓存
-        if not relationships:
-            logger.error("没有找到MERFISH转录组关系数据。无法继续构建知识图谱。")
-            logger.error("请确保merfish_data_path指向包含has_class.csv、has_subclass.csv和has_cluster.csv的有效目录。")
-            raise ValueError("缺少必要的MERFISH转录组关系数据，无法构建完整知识图谱。")
         with open(cache_file, 'wb') as f:
             pickle.dump(relationships, f)
 
-        logger.info(f"创建了{len(relationships)}个转录组关系")
         return relationships
 
     # Add this function to KnowledgeGraphRestructure.py
@@ -1974,98 +2192,179 @@ class KnowledgeGraphRestructure:
         """保存新的知识图谱"""
         logger.info(f"保存新知识图谱到 {output_path}...")
 
-        # 备份原始文件
-        if os.path.exists(output_path):
-            backup_path = f"{output_path}.bak"
-            logger.info(f"备份已存在的输出文件到 {backup_path}")
+        # 防止路径冲突，使用时间戳创建唯一的临时文件名
+        import time
+        timestamp = int(time.time())
+        temp_path = f"{output_path}.{timestamp}.tmp"
+
+        try:
+            # 确保输出目录存在
+            output_dir = os.path.dirname(output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+
+            # 处理节点和关系，确保它们可以被序列化
+            processable_nodes = []
+            for node in nodes:
+                node_copy = node.copy()
+                # 移除可能的循环引用
+                if 'start' in node_copy and isinstance(node_copy['start'], dict):
+                    node_copy['start'] = node_copy['start']['id']
+                if 'end' in node_copy and isinstance(node_copy['end'], dict):
+                    node_copy['end'] = node_copy['end']['id']
+                processable_nodes.append(node_copy)
+
+            processable_rels = []
+            for rel in relationships:
+                rel_copy = rel.copy()
+                # 移除可能的循环引用
+                if 'start' in rel_copy and isinstance(rel_copy['start'], dict):
+                    rel_copy['start'] = rel_copy['start']['id']
+                if 'end' in rel_copy and isinstance(rel_copy['end'], dict):
+                    rel_copy['end'] = rel_copy['end']['id']
+                processable_rels.append(rel_copy)
+
+            # 写入临时文件
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                # 逐行写入，避免一次性加载所有内容到内存
+                f.write("[\n")
+
+                # 写入节点
+                for i, node in enumerate(processable_nodes):
+                    node_json = json.dumps(node, ensure_ascii=False)
+                    if i < len(processable_nodes) - 1 or processable_rels:
+                        f.write(node_json + ",\n")
+                    else:
+                        f.write(node_json + "\n")
+
+                # 写入关系
+                for i, rel in enumerate(processable_rels):
+                    rel_json = json.dumps(rel, ensure_ascii=False)
+                    if i < len(processable_rels) - 1:
+                        f.write(rel_json + ",\n")
+                    else:
+                        f.write(rel_json + "\n")
+
+                f.write("]\n")
+
+            # 尝试重命名临时文件到目标路径
             try:
-                shutil.copy2(output_path, backup_path)
-            except Exception as e:
-                logger.warning(f"备份文件失败: {e}")
+                # 先尝试直接重命名
+                os.rename(temp_path, output_path)
+            except PermissionError:
+                # 如果失败，尝试先删除目标文件（如果存在）
+                if os.path.exists(output_path):
+                    try:
+                        os.remove(output_path)
+                        os.rename(temp_path, output_path)
+                    except Exception as e:
+                        # 如果仍然失败，使用备用文件名
+                        backup_path = f"{output_path}.{timestamp}.json"
+                        os.rename(temp_path, backup_path)
+                        logger.warning(f"无法覆盖目标文件，已保存到备用路径: {backup_path}")
+                        return
 
-        # 临时文件路径
-        temp_path = f"{output_path}.tmp"
+            logger.info(f"成功保存知识图谱，共{len(nodes)}个节点和{len(relationships)}个关系")
+        except Exception as e:
+            logger.error(f"保存知识图谱失败: {e}")
+            if os.path.exists(temp_path):
+                backup_path = f"{output_path}.{timestamp}.json"
+                try:
+                    os.rename(temp_path, backup_path)
+                    logger.warning(f"已保存到备用路径: {backup_path}")
+                except:
+                    logger.error(f"无法保存到备用路径，临时文件位于: {temp_path}")
+            raise
 
-        # 合并所有数据
-        all_data = nodes + relationships
+    def check_neo4j_schema(self) -> bool:
+        """检查Neo4j数据库是否有必要的约束和索引"""
+        if self.neo4j_conn is None:
+            logger.warning("无法检查Neo4j模式，未连接到数据库")
+            return True
 
-        # 保存为临时JSON文件
-        with open(temp_path, 'w') as f:
-            json.dump(all_data, f, indent=2)
+        try:
+            with self.neo4j_conn.session() as session:
+                # 检查必要的约束
+                constraints_result = session.run("CALL db.constraints()")
+                constraints = [record["name"] for record in constraints_result if "name" in record]
 
-            # 如果成功，重命名为最终文件
-            os.rename(temp_path, output_path)
+                required_constraints = [
+                    "pk_regionlayer",  # RegionLayer.rl_id 唯一约束
+                    "pk_region",  # Region.region_id 唯一约束
+                    "pk_subclass",  # Subclass.tran_id 唯一约束
+                    "pk_class",  # Class.tran_id 唯一约束
+                    "pk_gene"  # Gene.symbol 唯一约束
+                ]
 
-            logger.info(f"保存完成: {len(nodes)}个节点, {len(relationships)}条关系")
+                missing_constraints = [c for c in required_constraints if
+                                       not any(c in constraint for constraint in constraints)]
 
-        def check_neo4j_schema(self) -> bool:
-            """检查Neo4j数据库是否有必要的约束和索引"""
-            if self.neo4j_conn is None:
-                logger.warning("无法检查Neo4j模式，未连接到数据库")
+                if missing_constraints:
+                    logger.warning(f"Neo4j数据库缺少必要的约束: {missing_constraints}")
+                    logger.warning("请运行以下Cypher语句创建约束:")
+                    for constraint in missing_constraints:
+                        if constraint == "pk_regionlayer":
+                            logger.warning(
+                                "CREATE CONSTRAINT pk_regionlayer IF NOT EXISTS FOR (rl:RegionLayer) REQUIRE rl.rl_id IS UNIQUE;")
+                        elif constraint == "pk_region":
+                            logger.warning(
+                                "CREATE CONSTRAINT pk_region IF NOT EXISTS FOR (r:Region) REQUIRE r.region_id IS UNIQUE;")
+                        elif constraint == "pk_subclass":
+                            logger.warning(
+                                "CREATE CONSTRAINT pk_subclass IF NOT EXISTS FOR (s:Subclass) REQUIRE s.tran_id IS UNIQUE;")
+                        elif constraint == "pk_class":
+                            logger.warning(
+                                "CREATE CONSTRAINT pk_class IF NOT EXISTS FOR (c:Class) REQUIRE c.tran_id IS UNIQUE;")
+                        elif constraint == "pk_gene":
+                            logger.warning(
+                                "CREATE CONSTRAINT pk_gene IF NOT EXISTS FOR (g:Gene) REQUIRE g.symbol IS UNIQUE;")
+
+                    return False
+
                 return True
+        except Exception as e:
+            logger.error(f"检查Neo4j模式时出错: {e}")
+            return False
 
-            try:
-                with self.neo4j_conn.session() as session:
-                    # 检查必要的约束
-                    constraints_result = session.run("CALL db.constraints()")
-                    constraints = [record["name"] for record in constraints_result if "name" in record]
-
-                    required_constraints = [
-                        "pk_regionlayer",  # RegionLayer.rl_id 唯一约束
-                        "pk_region",  # Region.region_id 唯一约束
-                        "pk_subclass",  # Subclass.tran_id 唯一约束
-                        "pk_class",  # Class.tran_id 唯一约束
-                        "pk_gene"  # Gene.symbol 唯一约束
-                    ]
-
-                    missing_constraints = [c for c in required_constraints if
-                                           not any(c in constraint for constraint in constraints)]
-
-                    if missing_constraints:
-                        logger.warning(f"Neo4j数据库缺少必要的约束: {missing_constraints}")
-                        logger.warning("请运行以下Cypher语句创建约束:")
-                        for constraint in missing_constraints:
-                            if constraint == "pk_regionlayer":
-                                logger.warning(
-                                    "CREATE CONSTRAINT pk_regionlayer IF NOT EXISTS FOR (rl:RegionLayer) REQUIRE rl.rl_id IS UNIQUE;")
-                            elif constraint == "pk_region":
-                                logger.warning(
-                                    "CREATE CONSTRAINT pk_region IF NOT EXISTS FOR (r:Region) REQUIRE r.region_id IS UNIQUE;")
-                            elif constraint == "pk_subclass":
-                                logger.warning(
-                                    "CREATE CONSTRAINT pk_subclass IF NOT EXISTS FOR (s:Subclass) REQUIRE s.tran_id IS UNIQUE;")
-                            elif constraint == "pk_class":
-                                logger.warning(
-                                    "CREATE CONSTRAINT pk_class IF NOT EXISTS FOR (c:Class) REQUIRE c.tran_id IS UNIQUE;")
-                            elif constraint == "pk_gene":
-                                logger.warning(
-                                    "CREATE CONSTRAINT pk_gene IF NOT EXISTS FOR (g:Gene) REQUIRE g.symbol IS UNIQUE;")
-
-                        return False
-
-                    return True
-            except Exception as e:
-                logger.error(f"检查Neo4j模式时出错: {e}")
-                return False
-
-    def run(self, output_path: str = "kg_v2.3.json", strict_mode: bool = True) -> Dict[str, Any]:
-        """运行完整的重构流程
+    def run(self, output_path: str = "kg_v2.3.json", force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        运行完整的重构流程
 
         Args:
-            output_path: 输出文件路径
-            strict_mode: 严格模式，当缺少关键数据时报错而不是使用默认值或随机值
+            output_path: 输出JSON文件路径
+            force_refresh: 是否强制刷新缓存
         """
         logger.info("开始知识图谱重构...")
         start_time = time.time()
 
+        # 如果需要强制刷新缓存
+        if force_refresh:
+            logger.info("强制刷新缓存...")
+            self.clear_cache()
+
         # 检查Neo4j模式
         if self.neo4j_conn is not None:
             if not self.check_neo4j_schema():
-                logger.error("Neo4j模式检查失败，请先创建必要的约束和索引")
-                raise ValueError("Neo4j模式检查失败")
+                raise ValueError("Neo4j模式检查失败，请先创建必要的约束和索引")
 
         # 1. 加载现有知识图谱
         nodes, relationships = self.load_kg()
+
+        # 输出节点类型统计信息，帮助诊断
+        node_types = {}
+        for node in nodes:
+            labels = tuple(node.get('labels', []))
+            node_types[labels] = node_types.get(labels, 0) + 1
+
+        logger.info("节点类型分布:")
+        for labels, count in node_types.items():
+            logger.info(f"  {', '.join(labels)}: {count}个")
+
+        # 确认加载了足够的数据
+        if not nodes:
+            raise ValueError("无法从知识图谱加载任何节点")
+        if not relationships:
+            logger.warning("从知识图谱加载的关系为空")
 
         # 分离不同类型的节点
         region_nodes = [n for n in nodes if 'Region' in n.get('labels', [])]
@@ -2075,17 +2374,16 @@ class KnowledgeGraphRestructure:
 
         logger.info(f"找到{len(region_nodes)}个Region节点和{len(transcriptomic_nodes)}个转录组节点")
 
-        # 验证关键节点存在
-        if strict_mode and not region_nodes:
-            raise ValueError("未找到Region节点，无法继续构建知识图谱")
+        # 验证是否有足够的节点
+        if not region_nodes:
+            raise ValueError("无法找到任何Region节点。请确保知识图谱中包含Region节点。")
+        if not transcriptomic_nodes:
+            raise ValueError("无法找到任何转录组节点。请确保知识图谱中包含Class、Subclass或Cluster节点。")
 
         # 2. 创建RegionLayer节点
         region_layer_nodes = self.create_region_layer_nodes(region_nodes)
         if not region_layer_nodes:
-            error_msg = "未创建任何RegionLayer节点！请检查Region节点是否有name属性，以及是否有皮层区域。"
-            if strict_mode:
-                raise ValueError(error_msg)
-            logger.warning(error_msg)
+            raise ValueError("未创建任何RegionLayer节点！请检查Region节点是否有name属性，以及是否有皮层区域。")
 
         # 3. 计算形态学统计
         morpho_stats = self.calculate_morphology_stats(region_layer_nodes)
@@ -2095,57 +2393,53 @@ class KnowledgeGraphRestructure:
             rl_id = node['properties']['rl_id']
             if rl_id in morpho_stats:
                 node['properties'].update(morpho_stats[rl_id])
-            elif strict_mode:
-                raise ValueError(f"缺少RegionLayer节点 {rl_id} 的形态学统计数据")
             else:
                 # 设置默认值以确保节点有所有必需的属性
-                logger.warning(f"为 {rl_id} 使用默认形态学属性值")
-                for key, default in [
-                    ('it_pct', 0.5),
-                    ('et_pct', 0.3),
-                    ('ct_pct', 0.2),
-                    ('lr_pct', 0.3),
-                    ('lr_prior', 0.2),
-                    ('morph_ax_len_mean', 0.0),
-                    ('morph_ax_len_std', 0.0),
-                    ('dend_polarity_index_mean', 0.0),
-                    ('dend_br_std', 0.0),
-                    ('n_neuron', 0)
-                ]:
-                    if key not in node['properties']:
-                        node['properties'][key] = default
+                if 'it_pct' not in node['properties']:
+                    node['properties']['it_pct'] = 0.5
+                if 'et_pct' not in node['properties']:
+                    node['properties']['et_pct'] = 0.3
+                if 'ct_pct' not in node['properties']:
+                    node['properties']['ct_pct'] = 0.2
+                if 'lr_pct' not in node['properties']:
+                    node['properties']['lr_pct'] = 0.3
+                if 'lr_prior' not in node['properties']:
+                    node['properties']['lr_prior'] = 0.2
+                if 'morph_ax_len_mean' not in node['properties']:
+                    node['properties']['morph_ax_len_mean'] = 0.0
+                if 'morph_ax_len_std' not in node['properties']:
+                    node['properties']['morph_ax_len_std'] = 0.0
+                if 'dend_polarity_index_mean' not in node['properties']:
+                    node['properties']['dend_polarity_index_mean'] = 0.0
+                if 'dend_br_std' not in node['properties']:
+                    node['properties']['dend_br_std'] = 0.0
+                if 'n_neuron' not in node['properties']:
+                    node['properties']['n_neuron'] = 0
 
         # 5. 更新Subclass节点
         self.update_subclass_nodes(transcriptomic_nodes)
 
         # 6. 创建HAS_LAYER关系
         has_layer_rels = self.create_has_layer_relationships(region_nodes, region_layer_nodes)
+        if not has_layer_rels:
+            raise ValueError("未创建任何HAS_LAYER关系！请检查Region节点和RegionLayer节点的匹配情况。")
 
         # 7. 创建转录组关系
         transcriptomic_rels = self.create_transcriptomic_relationships(
             region_layer_nodes, transcriptomic_nodes
         )
-
-        if strict_mode and not transcriptomic_rels:
-            raise ValueError("未创建任何转录组关系，可能是MERFISH数据缺失或格式错误")
+        if not transcriptomic_rels:
+            raise ValueError("未创建任何转录组关系！请检查MERFISH数据和知识图谱的匹配情况。")
 
         # 8. 更新投射关系
         self.update_projection_relationships(relationships, morpho_stats)
 
-        # 9. 创建基因节点和共表达关系
-        gene_nodes, coexpression_rels = self.create_gene_nodes_and_relationships(nodes)
+        # 9. 合并所有节点和关系
+        # 这里是之前缺少的定义
+        all_nodes = nodes + region_layer_nodes
+        all_relationships = relationships + has_layer_rels + transcriptomic_rels
 
-        if strict_mode and not coexpression_rels:
-            raise ValueError("未创建任何基因共表达关系，任务④(Fezf2模块分析)将无法运行")
-
-        # 10. 更新RegionLayer基因表达数据
-        self.update_regionlayer_gene_expression(region_layer_nodes)
-
-        # 11. 合并所有节点和关系
-        all_nodes = nodes + region_layer_nodes + gene_nodes
-        all_relationships = relationships + has_layer_rels + transcriptomic_rels + coexpression_rels
-
-        # 12. 保存新的知识图谱
+        # 10. 保存新的知识图谱
         self.save_new_kg(all_nodes, all_relationships, output_path)
 
         elapsed_time = time.time() - start_time
@@ -2155,11 +2449,30 @@ class KnowledgeGraphRestructure:
             'total_nodes': len(all_nodes),
             'total_relationships': len(all_relationships),
             'new_region_layer_nodes': len(region_layer_nodes),
-            'new_gene_nodes': len(gene_nodes),
-            'new_relationships': len(has_layer_rels) + len(transcriptomic_rels) + len(coexpression_rels),
-            'coexpression_relationships': len(coexpression_rels),
+            'new_relationships': len(has_layer_rels) + len(transcriptomic_rels),
             'elapsed_time': f"{elapsed_time:.2f}秒"
         }
+
+    def clear_cache(self):
+        """清除所有缓存文件"""
+        logger.info("清除缓存文件...")
+
+        if not self.cache_dir or not self.cache_dir.exists():
+            logger.info("缓存目录不存在，无需清除")
+            return
+
+        try:
+            cache_files = list(self.cache_dir.glob("*.pkl"))
+            logger.info(f"找到{len(cache_files)}个缓存文件")
+
+            for cache_file in cache_files:
+                try:
+                    cache_file.unlink()
+                    logger.info(f"已删除缓存文件: {cache_file}")
+                except Exception as e:
+                    logger.warning(f"无法删除缓存文件 {cache_file}: {e}")
+        except Exception as e:
+            logger.error(f"清除缓存时发生错误: {e}")
 
 
 # Update the main function to add the --strict flag
@@ -2169,15 +2482,53 @@ def main():
     parser = argparse.ArgumentParser(description='知识图谱重构工具 - KG 2.3版本')
     parser.add_argument('kg_path', help='现有知识图谱JSON文件路径、包含CSV文件的目录或Neo4j连接URI')
     parser.add_argument('--morpho-data', '-m', required=True, help='形态学数据文件夹路径')
-    parser.add_argument('--merfish-data', '-f', help='MERFISH数据路径（可选）')
+    parser.add_argument('--merfish-data', '-f', required=True, help='MERFISH数据路径（必需）')
     parser.add_argument('--output', '-o', default='kg_v2.3.json', help='输出JSON文件路径')
     parser.add_argument('--cache-dir', '-c', help='缓存目录路径（可选，默认为系统临时目录）')
-    parser.add_argument('--strict', '-s', action='store_true',
-                        help='严格模式：当缺少必要数据时报错而不是使用默认值或随机值')
+    parser.add_argument('--force', action='store_true', help='强制重新生成缓存')
+    parser.add_argument('--fix-kg', action='store_true', help='修复知识图谱文件格式并保存为标准JSON')
 
     args = parser.parse_args()
 
     try:
+        # 验证必要的文件和目录是否存在
+        kg_path = Path(args.kg_path)
+        if not kg_path.exists():
+            logger.error(f"知识图谱文件不存在: {kg_path}")
+            sys.exit(1)
+
+        morpho_path = Path(args.morpho_data)
+        if not morpho_path.exists() or not morpho_path.is_dir():
+            logger.error(f"形态学数据目录不存在或不是目录: {morpho_path}")
+            sys.exit(1)
+
+        merfish_path = Path(args.merfish_data)
+        if not merfish_path.exists() or not merfish_path.is_dir():
+            logger.error(f"MERFISH数据目录不存在或不是目录: {merfish_path}")
+            sys.exit(1)
+
+        # 如果指定了fix-kg，先修复知识图谱文件
+        if args.fix_kg:
+            try:
+                from kg_parser import parse_kg_file, save_standard_json
+
+                # 生成修复后的文件名
+                fixed_kg_path = kg_path.with_suffix('.fixed.json')
+
+                # 解析并保存修复后的文件
+                logger.info(f"修复知识图谱文件: {kg_path} -> {fixed_kg_path}")
+                nodes, relationships = parse_kg_file(str(kg_path))
+                save_standard_json(nodes, relationships, str(fixed_kg_path))
+
+                # 使用修复后的文件
+                args.kg_path = str(fixed_kg_path)
+                logger.info(f"将使用修复后的文件: {args.kg_path}")
+            except ImportError:
+                logger.warning("无法导入kg_parser模块，跳过修复")
+            except Exception as e:
+                logger.error(f"修复知识图谱文件失败: {e}")
+                sys.exit(1)
+
         # 初始化重构器
         restructurer = KnowledgeGraphRestructure(
             kg_path=args.kg_path,
@@ -2187,7 +2538,7 @@ def main():
         )
 
         # 运行重构
-        results = restructurer.run(output_path=args.output, strict_mode=args.strict)
+        results = restructurer.run(output_path=args.output, force_refresh=args.force)
 
         print("\n重构结果:")
         for key, value in results.items():
@@ -2195,13 +2546,9 @@ def main():
 
         print(f"\n知识图谱已保存到: {args.output}")
 
-        # 如果有基因共表达关系，特别标注
-        if results.get('coexpression_relationships', 0) > 0:
-            print(
-                f"\n成功创建了 {results['coexpression_relationships']} 个基因共表达关系，任务④(Fezf2模块分析)可正常运行")
-        else:
-            print("\n警告：未创建基因共表达关系，任务④(Fezf2模块分析)将无法运行")
-
+    except ValueError as e:
+        logger.error(f"数据验证错误: {e}")
+        sys.exit(1)
     except Exception as e:
         logger.error(f"重构过程中发生错误: {e}", exc_info=True)
         sys.exit(1)

@@ -101,7 +101,7 @@ class KnowledgeGraphRestructure:
         return uri, username, password
 
     def load_kg(self) -> Tuple[List[Dict], List[Dict]]:
-        """加载现有知识图谱"""
+        """加载现有知识图谱 - 修复版本"""
         logger.info("加载现有知识图谱...")
 
         # 检查是否从Neo4j读取
@@ -120,14 +120,56 @@ class KnowledgeGraphRestructure:
 
         # 否则假定是单一JSON文件
         try:
-            with open(self.kg_path, 'r') as f:
-                kg_data = json.load(f)
+            # 读取文件内容
+            with open(self.kg_path, 'r', encoding='utf-8') as f:
+                content = f.read()
 
-            nodes = [item for item in kg_data if item['type'] == 'node']
-            relationships = [item for item in kg_data if item['type'] == 'relationship']
+            # 预处理内容，处理您的特殊格式
+            content = content.strip()
+
+            # 检查是否是您的特殊格式（以{开始，没有[）
+            if content.startswith('{') and not content.startswith('['):
+                logger.info("检测到非标准JSON格式，进行预处理...")
+
+                # 方法1：将整个内容包装在数组中
+                content = '[' + content + ']'
+
+                # 修复可能的尾随逗号
+                content = re.sub(r',\s*]', ']', content)
+
+            try:
+                kg_data = json.loads(content)
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON解析失败: {e}")
+
+                # 方法2：逐个对象解析
+                logger.info("尝试逐个解析JSON对象...")
+                kg_data = []
+
+                # 使用正则表达式分割对象
+                # 匹配完整的JSON对象
+                object_pattern = re.compile(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}')
+                objects = object_pattern.findall(content)
+
+                for obj_str in objects:
+                    try:
+                        obj = json.loads(obj_str)
+                        kg_data.append(obj)
+                    except json.JSONDecodeError:
+                        logger.warning(f"无法解析对象: {obj_str[:100]}...")
+
+                logger.info(f"成功解析了{len(kg_data)}个对象")
+
+            # 确保kg_data是列表
+            if not isinstance(kg_data, list):
+                kg_data = [kg_data]
+
+            nodes = [item for item in kg_data if item.get('type') == 'node']
+            relationships = [item for item in kg_data if item.get('type') == 'relationship']
 
             logger.info(f"加载完成: {len(nodes)}个节点, {len(relationships)}条关系")
             return nodes, relationships
+
         except Exception as e:
             logger.error(f"加载知识图谱失败: {e}")
             logger.error(f"文件路径: {self.kg_path}")
@@ -240,7 +282,7 @@ class KnowledgeGraphRestructure:
         return nodes, relationships
 
     def load_morphology_data(self):
-        """加载形态学数据并处理不同的CSV格式"""
+        """加载形态学数据并处理不同的CSV格式 - 修复版本"""
         logger.info("加载形态学数据...")
         self.morpho_data = {}
 
@@ -249,79 +291,85 @@ class KnowledgeGraphRestructure:
         if axon_morpho_file.exists():
             try:
                 axon_morpho = pd.read_csv(axon_morpho_file)
-                # 检查ID列的位置
+                # 过滤掉ccf_thin数据
                 id_col = self._identify_id_column(axon_morpho)
-                if id_col:
+                if id_col and id_col in axon_morpho.columns:
+                    # 过滤掉包含ccf_thin的ID
+                    mask = ~axon_morpho[id_col].astype(str).str.contains('ccf_thin|local',case=False, na=False)
+                    axon_morpho = axon_morpho[mask]
+                    logger.info(f"过滤后剩余{len(axon_morpho)}条轴突形态学数据")
+
+                # 设置索引
+                if id_col and id_col in axon_morpho.columns:
                     axon_morpho = axon_morpho.set_index(id_col)
                 self.morpho_data['axon'] = axon_morpho
                 logger.info(f"加载了{len(axon_morpho)}条轴突形态学数据")
             except Exception as e:
                 logger.error(f"加载轴突形态学数据失败: {e}")
                 self.morpho_data['axon'] = pd.DataFrame()
-        else:
-            logger.warning(f"轴突形态学数据文件不存在: {axon_morpho_file}")
-            self.morpho_data['axon'] = pd.DataFrame()
 
         # 2. 加载树突形态学数据
         den_morpho_file = self.morpho_data_path / "denfull_morpho.csv"
         if den_morpho_file.exists():
             try:
                 den_morpho = pd.read_csv(den_morpho_file)
+                # 过滤掉ccf_thin数据
                 id_col = self._identify_id_column(den_morpho)
-                if id_col:
+                if id_col and id_col in den_morpho.columns:
+                    mask = ~den_morpho[id_col].astype(str).str.contains('ccf_thin|local',case=False, na=False)
+                    den_morpho = den_morpho[mask]
+                    logger.info(f"过滤后剩余{len(den_morpho)}条树突形态学数据")
                     den_morpho = den_morpho.set_index(id_col)
                 self.morpho_data['dendrite'] = den_morpho
                 logger.info(f"加载了{len(den_morpho)}条树突形态学数据")
             except Exception as e:
                 logger.error(f"加载树突形态学数据失败: {e}")
                 self.morpho_data['dendrite'] = pd.DataFrame()
-        else:
-            logger.warning(f"树突形态学数据文件不存在: {den_morpho_file}")
-            self.morpho_data['dendrite'] = pd.DataFrame()
 
         # 3. 加载神经元信息和投射类型
         info_file = self.morpho_data_path / "info_with_projection_type.csv"
         if not info_file.exists():
-            info_file = self.morpho_data_path / "info.csv"  # 尝试备用文件名
+            info_file = self.morpho_data_path / "info.csv"
 
         if info_file.exists():
             try:
-                neuron_info = pd.read_csv(info_file)
+                # 使用low_memory=False解决混合类型警告
+                neuron_info = pd.read_csv(info_file, low_memory=False)
+                # 过滤掉ccf_thin数据
                 id_col = self._identify_id_column(neuron_info)
-                if id_col:
+                if id_col and id_col in neuron_info.columns:
+                    mask = ~neuron_info[id_col].astype(str).str.contains('ccf_thin|local',case=False, na=False)
+                    neuron_info = neuron_info[mask]
+                    logger.info(f"过滤后剩余{len(neuron_info)}条神经元信息数据")
                     neuron_info = neuron_info.set_index(id_col)
                 self.morpho_data['info'] = neuron_info
                 logger.info(f"加载了{len(neuron_info)}条神经元信息数据")
             except Exception as e:
                 logger.error(f"加载神经元信息数据失败: {e}")
                 self.morpho_data['info'] = pd.DataFrame()
-        else:
-            logger.warning(f"神经元信息数据文件不存在: {info_file}")
-            self.morpho_data['info'] = pd.DataFrame()
 
-        # 4. 加载投射轴突长度数据 - 处理特殊格式
+        # 4. 加载投射轴突长度数据
         proj_axon_file = self.morpho_data_path / "Proj_Axon_Final.csv"
         if not proj_axon_file.exists():
             proj_axon_file = self.morpho_data_path / "Proj_Axon_abs.csv"
 
         if proj_axon_file.exists():
             try:
-                # 使用特殊处理方法加载投射数据
                 proj_axon = pd.read_csv(proj_axon_file)
+                # 过滤掉ccf_thin数据
                 id_col = self._identify_id_column(proj_axon)
+                if id_col and id_col in proj_axon.columns:
+                    mask = ~proj_axon[id_col].astype(str).str.contains('ccf_thin|local',case=False, na=False)
+                    proj_axon = proj_axon[mask]
+                    logger.info(f"过滤后剩余{len(proj_axon)}行投射轴突数据")
+                    proj_axon = proj_axon.set_index(id_col)
 
                 # 分析列结构
                 abs_cols = [col for col in proj_axon.columns if '_abs' in col]
-                rela_cols = [col for col in proj_axon.columns if '_rela' in col]
-
                 if abs_cols:
                     logger.info(f"检测到{len(abs_cols)}个绝对值投射列")
-                    # 提取区域名称
                     regions = [col.replace('proj_axon_', '').replace('_abs', '') for col in abs_cols]
                     logger.info(f"投射目标区域包括: {', '.join(regions[:5])}等{len(regions)}个区域")
-
-                if id_col:
-                    proj_axon = proj_axon.set_index(id_col)
 
                 self.morpho_data['proj_axon'] = proj_axon
                 logger.info(f"加载了{len(proj_axon)}行投射轴突数据")
@@ -329,9 +377,6 @@ class KnowledgeGraphRestructure:
             except Exception as e:
                 logger.error(f"加载投射轴突长度数据失败: {e}")
                 self.morpho_data['proj_axon'] = pd.DataFrame()
-        else:
-            logger.warning(f"投射轴突长度数据文件不存在: {proj_axon_file}")
-            self.morpho_data['proj_axon'] = pd.DataFrame()
 
         # 5. 加载连接数据
         connections_file = self.morpho_data_path / "Connections_CCF-thin_final_250218.csv"
@@ -341,31 +386,35 @@ class KnowledgeGraphRestructure:
         if connections_file.exists():
             try:
                 connections = pd.read_csv(connections_file)
+                # 过滤ccf_thin数据
+                for col in ['source_id', 'target_id', 'ID', 'id']:
+                    if col in connections.columns:
+                        mask = ~connections[col].astype(str).str.contains('ccf_thin|local',case=False, na=False)
+                        connections = connections[mask]
+
                 self.morpho_data['connections'] = connections
                 logger.info(f"加载了{len(connections)}条连接数据")
             except Exception as e:
                 logger.error(f"加载连接数据失败: {e}")
                 self.morpho_data['connections'] = pd.DataFrame()
-        else:
-            logger.warning(f"连接数据文件不存在: {connections_file}")
-            self.morpho_data['connections'] = pd.DataFrame()
 
         # 6. 加载神经元位置数据
         soma_file = self.morpho_data_path / "soma.csv"
         if soma_file.exists():
             try:
                 soma = pd.read_csv(soma_file)
+                # 过滤ccf_thin数据
                 id_col = self._identify_id_column(soma)
-                if id_col:
+                if id_col and id_col in soma.columns:
+                    mask = ~soma[id_col].astype(str).str.contains('ccf_thin|local',case=False, na=False)
+                    soma = soma[mask]
+                    logger.info(f"过滤后剩余{len(soma)}条神经元位置数据")
                     soma = soma.set_index(id_col)
                 self.morpho_data['soma'] = soma
                 logger.info(f"加载了{len(soma)}条神经元位置数据")
             except Exception as e:
                 logger.error(f"加载神经元位置数据失败: {e}")
                 self.morpho_data['soma'] = pd.DataFrame()
-        else:
-            logger.warning(f"神经元位置数据文件不存在: {soma_file}")
-            self.morpho_data['soma'] = pd.DataFrame()
 
         # 7. 尝试加载连接矩阵
         connection_matrix_file = self.morpho_data_path / "all_connection_20250218.csv"
@@ -377,8 +426,6 @@ class KnowledgeGraphRestructure:
             except Exception as e:
                 logger.error(f"加载连接矩阵失败: {e}")
                 self.morpho_data['connection_matrix'] = pd.DataFrame()
-        else:
-            self.morpho_data['connection_matrix'] = pd.DataFrame()
 
     def _identify_id_column(self, df):
         """识别数据框中的ID列"""
@@ -409,14 +456,18 @@ class KnowledgeGraphRestructure:
             # 检查是否有Unnamed: 0列作为索引
             id_col = self._identify_id_column(df)
             if id_col:
+                # 过滤ccf_thin数据
+                df = df[~df[id_col].astype(str).str.contains('ccf_thin|local', case=False, na=False)]
                 df = df.set_index(id_col)
                 df.index.name = 'ID'
 
-            # 处理可能的内存优化
+            # 处理可能的内存优化 - 修复稀疏矩阵错误
             if df.shape[1] > 1000:
                 logger.info(f"连接矩阵包含{df.shape[1]}列，进行内存优化")
+                # 不使用sparse访问器，直接处理
                 # 将小于阈值的值设为0以减少内存占用
-                df = df.sparse.to_dense()
+                threshold = 0.01
+                df[df < threshold] = 0
 
             return df
 
@@ -600,19 +651,49 @@ class KnowledgeGraphRestructure:
         return any(region_name.startswith(prefix) for prefix in cortical_prefixes)
 
     def _layer_num_to_name(self, layer_num, layer_map) -> str:
-        """将层数字转换为层名称"""
+        """将层数字转换为层名称 - 修复版本"""
         if pd.isna(layer_num):
             return 'L5'  # 默认层
 
-        layer_num = int(layer_num)
+        # 处理字符串类型的层号（如 '6a', '6b'）
+        layer_str = str(layer_num).strip()
+
+        # 特殊处理
+        if layer_str == '6a':
+            return 'L6'
+        elif layer_str == '6b':
+            return 'L6b'
+        elif layer_str in ['2/3', '2-3', '23']:
+            return 'L2/3'
+
+        # 尝试提取数字部分
+        try:
+            # 提取第一个数字
+            import re
+            match = re.search(r'(\d+)', layer_str)
+            if match:
+                layer_num = int(match.group(1))
+            else:
+                return 'L5'  # 默认层
+        except:
+            return 'L5'  # 默认层
+
+        # 使用映射
         for layer_name, nums in layer_map.items():
             if layer_num in nums:
                 return layer_name
 
-        return f"L{layer_num}"  # 直接转换
+        # 直接转换
+        if 1 <= layer_num <= 6:
+            if layer_num == 6:
+                return 'L6'
+            else:
+                return f"L{layer_num}"
+
+        return 'L5'  # 默认层
 
     def calculate_morphology_stats(self, region_layer_nodes: List[Dict]) -> Dict[str, Dict]:
-        """计算每个RegionLayer的形态学统计信息"""
+        """计算每个RegionLayer的形态学统计信息 - 修复版本"""
         cache_file = self.cache_dir / "morphology_stats.pkl"
 
         if cache_file.exists():
@@ -627,336 +708,204 @@ class KnowledgeGraphRestructure:
             axon_df = self.morpho_data.get('axon', pd.DataFrame())
             dendrite_df = self.morpho_data.get('dendrite', pd.DataFrame())
             info_df = self.morpho_data.get('info', pd.DataFrame())
-
-            # 检查数据是否为空
-            if axon_df.empty:
-                logger.warning("轴突形态学数据为空，结果可能不准确")
-            if dendrite_df.empty:
-                logger.warning("树突形态学数据为空，结果可能不准确")
-            if info_df.empty:
-                logger.warning("神经元信息数据为空，结果可能不准确")
         else:
-            # 如果未预先加载，现在加载形态学数据
-            logger.info("未找到预加载的形态学数据，正在加载...")
-            morpho_files = {
-                'axon': self.morpho_data_path / 'axonfull_morpho.csv',
-                'dendrite': self.morpho_data_path / 'denfull_morpho.csv',
-                'info': self.morpho_data_path / 'info_with_projection_type.csv'
-            }
+            logger.error("未找到形态学数据")
+            return {}
 
-            # 检查文件是否存在
-            for key, file_path in morpho_files.items():
-                if not file_path.exists():
-                    if key == 'info' and (self.morpho_data_path / 'info.csv').exists():
-                        morpho_files[key] = self.morpho_data_path / 'info.csv'
-                        logger.info(f"使用备用信息文件: {morpho_files[key]}")
-                    else:
-                        logger.error(f"形态学数据文件不存在: {file_path}")
-                        raise FileNotFoundError(f"形态学数据文件不存在: {file_path}")
+        if axon_df.empty and dendrite_df.empty and info_df.empty:
+            logger.warning("所有形态学数据都为空")
+            return {}
 
-            # 读取数据
-            logger.info("读取形态学数据...")
-            axon_df = pd.read_csv(morpho_files['axon'])
-            dendrite_df = pd.read_csv(morpho_files['dendrite'])
-            info_df = pd.read_csv(morpho_files['info'])
-
-            # 检查ID列
-            id_cols = {}
-            for name, df in [('axon', axon_df), ('dendrite', dendrite_df), ('info', info_df)]:
-                id_cols[name] = self._identify_id_column(df)
-                if id_cols[name]:
-                    logger.info(f"{name}数据使用{id_cols[name]}作为ID列")
-
-        # 合并数据前处理ID列
-        if 'ID' not in axon_df.columns and hasattr(axon_df, 'index') and axon_df.index.name != 'ID':
-            # 如果索引不是'ID'，尝试重置索引
-            if axon_df.index.name:
-                axon_df = axon_df.reset_index()
-
-        if 'ID' not in dendrite_df.columns and hasattr(dendrite_df, 'index') and dendrite_df.index.name != 'ID':
-            if dendrite_df.index.name:
-                dendrite_df = dendrite_df.reset_index()
-
-        if 'ID' not in info_df.columns and hasattr(info_df, 'index') and info_df.index.name != 'ID':
-            if info_df.index.name:
-                info_df = info_df.reset_index()
-
-        # 合并数据
+        # 准备合并
         logger.info("合并形态学数据...")
-        # 确定要使用的ID列
-        axon_id_col = 'ID' if 'ID' in axon_df.columns else axon_df.columns[0]
-        dendrite_id_col = 'ID' if 'ID' in dendrite_df.columns else dendrite_df.columns[0]
-        info_id_col = 'ID' if 'ID' in info_df.columns else info_df.columns[0]
 
-        # 使用更高效的合并方式
+        # 重置索引以确保有ID列
+        if axon_df.index.name:
+            axon_df = axon_df.reset_index()
+        if dendrite_df.index.name:
+            dendrite_df = dendrite_df.reset_index()
+        if info_df.index.name:
+            info_df = info_df.reset_index()
+
+        # 确定ID列
+        axon_id_col = self._identify_id_column(axon_df) if not axon_df.empty else None
+        dendrite_id_col = self._identify_id_column(dendrite_df) if not dendrite_df.empty else None
+        info_id_col = self._identify_id_column(info_df) if not info_df.empty else None
+
+        # 准备数据子集
+        axon_subset = axon_df.copy() if not axon_df.empty else pd.DataFrame()
+        dendrite_subset = dendrite_df.copy() if not dendrite_df.empty else pd.DataFrame()
+
+        # 重命名ID列为统一名称
+        if axon_id_col and not axon_subset.empty:
+            axon_subset = axon_subset.rename(columns={axon_id_col: 'neuron_id'})
+        if dendrite_id_col and not dendrite_subset.empty:
+            dendrite_subset = dendrite_subset.rename(columns={dendrite_id_col: 'neuron_id'})
+        if info_id_col and not info_df.empty:
+            info_df = info_df.rename(columns={info_id_col: 'neuron_id'})
+
+        # 合并数据 - 使用外连接以保留所有数据
         try:
-            # 1. 准备轴突数据子集
-            axon_cols = ['Total Length', 'Number of Bifurcations']
-            axon_cols = [col for col in axon_cols if col in axon_df.columns]
-            if not axon_cols:
-                logger.warning("轴突数据中缺少必要的列，使用默认列")
-                # 尝试查找替代列
-                length_cols = [col for col in axon_df.columns if 'length' in col.lower()]
-                if length_cols:
-                    axon_df['Total Length'] = axon_df[length_cols[0]]
-                    axon_cols.append('Total Length')
+            if not info_df.empty:
+                merged_df = info_df.copy()
 
-                bifurcation_cols = [col for col in axon_df.columns if 'bifurc' in col.lower()]
-                if bifurcation_cols:
-                    axon_df['Number of Bifurcations'] = axon_df[bifurcation_cols[0]]
-                    axon_cols.append('Number of Bifurcations')
+                if not axon_subset.empty and 'neuron_id' in axon_subset.columns:
+                    # 只保留需要的轴突列
+                    axon_cols = ['neuron_id'] + [col for col in axon_subset.columns
+                                                 if any(keyword in col.lower() for keyword in ['length', 'bifurc'])]
+                    axon_subset = axon_subset[axon_cols]
 
-            axon_subset = axon_df[[axon_id_col] + axon_cols].copy()
+                    # 重命名轴突列以避免冲突
+                    axon_subset = axon_subset.rename(columns={
+                        col: f'axon_{col}' if col != 'neuron_id' else col
+                        for col in axon_subset.columns
+                    })
 
-            # 2. 准备树突数据子集
-            dend_cols = ['Number of Bifurcations']
-            dend_cols = [col for col in dend_cols if col in dendrite_df.columns]
-            if not dend_cols:
-                # 尝试查找替代列
-                bifurcation_cols = [col for col in dendrite_df.columns if 'bifurc' in col.lower()]
-                if bifurcation_cols:
-                    dendrite_df['Number of Bifurcations'] = dendrite_df[bifurcation_cols[0]]
-                    dend_cols.append('Number of Bifurcations')
+                    merged_df = pd.merge(merged_df, axon_subset, on='neuron_id', how='left', suffixes=('', '_axon'))
 
-            dend_subset = dendrite_df[[dendrite_id_col] + dend_cols].copy()
+                if not dendrite_subset.empty and 'neuron_id' in dendrite_subset.columns:
+                    # 只保留需要的树突列
+                    dendrite_cols = ['neuron_id'] + [col for col in dendrite_subset.columns
+                                                     if any(keyword in col.lower() for keyword in ['bifurc'])]
+                    dendrite_subset = dendrite_subset[dendrite_cols]
 
-            # 3. 执行合并
-            # 首先合并信息和轴突数据
-            merged_df = pd.merge(
-                info_df,
-                axon_subset,
-                left_on=info_id_col,
-                right_on=axon_id_col,
-                how='left',
-                suffixes=('', '_axon')
-            )
+                    # 重命名树突列
+                    dendrite_subset = dendrite_subset.rename(columns={
+                        col: f'dendrite_{col}' if col != 'neuron_id' else col
+                        for col in dendrite_subset.columns
+                    })
 
-            # 然后合并树突数据
-            merged_df = pd.merge(
-                merged_df,
-                dend_subset,
-                left_on=info_id_col,
-                right_on=dendrite_id_col,
-                how='left',
-                suffixes=('', '_dendrite')
-            )
-
-            logger.info(f"合并后数据形状: {merged_df.shape}")
+                    merged_df = pd.merge(merged_df, dendrite_subset, on='neuron_id', how='left',
+                                         suffixes=('', '_dendrite'))
+            else:
+                merged_df = pd.DataFrame()
 
         except Exception as e:
             logger.error(f"合并数据时出错: {e}")
-            # 创建一个空的合并数据框
-            merged_df = info_df.copy()
+            # 创建空的合并数据框
+            merged_df = info_df.copy() if not info_df.empty else pd.DataFrame()
+
+        if merged_df.empty:
+            logger.warning("合并后的数据为空")
+            return {}
+
+        # 查找形态学相关的列
+        # 轴突长度
+        axon_length_cols = [col for col in merged_df.columns if 'length' in col.lower() and 'axon' in col.lower()]
+        if axon_length_cols:
+            merged_df['Total Length'] = merged_df[axon_length_cols[0]]
+        else:
             merged_df['Total Length'] = np.nan
+
+        # 树突分叉
+        dendrite_bifurc_cols = [col for col in merged_df.columns if 'bifurc' in col.lower() and 'dendr' in col.lower()]
+        if dendrite_bifurc_cols:
+            merged_df['Number of Bifurcations_dendrite'] = merged_df[dendrite_bifurc_cols[0]]
+        else:
             merged_df['Number of Bifurcations_dendrite'] = np.nan
 
-        # 检查是否有'has_apical'列，如果没有，尝试从其他列推断
-        if 'has_apical' not in merged_df.columns:
-            apical_cols = [col for col in merged_df.columns if 'apical' in col.lower()]
-            if apical_cols:
-                logger.info(f"使用{apical_cols[0]}列作为has_apical")
-                merged_df['has_apical'] = merged_df[apical_cols[0]].notna() & (merged_df[apical_cols[0]] != 0)
-            else:
-                # 如果找不到任何有关顶树突的列，使用默认值
-                logger.warning("找不到有关顶树突的列，使用默认值")
-                merged_df['has_apical'] = 0.5  # 默认值，表示未知
+        # 顶树突
+        apical_cols = [col for col in merged_df.columns if 'apical' in col.lower()]
+        if apical_cols:
+            merged_df['has_apical'] = merged_df[apical_cols[0]].notna() & (merged_df[apical_cols[0]] != 0)
+        else:
+            merged_df['has_apical'] = 0.5  # 默认值
 
-        # 预处理：创建层映射字典
-        layer_map = {'L2/3': [2, 3]}
-        for layer in self.layers:
-            if layer != 'L2/3' and layer != 'L6b':
-                layer_map[layer] = [int(layer[1:])]
-            elif layer == 'L6b':
-                layer_map[layer] = [6]  # 假设L6b在数据中标记为6
-
-        # 检查是否有'layer'列，如果没有，尝试从其他列推断
+        # 层信息
         if 'layer' not in merged_df.columns:
             layer_cols = [col for col in merged_df.columns if 'layer' in col.lower()]
             if layer_cols:
-                logger.info(f"使用{layer_cols[0]}列作为layer")
                 merged_df['layer'] = merged_df[layer_cols[0]]
             else:
-                # 如果找不到任何层信息，使用默认值
-                logger.warning("找不到层信息列，使用默认值 (L5)")
-                merged_df['layer'] = 5  # 默认层为L5
+                merged_df['layer'] = 5  # 默认L5
 
-        # 检查是否有'celltype_manual'列，如果没有，尝试从其他列推断
+        # 区域信息
         if 'celltype_manual' not in merged_df.columns:
-            region_cols = [
-                col for col in merged_df.columns
-                if any(name in col.lower() for name in ['region', 'area', 'celltype', 'cell_type'])
-            ]
+            region_cols = [col for col in merged_df.columns
+                           if any(name in col.lower() for name in ['region', 'area', 'celltype', 'cell_type'])]
             if region_cols:
-                logger.info(f"使用{region_cols[0]}列作为celltype_manual")
                 merged_df['celltype_manual'] = merged_df[region_cols[0]]
             else:
-                # 如果找不到任何区域信息，使用默认值
-                logger.warning("找不到区域信息列，使用默认值")
-                merged_df['celltype_manual'] = 'unknown'  # 默认未知区域
+                merged_df['celltype_manual'] = 'unknown'
 
-        # 检查是否有'projection_type'列，如果没有，尝试从其他列推断
+        # 投射类型
         if 'projection_type' not in merged_df.columns:
-            proj_cols = [
-                col for col in merged_df.columns
-                if any(name in col.lower() for name in ['projection', 'proj_type', 'proj', 'type'])
-            ]
+            proj_cols = [col for col in merged_df.columns
+                         if any(name in col.lower() for name in ['projection', 'proj_type', 'proj', 'type'])]
             if proj_cols:
-                logger.info(f"使用{proj_cols[0]}列作为projection_type")
                 merged_df['projection_type'] = merged_df[proj_cols[0]]
             else:
-                # 使用"ipsilateral"作为默认投射类型（最常见）
-                logger.warning("找不到投射类型列，使用默认值 'ipsilateral'")
                 merged_df['projection_type'] = 'ipsilateral'
 
-        # 预先聚合统计信息 - 使用向量化操作提高效率
-        logger.info("聚合形态学统计信息...")
+        # 预处理：创建层映射字典
+        layer_map = {
+            'L1': [1],
+            'L2/3': [2, 3],
+            'L4': [4],
+            'L5': [5],
+            'L6': [6],
+            'L6b': [6]  # 6b视为6的变体
+        }
 
         # 将区域-层组合编码为唯一键
+        logger.info("聚合形态学统计信息...")
         merged_df['region_layer'] = merged_df.apply(
             lambda row: f"{row['celltype_manual']}_{self._layer_num_to_name(row['layer'], layer_map)}",
             axis=1
         )
 
         # 分组聚合计算
-        try:
-            stats_df = merged_df.groupby('region_layer').agg({
-                'Total Length': ['mean', 'std', 'count'],
-                'Number of Bifurcations_dendrite': ['std'],
-                'has_apical': ['mean'],
-                'projection_type': lambda x: x.value_counts(normalize=True).to_dict()
-            }).reset_index()
-        except Exception as e:
-            logger.error(f"聚合统计时出错: {e}")
-            # 使用备用聚合方法
-            stats = {}
-            for region_layer, group in merged_df.groupby('region_layer'):
-                try:
-                    total_length_mean = group['Total Length'].mean()
-                    total_length_std = group['Total Length'].std()
-                    count = len(group)
-                    dend_br_std = group['Number of Bifurcations_dendrite'].std()
-                    has_apical_mean = group['has_apical'].mean()
-
-                    # 计算投射类型分布
-                    proj_types = group['projection_type'].value_counts(normalize=True).to_dict()
-
-                    stats[region_layer] = {
-                        'region_layer': region_layer,
-                        'Total Length': {
-                            'mean': total_length_mean,
-                            'std': total_length_std,
-                            'count': count
-                        },
-                        'Number of Bifurcations_dendrite': {'std': dend_br_std},
-                        'has_apical': {'mean': has_apical_mean},
-                        'projection_type': {'<lambda>': proj_types}
-                    }
-                except Exception as inner_e:
-                    logger.error(f"处理区域层{region_layer}时出错: {inner_e}")
-
-            # 创建替代的stats_df
-            stats_df = pd.DataFrame([
-                {
-                    'region_layer': k,
-                    'Total Length': v['Total Length'],
-                    'Number of Bifurcations_dendrite': v['Number of Bifurcations_dendrite'],
-                    'has_apical': v['has_apical'],
-                    'projection_type': v['projection_type']
-                } for k, v in stats.items()
-            ])
-
-        # 将统计结果转换为所需格式
         stats = {}
-        for _, row in stats_df.iterrows():
-            region_layer = row['region_layer']
-            if not pd.isna(region_layer):
-                # 解析区域和层
-                parts = region_layer.split('_')
-                if len(parts) >= 2:
-                    region_name = parts[0]
-                    layer = parts[1]
 
-                    # 查找对应的RegionLayer节点
-                    rl_node = None
-                    for node in region_layer_nodes:
-                        if (node['properties'].get('region_name') == region_name and
-                                node['properties'].get('layer') == layer):
-                            rl_id = node['properties'].get('rl_id')
-                            if rl_id:
-                                # 获取投射类型分布
-                                proj_types = {}
-                                if isinstance(row['projection_type'], dict) and '<lambda>' in row['projection_type']:
-                                    proj_types = row['projection_type']['<lambda>']
-                                elif hasattr(row['projection_type'], 'get') and row['projection_type'].get('<lambda>'):
-                                    proj_types = row['projection_type'].get('<lambda>')
+        for region_layer, group in merged_df.groupby('region_layer'):
+            if pd.isna(region_layer):
+                continue
 
-                                # 安全地提取统计值
-                                def safe_extract(obj, path, default=0.0):
-                                    try:
-                                        result = obj
-                                        for key in path:
-                                            if isinstance(result, dict) and key in result:
-                                                result = result[key]
-                                            else:
-                                                return default
-                                        return float(result) if pd.notna(result) else default
-                                    except:
-                                        return default
+            # 解析区域和层
+            parts = region_layer.split('_')
+            if len(parts) >= 2:
+                region_name = parts[0]
+                layer = parts[1]
 
-                                # 构建统计数据
-                                stats[rl_id] = {
-                                    'region_name': region_name,
-                                    'layer': layer,
-                                    'morph_ax_len_mean': safe_extract(row, ['Total Length', 'mean']),
-                                    'morph_ax_len_std': safe_extract(row, ['Total Length', 'std']),
-                                    'dend_polarity_index_mean': safe_extract(row, ['has_apical', 'mean']),
-                                    'dend_br_std': safe_extract(row, ['Number of Bifurcations_dendrite', 'std']),
-                                    'n_neuron': int(safe_extract(row, ['Total Length', 'count'])),
-                                    'it_pct': min(1.0, float(proj_types.get('ipsilateral', 0.0) +
-                                                             proj_types.get('IT', 0.0) +
-                                                             proj_types.get('it', 0.0))),
-                                    'et_pct': min(1.0, float(proj_types.get('contralateral', 0.0) +
-                                                             proj_types.get('ET', 0.0) +
-                                                             proj_types.get('PT', 0.0) +
-                                                             proj_types.get('et', 0.0) +
-                                                             proj_types.get('pt', 0.0))),
-                                    'ct_pct': min(1.0, float(proj_types.get('corticothalamic', 0.0) +
-                                                             proj_types.get('CT', 0.0) +
-                                                             proj_types.get('ct', 0.0))),
-                                    'lr_pct': min(1.0, float(proj_types.get('contralateral', 0.0) +
-                                                             proj_types.get('ET', 0.0) +
-                                                             proj_types.get('et', 0.0))),
-                                    'lr_prior': 0.5  # 默认优先级
-                                }
+                # 查找对应的RegionLayer节点
+                for node in region_layer_nodes:
+                    if (node['properties'].get('region_name') == region_name and
+                            node['properties'].get('layer') == layer):
+                        rl_id = node['properties'].get('rl_id')
+                        if rl_id:
+                            # 计算统计值
+                            total_length_values = group['Total Length'].dropna()
+                            dendrite_bifurc_values = group['Number of Bifurcations_dendrite'].dropna()
+                            has_apical_values = group['has_apical'].dropna()
 
-        # 如果从MERFISH数据加载了RegionLayer属性，则优先使用这些值
-        if self.merfish_data_path and (self.merfish_data_path / "region_layer_props.csv").exists():
-            try:
-                rl_props_df = pd.read_csv(self.merfish_data_path / "region_layer_props.csv")
+                            # 计算投射类型分布
+                            proj_types = group['projection_type'].value_counts(normalize=True).to_dict()
 
-                for _, row in rl_props_df.iterrows():
-                    rl_id = row.get('rl_id')
-                    if rl_id in stats:
-                        # 使用MERFISH数据更新投射类型比例
-                        for prop in ['it_pct', 'et_pct', 'ct_pct', 'lr_pct', 'lr_prior']:
-                            if prop in row and pd.notna(row[prop]):
-                                stats[rl_id][prop] = float(row[prop])
-
-                logger.info("使用MERFISH数据更新了部分形态学统计信息")
-            except Exception as e:
-                logger.warning(f"加载MERFISH RegionLayer属性失败: {e}")
+                            stats[rl_id] = {
+                                'region_name': region_name,
+                                'layer': layer,
+                                'morph_ax_len_mean': float(total_length_values.mean()) if len(
+                                    total_length_values) > 0 else 0.0,
+                                'morph_ax_len_std': float(total_length_values.std()) if len(
+                                    total_length_values) > 0 else 0.0,
+                                'dend_polarity_index_mean': float(has_apical_values.mean()) if len(
+                                    has_apical_values) > 0 else 0.0,
+                                'dend_br_std': float(dendrite_bifurc_values.std()) if len(
+                                    dendrite_bifurc_values) > 0 else 0.0,
+                                'n_neuron': len(group),
+                                'it_pct': float(proj_types.get('ipsilateral', 0.0) + proj_types.get('IT', 0.0)),
+                                'et_pct': float(proj_types.get('contralateral', 0.0) + proj_types.get('ET', 0.0)),
+                                'ct_pct': float(proj_types.get('corticothalamic', 0.0) + proj_types.get('CT', 0.0)),
+                                'lr_pct': float(proj_types.get('contralateral', 0.0) + proj_types.get('ET', 0.0)),
+                                'lr_prior': 0.2
+                            }
+                            break
 
         # 保存缓存
         with open(cache_file, 'wb') as f:
             pickle.dump(stats, f)
 
-        # 记录结果统计
-        non_zero_stats = {k: v for k, v in stats.items() if v.get('n_neuron', 0) > 0}
-        logger.info(f"计算了{len(stats)}个RegionLayer的形态学统计，其中{len(non_zero_stats)}个有神经元数据")
-
-        # 最后更新: 2025-07-14 15:06:12
-        # 作者: PrometheusTT
-
+        logger.info(f"计算了{len(stats)}个RegionLayer的形态学统计")
         return stats
 
     def determine_projection_type(self, markers: List[str], subclass_name: str = None) -> str:

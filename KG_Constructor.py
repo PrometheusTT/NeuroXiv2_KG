@@ -914,6 +914,33 @@ class EnhancedKnowledgeGraphBuilder:
             if all_cells:
                 self.merfish_cells = pd.concat(all_cells, ignore_index=True)
                 logger.info(f"加载了 {len(self.merfish_cells)} 个细胞")
+
+                # 验证并修复坐标列
+                required_cols = ['x_ccf', 'y_ccf', 'z_ccf']
+                missing_cols = [col for col in required_cols if col not in self.merfish_cells.columns]
+
+                if missing_cols:
+                    logger.warning(f"合并后的细胞数据缺少必要的坐标列: {missing_cols}")
+                    logger.warning(f"可用列: {self.merfish_cells.columns.tolist()}")
+
+                    # 尝试从其他列推断坐标列
+                    coord_candidates = {
+                        'x_ccf': ['x', 'X', 'x_coord', 'x_25um', 'x_position', 'ccf_x'],
+                        'y_ccf': ['y', 'Y', 'y_coord', 'y_25um', 'y_position', 'ccf_y'],
+                        'z_ccf': ['z', 'Z', 'z_coord', 'z_25um', 'z_position', 'ccf_z']
+                    }
+
+                    for missing_col in missing_cols:
+                        for candidate in coord_candidates.get(missing_col, []):
+                            if candidate in self.merfish_cells.columns:
+                                self.merfish_cells[missing_col] = self.merfish_cells[candidate]
+                                logger.info(f"使用列 '{candidate}' 作为 '{missing_col}'")
+                                break
+
+                    # 再次检查是否仍有缺失列
+                    still_missing = [col for col in required_cols if col not in self.merfish_cells.columns]
+                    if still_missing:
+                        logger.error(f"无法修复所有缺失的坐标列: {still_missing}")
             else:
                 self.merfish_cells = pd.DataFrame()
 
@@ -924,6 +951,28 @@ class EnhancedKnowledgeGraphBuilder:
             try:
                 # 加载坐标
                 coords = pd.read_csv(coord_file)
+
+                # 确保坐标列名正确 - 处理不同的列名情况
+                coord_mapping = {
+                    'x': 'x_ccf',
+                    'y': 'y_ccf',
+                    'z': 'z_ccf',
+                    'X': 'x_ccf',
+                    'Y': 'y_ccf',
+                    'Z': 'z_ccf',
+                    'x_coord': 'x_ccf',
+                    'y_coord': 'y_ccf',
+                    'z_coord': 'z_ccf',
+                    'ccf_x': 'x_ccf',
+                    'ccf_y': 'y_ccf',
+                    'ccf_z': 'z_ccf'
+                }
+
+                # 重命名坐标列
+                for old_col, new_col in coord_mapping.items():
+                    if old_col in coords.columns and new_col not in coords.columns:
+                        coords = coords.rename(columns={old_col: new_col})
+                        logger.debug(f"将列 '{old_col}' 重命名为 '{new_col}'")
 
                 # 尝试加载对应的元数据
                 meta_file = coord_file.parent / f"cell_metadata_with_cluster_annotation_{index + 1}.csv"
@@ -938,6 +987,12 @@ class EnhancedKnowledgeGraphBuilder:
                         for col in meta.columns:
                             if col not in coords.columns:
                                 coords[col] = meta[col].values
+
+                # 最后再次检查必要的坐标列是否存在
+                missing_cols = [col for col in ['x_ccf', 'y_ccf', 'z_ccf'] if col not in coords.columns]
+                if missing_cols:
+                    logger.warning(f"文件 {coord_file.name} 处理后仍缺少坐标列: {missing_cols}")
+                    logger.warning(f"可用列: {coords.columns.tolist()}")
 
                 return coords
 
@@ -999,11 +1054,44 @@ def main(data_dir: str = "../data",
         logger.info("映射细胞到区域...")
         data = load_data(data_path)
         if 'annotation' in data:
-            merfish_cells = map_cells_to_regions_fixed(
-                merfish_cells,
-                data['annotation']['volume'],
-                data['annotation']['header']
-            )
+            # 确保所有必要的坐标列都存在
+            required_cols = ['x_ccf', 'y_ccf', 'z_ccf']
+            missing_cols = [col for col in required_cols if col not in merfish_cells.columns]
+
+            if missing_cols:
+                logger.warning(f"映射前检测到缺少坐标列: {missing_cols}")
+
+                # 尝试找到并复制坐标列
+                coord_mapping = {
+                    'x_ccf': ['x', 'X', 'x_coord', 'ccf_x', 'x_position'],
+                    'y_ccf': ['y', 'Y', 'y_coord', 'ccf_y', 'y_position'],
+                    'z_ccf': ['z', 'Z', 'z_coord', 'ccf_z', 'z_position']
+                }
+
+                for target_col in missing_cols:
+                    for source_col in coord_mapping.get(target_col, []):
+                        if source_col in merfish_cells.columns:
+                            merfish_cells[target_col] = merfish_cells[source_col]
+                            logger.info(f"使用 '{source_col}' 作为 '{target_col}'")
+                            break
+
+            # 最终检查
+            missing_cols = [col for col in required_cols if col not in merfish_cells.columns]
+            if not missing_cols:
+                try:
+                    merfish_cells = map_cells_to_regions_fixed(
+                        merfish_cells,
+                        data['annotation']['volume'],
+                        data['annotation']['header']
+                    )
+                except KeyError as e:
+                    logger.error(f"映射过程中出现键错误: {e}")
+                    logger.error(f"可用列: {merfish_cells.columns.tolist()}")
+                    # 添加空的region_id列
+                    merfish_cells['region_id'] = 0
+            else:
+                logger.error(f"无法修复所有坐标列，跳过映射: {missing_cols}")
+                merfish_cells['region_id'] = 0
 
     # 加载其他数据
     projection_data = loader.load_projection_data()

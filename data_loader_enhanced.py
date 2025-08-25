@@ -261,7 +261,7 @@ def load_data(data_dir: Union[str, Path], use_cached: bool = True) -> Dict[str, 
         logger.info(f"加载投影数据: {PROJECTION_FILE}")
         data['projection_df'] = pd.read_csv(projection_file,index_col=0)
         proj_df = data['projection_df']
-        data['projection_df'] = proj_df[~proj_df['ID'].str.contains('CCF-thin|local', na=False)]
+        data['projection_df'] = proj_df[~proj_df.index.str.contains('CCF-thin|local', na=False)]
         logger.info(f"加载了{len(data['projection_df'])}条投影连接")
     else:
         logger.warning(f"投影数据文件不存在: {projection_file}")

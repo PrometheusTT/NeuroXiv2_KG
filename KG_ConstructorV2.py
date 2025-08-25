@@ -656,17 +656,27 @@ class EnhancedKnowledgeGraphBuilder:
         for name, data in hierarchy_loader.cluster_data.items():
             self.cluster_id_map[name] = data['tran_id']
 
-    def generate_region_nodes(self, region_data: pd.DataFrame, merfish_cells: pd.DataFrame = None,
-                              data_dir: Path = None):
-        """生成Region节点 - 使用tree_yzx.json中的acronym作为名称"""
-        logger.info("生成Region节点（标准CCF区域）...")
+    def generate_region_nodes(self, region_data: pd.DataFrame, merfish_cells: pd.DataFrame = None):
+        """生成Region节点，使用tree_yzx.json中的acronym作为名称"""
+        logger.info("生成Region节点...")
 
         # 加载tree_yzx.json获取正确的区域信息
-        tree_data = []
         tree_info = {}
 
-        if data_dir:
-            tree_file = data_dir / "tree_yzx.json"
+        # 尝试直接从tree_yzx.json加载
+        try:
+            tree_file = Path("./data/tree_yzx.json")
+            possible_locations = [
+                self.output_dir.parent / "data" / "tree_yzx.json",
+                Path("./data/tree_yzx.json"),
+                Path("/home/wlj/NeuroXiv2/data/tree_yzx.json")
+            ]
+
+            for loc in possible_locations:
+                if loc.exists():
+                    tree_file = loc
+                    break
+
             if tree_file.exists():
                 with open(tree_file, 'r') as f:
                     tree_data = json.load(f)
@@ -674,82 +684,81 @@ class EnhancedKnowledgeGraphBuilder:
                 # 构建区域ID到信息的映射
                 for node in tree_data:
                     if 'id' in node:
+                        # 从structure_id_path推断parent_id
+                        parent_id = 0  # 默认值
+                        if 'structure_id_path' in node and len(node['structure_id_path']) > 1:
+                            # 倒数第二个元素是父节点ID
+                            parent_id = node['structure_id_path'][-2]
+
                         tree_info[node['id']] = {
                             'acronym': node.get('acronym', ''),
                             'name': node.get('name', ''),
-                            'parent_id': node.get('parent_id', 0)
+                            'parent_id': parent_id,  # 从路径推断的父ID
+                            'color': node.get('rgb_triplet', [200, 200, 200])
                         }
 
                 logger.info(f"从tree_yzx.json加载了 {len(tree_info)} 个区域信息")
-
-        # 如果有区域分析器，过滤出标准区域
-        if hasattr(self, 'region_analyzer') and self.region_analyzer:
-            # 只保留标准CCF区域
-            standard_regions = []
-            for _, region in region_data.iterrows():
-                region_id = region.get('region_id')
-                if region_id and self.region_analyzer.is_standard_region(region_id):
-                    standard_regions.append(region)
-
-            if standard_regions:
-                logger.info(f"从 {len(region_data)} 个区域中筛选出 {len(standard_regions)} 个标准CCF区域")
-                region_data_filtered = pd.DataFrame(standard_regions)
             else:
-                region_data_filtered = region_data
-        else:
-            # 如果没有区域分析器，使用基于acronym的过滤
-            # 移除包含层信息的区域（如ENTm2）
-            filtered_regions = []
-            for _, region in region_data.iterrows():
-                region_acronym = region.get('acronym', '')
-                region_name = region.get('name', '')
+                logger.warning(f"在所有可能的位置都找不到tree_yzx.json文件")
+        except Exception as e:
+            logger.error(f"加载tree_yzx.json失败: {e}")
+            logger.exception("详细错误")
 
-                # 检查是否包含层后缀
-                has_layer_suffix = False
-                layer_suffixes = ['1', '2', '3', '4', '5', '6', '2/3', '5a', '5b', '6a', '6b']
-                for suffix in layer_suffixes:
-                    if region_acronym.endswith(suffix) or region_name.endswith(suffix):
-                        has_layer_suffix = True
-                        break
+        # 诊断信息
+        logger.info(f"区域数据形状: {region_data.shape}")
+        logger.info(f"树信息条目数: {len(tree_info)}")
 
-                if not has_layer_suffix:
-                    filtered_regions.append(region)
-
-            logger.info(f"从 {len(region_data)} 个区域中筛选出 {len(filtered_regions)} 个标准区域（移除带层信息的）")
-            region_data_filtered = pd.DataFrame(filtered_regions)
-
-        # 计算形态统计数据
-        morphology_stats = {}
-        if data_dir:
-            morphology_stats = self.calculate_morphology_statistics(data_dir)
-
-        regions = []
-        for _, region in region_data_filtered.iterrows():
+        # 首先构建区域名称到ID的映射
+        self.region_name_id_map = {}
+        for _, region in region_data.iterrows():
             region_id = region.get('region_id')
             if pd.isna(region_id):
                 continue
 
+            region_name = region.get('name', f'Region_{region_id}')
+            if region_name and not pd.isna(region_name):
+                self.region_name_id_map[region_name] = region_id
+
+        regions = []
+        for _, region in region_data.iterrows():
+            # 获取区域ID
+            region_id = region.get('region_id')
+
+            if pd.isna(region_id):
+                logger.warning(f"跳过缺少region_id的区域: {region.get('name', 'Unknown')}")
+                continue
+
             try:
-                region_id = int(region_id)
+                region_id_int = int(region_id)
             except (ValueError, TypeError):
                 logger.warning(f"跳过非数字region_id: {region_id}")
                 continue
 
-            # 使用tree_yzx.json中的信息
-            if region_id in tree_info:
-                region_acronym = tree_info[region_id]['acronym']
-                region_full_name = tree_info[region_id]['name']
+            # 使用tree_yzx.json中的acronym作为名称
+            if region_id_int in tree_info:
+                region_acronym = tree_info[region_id_int]['acronym']
+                region_full_name = tree_info[region_id_int]['name']
+                parent_id = tree_info[region_id_int]['parent_id']  # 从推断的parent_id获取
             else:
+                # 如果在tree中找不到，使用region_data中的值
                 region_acronym = region.get('acronym', '')
                 region_full_name = region.get('name', f'Region_{region_id}')
+                parent_id = region.get('parent_id', 0)  # 使用默认值
 
-            # 创建区域字典 - 使用acronym作为name
+            # 创建区域字典
             region_dict = {
-                'region_id:ID(Region)': region_id,
-                'name': str(region_acronym) if region_acronym else f'Region_{region_id}',
-                'full_name': str(region_full_name),
+                'region_id:ID(Region)': region_id_int,
+                'name': str(region_acronym) if region_acronym else f'Region_{region_id}',  # 使用acronym作为name
+                'full_name': str(region_full_name),  # 保留完整名称
                 'acronym': str(region_acronym) if region_acronym else '',
+                'parent_id:int': int(parent_id) if parent_id is not None else 0  # 确保有默认值
             }
+
+            # 添加颜色信息
+            if region_id_int in tree_info and 'color' in tree_info[region_id_int]:
+                color = tree_info[region_id_int]['color']
+                if isinstance(color, list) and len(color) == 3:
+                    region_dict['color:int[]'] = color
 
             # 添加形态学属性
             for attr in MORPH_ATTRIBUTES:
@@ -758,168 +767,174 @@ class EnhancedKnowledgeGraphBuilder:
                 else:
                     region_dict[f'{attr}:float'] = 0.0
 
-            # 添加统计属性 - 使用计算的形态统计数据
-            if region_id in morphology_stats:
-                stats = morphology_stats[region_id]
-                for attr in STAT_ATTRIBUTES:
-                    region_dict[f'{attr}:int'] = stats.get(attr, 0)
-            else:
-                # 如果没有统计数据，使用默认值
-                for attr in STAT_ATTRIBUTES:
-                    region_dict[f'{attr}:int'] = 0
+            # 计算统计属性
+            stat_values = self._calculate_region_statistics(region_id_int, region_data, merfish_cells)
+
+            # 添加统计属性
+            for attr in STAT_ATTRIBUTES:
+                region_dict[f'{attr}:int'] = stat_values.get(attr, 0)
 
             regions.append(region_dict)
 
         # 保存到CSV
         self._save_nodes(regions, "regions")
-        logger.info(f"保存了 {len(regions)} 个标准CCF Region节点")
+        logger.info(f"保存了 {len(regions)} 个Region节点")
 
-    def _calculate_region_statistics(self, region_id, region_data, merfish_cells):
-        """计算区域的统计属性，处理info.csv中缺少region_id的情况"""
+    def _calculate_morphology_statistics(self, region_id, layer=None):
+        """
+        计算区域或区域层的形态统计数据
+
+        参数:
+            region_id: 区域ID
+            layer: 层名称(如'L1'，'L2/3'等)，为None表示计算整个区域
+
+        返回:
+            包含统计数据的字典
+        """
         stats = {}
 
-        # 从形态数据计算
-        if hasattr(self, 'layer_calculator') and self.layer_calculator:
-            if self.layer_calculator.info_df is not None:
-                info_df = self.layer_calculator.info_df
+        # 确保layer_calculator存在且已加载数据
+        if not hasattr(self, 'layer_calculator') or not self.layer_calculator or self.layer_calculator.info_df is None:
+            logger.warning(f"没有可用的神经元形态数据，无法计算统计信息")
+            return {attr: 0 for attr in STAT_ATTRIBUTES}
 
-                # 检查是否有region_id列
-                if 'region_id' not in info_df.columns:
-                    # 1. 获取当前region的acronym
-                    region_acronym = None
+        info_df = self.layer_calculator.info_df
 
-                    # 从region_analyzer中获取
-                    if hasattr(self, 'region_analyzer') and self.region_analyzer:
-                        region_info = self.region_analyzer.get_region_info(region_id)
-                        if region_info:
-                            region_acronym = region_info.get('acronym')
+        # 步骤1: 找到属于该区域的神经元
+        if 'region_id' in info_df.columns:
+            # 直接使用region_id过滤
+            region_neurons = info_df[info_df['region_id'] == region_id]
+        else:
+            # 通过celltype前缀匹配
+            region_acronym = self._get_region_acronym(region_id)
+            if not region_acronym:
+                logger.warning(f"无法获取区域{region_id}的acronym，无法匹配神经元")
+                return {attr: 0 for attr in STAT_ATTRIBUTES}
 
-                    # 或从region_data中获取
-                    if not region_acronym:
-                        region_row = region_data[region_data['region_id'] == region_id]
-                        if not region_row.empty:
-                            region_acronym = region_row.iloc[0].get('acronym', '')
+            # 使用前缀匹配
+            region_neurons = info_df[info_df['celltype'].str.startswith(region_acronym, na=False)]
 
-                    if not region_acronym:
-                        # 无法找到acronym，无法匹配celltype
-                        logger.warning(f"无法找到region_id {region_id}的acronym，无法计算统计数据")
-                        return {attr: 0 for attr in STAT_ATTRIBUTES}
+        # 步骤2: 如果指定了层，进一步过滤
+        if layer and layer != 'ALL':
+            if 'layer' in region_neurons.columns:
+                layer_neurons = region_neurons[region_neurons['layer'] == layer]
+            else:
+                # 尝试从celltype中提取层信息
+                layer_neurons = region_neurons[region_neurons['celltype'].apply(
+                    lambda x: extract_layer_from_celltype(x) == layer if isinstance(x, str) else False
+                )]
+        else:
+            layer_neurons = region_neurons
 
-                    # 2. 筛选celltype中包含该acronym的记录
-                    # 使用正则表达式匹配，确保只匹配完整的acronym前缀
-                    import re
-                    pattern = f"^{re.escape(region_acronym)}[0-9L/ab]*$"
-                    region_neurons = info_df[info_df['celltype'].str.match(pattern, na=False)]
+        # 记录匹配到的神经元数量
+        neuron_count = len(layer_neurons)
+        layer_str = f"层{layer}" if layer else "所有层"
+        logger.info(f"区域{region_id}{layer_str}匹配到 {neuron_count} 个神经元")
 
-                    logger.info(
-                        f"通过celltype匹配到region {region_acronym}(ID:{region_id})的神经元: {len(region_neurons)}个")
-                else:
-                    # 直接使用region_id过滤
-                    region_neurons = info_df[info_df['region_id'] == region_id]
+        # 步骤3: 计算统计数据
+        # 1. 总神经元数
+        stats['number_of_neuron_morphologies'] = neuron_count
 
-                # 神经元总数
-                neuron_ids = set(region_neurons['ID'].values) if 'ID' in region_neurons.columns else set()
-                stats['number_of_neuron_morphologies'] = len(neuron_ids)
+        # 2. 使用has_apical, has_recon_axon, has_recon_den列计算
+        if 'has_apical' in layer_neurons.columns:
+            stats['number_of_apical_dendritic_morphologies'] = int(layer_neurons['has_apical'].sum())
 
-                # 顶树突形态数量 - 使用has_apical列
-                if 'has_apical' in region_neurons.columns:
-                    apical_count = region_neurons['has_apical'].sum()
-                    stats['number_of_apical_dendritic_morphologies'] = int(apical_count)
+        if 'has_recon_axon' in layer_neurons.columns:
+            stats['number_of_axonal_morphologies'] = int(layer_neurons['has_recon_axon'].sum())
 
-                # 轴突形态数量 - 使用has_recon_axon列
-                if 'has_recon_axon' in region_neurons.columns:
-                    axon_count = region_neurons['has_recon_axon'].sum()
-                    stats['number_of_axonal_morphologies'] = int(axon_count)
+        if 'has_recon_den' in layer_neurons.columns:
+            stats['number_of_dendritic_morphologies'] = int(layer_neurons['has_recon_den'].sum())
 
-                # 树突形态数量 - 使用has_recon_den列
-                if 'has_recon_den' in region_neurons.columns:
-                    dendrite_count = region_neurons['has_recon_den'].sum()
-                    stats['number_of_dendritic_morphologies'] = int(dendrite_count)
+        # 3. 如果没有这些列，尝试从axon_df和dendrite_df中统计
+        neuron_ids = set(layer_neurons['ID'].tolist()) if 'ID' in layer_neurons.columns else set()
 
-                # 如果缺少上述列，则使用轴突和树突dataframe来计算
-                if 'number_of_axonal_morphologies' not in stats and self.layer_calculator.axon_df is not None and len(
-                        neuron_ids) > 0:
-                    axon_ids = self.layer_calculator.axon_df[
-                        self.layer_calculator.axon_df['ID'].isin(neuron_ids)
-                    ]['ID'].unique() if 'ID' in self.layer_calculator.axon_df.columns else []
-                    stats['number_of_axonal_morphologies'] = len(axon_ids)
+        if neuron_ids and 'number_of_axonal_morphologies' not in stats and self.layer_calculator.axon_df is not None:
+            axon_df = self.layer_calculator.axon_df
+            if 'ID' in axon_df.columns:
+                axon_neurons = axon_df[axon_df['ID'].isin(neuron_ids)]
+                stats['number_of_axonal_morphologies'] = len(axon_neurons['ID'].unique())
 
-                if 'number_of_dendritic_morphologies' not in stats and self.layer_calculator.dendrite_df is not None and len(
-                        neuron_ids) > 0:
-                    dendrite_ids = self.layer_calculator.dendrite_df[
-                        self.layer_calculator.dendrite_df['ID'].isin(neuron_ids)
-                    ]['ID'].unique() if 'ID' in self.layer_calculator.dendrite_df.columns else []
-                    stats['number_of_dendritic_morphologies'] = len(dendrite_ids)
+        if neuron_ids and 'number_of_dendritic_morphologies' not in stats and self.layer_calculator.dendrite_df is not None:
+            dendrite_df = self.layer_calculator.dendrite_df
+            if 'ID' in dendrite_df.columns:
+                dendrite_neurons = dendrite_df[dendrite_df['ID'].isin(neuron_ids)]
+                stats['number_of_dendritic_morphologies'] = len(dendrite_neurons['ID'].unique())
 
-                    # 顶树突计数，如果没有has_apical列
-                    if 'number_of_apical_dendritic_morphologies' not in stats and 'type' in self.layer_calculator.dendrite_df.columns:
-                        apical_dendrites = self.layer_calculator.dendrite_df[
-                            (self.layer_calculator.dendrite_df['ID'].isin(neuron_ids)) &
-                            (self.layer_calculator.dendrite_df['type'].str.contains('apical', case=False, na=False))
-                            ]
-                        stats['number_of_apical_dendritic_morphologies'] = len(apical_dendrites['ID'].unique())
+                # 计算顶树突数量
+                if 'number_of_apical_dendritic_morphologies' not in stats and 'type' in dendrite_df.columns:
+                    apical_neurons = dendrite_neurons[
+                        dendrite_neurons['type'].str.contains('apical', case=False, na=False)]
+                    stats['number_of_apical_dendritic_morphologies'] = len(apical_neurons['ID'].unique())
 
-        # 从MERFISH数据计算转录组神经元数量
-        if merfish_cells is not None and not merfish_cells.empty:
-            if 'region_id' in merfish_cells.columns:
-                region_cells = merfish_cells[merfish_cells['region_id'] == region_id]
-                stats['number_of_transcriptomic_neurons'] = len(region_cells)
-
-        # 填充缺失值
+        # 确保所有统计属性都有值
         for attr in STAT_ATTRIBUTES:
             if attr not in stats:
                 stats[attr] = 0
 
         return stats
 
+    def _get_region_acronym(self, region_id):
+        """获取区域的acronym"""
+        # 从region_analyzer获取
+        if hasattr(self, 'region_analyzer') and self.region_analyzer:
+            region_info = self.region_analyzer.get_region_info(region_id)
+            if region_info and 'acronym' in region_info:
+                return region_info['acronym']
+
+        # 从region_data获取
+        if hasattr(self, 'region_data') and self.region_data is not None:
+            region_row = self.region_data[self.region_data['region_id'] == region_id]
+            if not region_row.empty and 'acronym' in region_row.columns:
+                return region_row.iloc[0]['acronym']
+
+        return None
+
+    def _calculate_region_statistics(self, region_id, region_data, merfish_cells):
+        """为Region节点计算统计属性"""
+        # 使用共享方法计算形态统计数据
+        stats = self._calculate_morphology_statistics(region_id)
+
+        # 计算转录组神经元数量
+        if merfish_cells is not None and not merfish_cells.empty and 'region_id' in merfish_cells.columns:
+            region_cells = merfish_cells[merfish_cells['region_id'] == region_id]
+            stats['number_of_transcriptomic_neurons'] = len(region_cells)
+
+        return stats
+
     def generate_regionlayer_nodes(self, regionlayer_data: pd.DataFrame, merfish_cells: pd.DataFrame = None):
-        """生成RegionLayer节点 - 处理非数字region_id"""
+        """生成包含完整形态学和统计属性的RegionLayer节点"""
         logger.info("生成RegionLayer节点...")
 
-        # 创建region_id映射字典（如果还没有）
-        if not hasattr(self, 'region_id_mapping'):
-            self.region_id_mapping = {}  # 存储非数字region_id到数字id的映射
-            self.next_region_id = -1000  # 用负数起始，避免与现有ID冲突
+        # 存储region_data供_get_region_acronym使用
+        if 'region_data' not in vars(self):
+            self.region_data = regionlayer_data
 
         regionlayers = []
         for _, rl in regionlayer_data.iterrows():
+            # 获取RegionLayer ID
             rl_id = rl.get('rl_id', '')
-            region_id_raw = rl.get('region_id', -1)
-            layer = rl.get('layer', 'Unknown')
 
-            # 处理非数字region_id
-            if isinstance(region_id_raw, str) and not region_id_raw.isdigit():
-                # 检查是否已有映射
-                if region_id_raw not in self.region_id_mapping:
-                    self.region_id_mapping[region_id_raw] = self.next_region_id
-                    self.next_region_id -= 1  # 递减ID值
-                    logger.info(
-                        f"为非数字region_id '{region_id_raw}' 创建映射ID: {self.region_id_mapping[region_id_raw]}")
+            # 解析region_id和layer
+            parts = rl_id.split('_')
+            if len(parts) < 2:
+                logger.warning(f"跳过无效的rl_id: {rl_id}")
+                continue
 
-                # 使用映射的数字ID
-                region_id_int = self.region_id_mapping[region_id_raw]
+            region_id_str = parts[0]
+            layer = parts[1]
 
-                # 更新rl_id以使用数字ID
-                new_rl_id = f"{region_id_int}_{layer}"
-                logger.info(f"重新映射rl_id: '{rl_id}' -> '{new_rl_id}'")
-                rl_id = new_rl_id
-            else:
-                # 对于数字ID，直接转换
-                try:
-                    region_id_int = int(region_id_raw)
-                except (ValueError, TypeError):
-                    # 如果转换失败，使用默认负值ID
-                    region_id_int = self.next_region_id
-                    self.next_region_id -= 1
-                    logger.warning(f"无法将region_id '{region_id_raw}' 转换为整数，使用默认ID: {region_id_int}")
+            try:
+                region_id = int(region_id_str)
+            except (ValueError, TypeError):
+                logger.warning(f"跳过非数字region_id: {region_id_str}")
+                continue
 
             # 创建RegionLayer字典
             rl_dict = {
                 'rl_id:ID(RegionLayer)': rl_id,
-                'region_id:int': region_id_int,
-                'original_region_id': str(region_id_raw),  # 保留原始ID作为字符串
+                'region_id:int': region_id,
                 'layer': layer,
-                'name': f"{rl.get('region_name', f'Region {region_id_raw}')} {layer}",
+                'name': f"{rl.get('region_name', f'Region {region_id}')} {layer}",
             }
 
             # 添加形态学属性
@@ -929,12 +944,28 @@ class EnhancedKnowledgeGraphBuilder:
                 else:
                     rl_dict[f'{attr}:float'] = 0.0
 
+            # 计算统计属性 - 使用共享的统计计算方法
+            stats = self._calculate_morphology_statistics(region_id, layer)
+
             # 添加统计属性
             for attr in STAT_ATTRIBUTES:
-                if attr in rl:
-                    rl_dict[f'{attr}:int'] = int(rl[attr])
+                if attr in stats:
+                    rl_dict[f'{attr}:int'] = stats[attr]
                 else:
                     rl_dict[f'{attr}:int'] = 0
+
+            # 添加MERFISH特有的属性
+            if merfish_cells is not None and not merfish_cells.empty:
+                # 计算该层区域中的转录组神经元数量
+                if 'region_id' in merfish_cells.columns:
+                    layer_cells = merfish_cells[(merfish_cells['region_id'] == region_id)]
+
+                    # 如果有层信息，进一步筛选
+                    if 'layer' in merfish_cells.columns:
+                        layer_cells = layer_cells[layer_cells['layer'] == layer]
+
+                    # 更新转录组神经元数量
+                    rl_dict['number_of_transcriptomic_neurons:int'] = len(layer_cells)
 
             regionlayers.append(rl_dict)
 
@@ -943,7 +974,7 @@ class EnhancedKnowledgeGraphBuilder:
         logger.info(f"保存了 {len(regionlayers)} 个RegionLayer节点")
 
     def generate_merfish_nodes_from_hierarchy(self, merfish_cells: pd.DataFrame):
-        """从层级数据生成MERFISH节点"""
+        """从层级数据生成MERFISH节点，包含所有必要的元数据"""
         if not self.hierarchy_loader:
             logger.error("未设置层级加载器")
             return
@@ -951,67 +982,107 @@ class EnhancedKnowledgeGraphBuilder:
         # 计算每个类型的细胞数量
         if not merfish_cells.empty:
             class_counts = merfish_cells['class'].value_counts().to_dict() if 'class' in merfish_cells.columns else {}
-            subclass_counts = merfish_cells['subclass'].value_counts().to_dict() if 'subclass' in merfish_cells.columns else {}
-            supertype_counts = merfish_cells['supertype'].value_counts().to_dict() if 'supertype' in merfish_cells.columns else {}
-            cluster_counts = merfish_cells['cluster'].value_counts().to_dict() if 'cluster' in merfish_cells.columns else {}
+            subclass_counts = merfish_cells[
+                'subclass'].value_counts().to_dict() if 'subclass' in merfish_cells.columns else {}
+            supertype_counts = merfish_cells[
+                'supertype'].value_counts().to_dict() if 'supertype' in merfish_cells.columns else {}
+            cluster_counts = merfish_cells[
+                'cluster'].value_counts().to_dict() if 'cluster' in merfish_cells.columns else {}
         else:
             class_counts = subclass_counts = supertype_counts = cluster_counts = {}
 
         # 生成Class节点
-        logger.info("生成Class节点...")
+        logger.info("生成Class节点（从层级数据）...")
         class_nodes = []
         for name, data in self.hierarchy_loader.class_data.items():
             node = {
                 'tran_id:ID(Class)': data['tran_id'],
+                'id': data['original_id'] + 300,
                 'name': name,
-                'number_of_neurons': class_counts.get(name, 0)
+                'neighborhood': data['neighborhood'],
+                'number_of_child_types': data['number_of_child_types'],
+                'number_of_neurons': class_counts.get(name, 0),
+                # 添加缺少的元数据
+                'dominant_neurotransmitter_type': data.get('dominant_neurotransmitter_type', ''),
+                'markers': data.get('markers', '')
             }
             class_nodes.append(node)
 
         if class_nodes:
-            self._save_nodes(class_nodes, "class")
+            df = pd.DataFrame(class_nodes)
+            output_file = self.nodes_dir / "class.csv"
+            df.to_csv(output_file, index=False)
+            logger.info(f"保存了 {len(df)} 个Class节点")
 
         # 生成Subclass节点
-        logger.info("生成Subclass节点...")
+        logger.info("生成Subclass节点（从层级数据）...")
         subclass_nodes = []
         for name, data in self.hierarchy_loader.subclass_data.items():
             node = {
                 'tran_id:ID(Subclass)': data['tran_id'],
+                'id': data['original_id'] + 350,
                 'name': name,
-                'number_of_neurons': subclass_counts.get(name, 0)
+                'neighborhood': data['neighborhood'],
+                'dominant_neurotransmitter_type': data['dominant_neurotransmitter_type'],
+                'number_of_child_types': data['number_of_child_types'],
+                'number_of_neurons': subclass_counts.get(name, 0),
+                'markers': data['markers'],
+                'transcription_factor_markers': data['transcription_factor_markers']
             }
             subclass_nodes.append(node)
 
         if subclass_nodes:
-            self._save_nodes(subclass_nodes, "subclass")
+            df = pd.DataFrame(subclass_nodes)
+            output_file = self.nodes_dir / "subclass.csv"
+            df.to_csv(output_file, index=False)
+            logger.info(f"保存了 {len(df)} 个Subclass节点")
 
         # 生成Supertype节点
-        logger.info("生成Supertype节点...")
+        logger.info("生成Supertype节点（从层级数据）...")
         supertype_nodes = []
         for name, data in self.hierarchy_loader.supertype_data.items():
             node = {
                 'tran_id:ID(Supertype)': data['tran_id'],
+                'id': data['original_id'] + 600,
                 'name': name,
-                'number_of_neurons': supertype_counts.get(name, 0)
+                'number_of_child_types': data['number_of_child_types'],
+                'number_of_neurons': supertype_counts.get(name, 0),
+                'markers': data['markers'],
+                'within_subclass_markers': data['within_subclass_markers']
             }
             supertype_nodes.append(node)
 
         if supertype_nodes:
-            self._save_nodes(supertype_nodes, "supertype")
+            df = pd.DataFrame(supertype_nodes)
+            output_file = self.nodes_dir / "supertype.csv"
+            df.to_csv(output_file, index=False)
+            logger.info(f"保存了 {len(df)} 个Supertype节点")
 
         # 生成Cluster节点
-        logger.info("生成Cluster节点...")
+        logger.info("生成Cluster节点（从层级数据）...")
         cluster_nodes = []
         for name, data in self.hierarchy_loader.cluster_data.items():
             node = {
                 'tran_id:ID(Cluster)': data['tran_id'],
+                'id': data['original_id'] + 1800,
                 'name': name,
-                'number_of_neurons': cluster_counts.get(name, 0)
+                'anatomical_annotation': data['anatomical_annotation'],
+                'broad_region_distribution': data['broad_region_distribution'],
+                'dominant_neurotransmitter_type': data['dominant_neurotransmitter_type'],
+                'number_of_neurons': cluster_counts.get(name, 0),
+                'markers': data['markers'],
+                'neuropeptide_mark_genes': data['neuropeptide_mark_genes'],
+                'neurotransmitter_mark_genes': data['neurotransmitter_mark_genes'],
+                'transcription_factor_markers': data['transcription_factor_markers'],
+                'within_subclass_markers': data['within_subclass_markers']
             }
             cluster_nodes.append(node)
 
         if cluster_nodes:
-            self._save_nodes(cluster_nodes, "cluster")
+            df = pd.DataFrame(cluster_nodes)
+            output_file = self.nodes_dir / "cluster.csv"
+            df.to_csv(output_file, index=False)
+            logger.info(f"保存了 {len(df)} 个Cluster节点")
 
     def generate_has_layer_relationships(self, region_data: pd.DataFrame, regionlayer_data: pd.DataFrame):
         """生成HAS_LAYER关系 - 处理非数字region_id"""
@@ -1634,19 +1705,23 @@ def main(data_dir: str = "../data",
 
     # Phase 3: 计算层特异性形态数据
     logger.info("Phase 3: 计算层特异性形态数据")
-
+    builder = EnhancedKnowledgeGraphBuilder(output_path)
     # 传入区域分析器
-    layer_calculator = LayerSpecificMorphologyCalculator(data_path, region_analyzer)
+    layer_calculator = LayerSpecificMorphologyCalculator(data_path)
     if layer_calculator.load_morphology_with_layers():
-        regionlayer_data = layer_calculator.calculate_regionlayer_morphology(region_data, merfish_cells)
+        # 设置layer_calculator
+        builder.layer_calculator = layer_calculator
+
+        # 计算层特异性形态数据
+        regionlayer_data = layer_calculator.calculate_regionlayer_morphology(region_data)
     else:
-        logger.error("无法加载形态学数据")
+        logger.error("无法加载形态学数据和层信息")
         regionlayer_data = pd.DataFrame()
 
     # Phase 4: 知识图谱生成
     logger.info("Phase 4: 知识图谱生成")
 
-    builder = EnhancedKnowledgeGraphBuilder(output_path)
+
     builder.set_hierarchy_loader(hierarchy_loader)
     builder.layer_calculator = layer_calculator
     builder.region_analyzer = region_analyzer  # 设置区域分析器

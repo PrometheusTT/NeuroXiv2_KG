@@ -1212,7 +1212,7 @@ class EnhancedKnowledgeGraphBuilder:
         logger.info(f"保存了 {len(relationships)} 个HAS_LAYER关系")
 
     def generate_has_relationships_optimized(self, merfish_cells: pd.DataFrame, level: str):
-        """优化的HAS_*关系生成，支持非皮层区域"""
+        """优化的HAS_*关系生成，修复rank排序问题"""
         logger.info(f"生成HAS_{level.upper()}关系...")
 
         if level not in merfish_cells.columns:
@@ -1223,16 +1223,14 @@ class EnhancedKnowledgeGraphBuilder:
             logger.warning("细胞缺少region_id")
             return
 
-        # 获取ID映射
-        if level == 'class':
-            id_map = self.class_id_map
-        elif level == 'subclass':
-            id_map = self.subclass_id_map
-        elif level == 'supertype':
-            id_map = self.supertype_id_map
-        else:
-            id_map = self.cluster_id_map
+        # 添加层信息（如果不存在）
+        if 'layer' not in merfish_cells.columns and 'celltype' in merfish_cells.columns:
+            merfish_cells = merfish_cells.copy()
+            merfish_cells['layer'] = merfish_cells['celltype'].apply(extract_layer_from_celltype)
+            logger.info(f"从celltype提取了层信息")
 
+        # 获取ID映射
+        id_map = getattr(self, f"{level}_id_map", {})
         if not id_map:
             logger.warning(f"{level} ID映射为空")
             return
@@ -1240,17 +1238,12 @@ class EnhancedKnowledgeGraphBuilder:
         # 筛选有效细胞
         valid_cells = merfish_cells[(merfish_cells[level].notna()) & (merfish_cells['region_id'] > 0)]
 
-        # 按区域和类型分组计数
-        grouped = valid_cells.groupby(['region_id', level]).size().reset_index(name='count')
-        region_totals = valid_cells.groupby('region_id').size().to_dict()
-
         # 获取已存在的RegionLayer节点
         regionlayer_file = self.nodes_dir / "regionlayers.csv"
         existing_regionlayers = set()
         if regionlayer_file.exists():
             try:
                 rl_df = pd.read_csv(regionlayer_file)
-                # 提取所有rl_id，可能是'rl_id:ID(RegionLayer)'列
                 id_col = [col for col in rl_df.columns if 'rl_id' in col][0] if any(
                     'rl_id' in col for col in rl_df.columns) else None
                 if id_col:
@@ -1258,16 +1251,11 @@ class EnhancedKnowledgeGraphBuilder:
             except Exception as e:
                 logger.error(f"读取RegionLayer节点失败: {e}")
 
-        relationships = []
-        for region_id in grouped['region_id'].unique():
-            region_group = grouped[grouped['region_id'] == region_id]
-            total = region_totals.get(region_id, 1)
+        # 为每个RegionLayer单独准备关系
+        all_relationships = []
 
-            region_group = region_group.copy()
-            region_group['pct'] = region_group['count'] / total
-            region_group = region_group[region_group['pct'] >= PCT_THRESHOLD]
-            region_group['rank'] = region_group['pct'].rank(ascending=False, method='dense').astype(int)
-
+        # 遍历每个区域
+        for region_id in valid_cells['region_id'].unique():
             # 检查是否为皮层区域
             is_cortical = False
             if hasattr(self, 'region_analyzer') and self.region_analyzer:
@@ -1275,13 +1263,14 @@ class EnhancedKnowledgeGraphBuilder:
 
             # 确定要处理的层
             if is_cortical:
-                # 皮层区域处理所有层
                 layers_to_process = LAYERS
             else:
-                # 非皮层区域只处理ALL层
                 layers_to_process = ['ALL']
 
-            # 为每个层创建关系
+            # 获取该区域的所有细胞
+            region_cells = valid_cells[valid_cells['region_id'] == region_id]
+
+            # 为每个层处理
             for layer in layers_to_process:
                 rl_id = f"{int(region_id)}_{layer}"
 
@@ -1290,20 +1279,62 @@ class EnhancedKnowledgeGraphBuilder:
                     logger.warning(f"RegionLayer节点 {rl_id} 不存在，跳过")
                     continue
 
-                for _, row in region_group.iterrows():
-                    cell_type = row[level]
-                    if cell_type in id_map:
-                        rel = {
-                            ':START_ID(RegionLayer)': rl_id,
-                            f':END_ID({level.capitalize()})': id_map[cell_type],
-                            'pct_cells:float': float(row['pct']),
-                            'rank:int': int(row['rank']),
-                            ':TYPE': f'HAS_{level.upper()}'
-                        }
-                        relationships.append(rel)
+                # 筛选该层的细胞
+                if layer != 'ALL' and 'layer' in region_cells.columns:
+                    layer_cells = region_cells[region_cells['layer'] == layer]
+                    if len(layer_cells) == 0:
+                        logger.warning(f"区域{region_id}的{layer}层没有细胞，跳过")
+                        continue
+                else:
+                    layer_cells = region_cells
 
-        self._save_relationships_batch(relationships, f"has_{level}")
-        logger.info(f"保存了 {len(relationships)} 个HAS_{level.upper()}关系")
+                # 计算该层中每个细胞类型的分布
+                layer_total = len(layer_cells)
+                if layer_total == 0:
+                    continue
+
+                # 计算该层内的类型分布
+                type_counts = layer_cells[level].value_counts()
+
+                # 准备该层的所有类型数据
+                layer_type_data = []
+                for cell_type, count in type_counts.items():
+                    if cell_type in id_map:
+                        pct = count / layer_total
+                        if pct >= PCT_THRESHOLD:
+                            layer_type_data.append({
+                                'type': cell_type,
+                                'count': count,
+                                'pct': pct,
+                                'type_id': id_map[cell_type]
+                            })
+
+                # 按照比例排序，从高到低
+                layer_type_data.sort(key=lambda x: x['pct'], reverse=True)
+
+                # 生成连续的rank (1, 2, 3...)
+                relationships = []
+                for rank, data in enumerate(layer_type_data, 1):
+                    rel = {
+                        ':START_ID(RegionLayer)': rl_id,
+                        f':END_ID({level.capitalize()})': data['type_id'],
+                        'pct_cells:float': float(data['pct']),
+                        'rank:int': rank,
+                        ':TYPE': f'HAS_{level.upper()}'
+                    }
+                    relationships.append(rel)
+
+                # 将本层的关系添加到总结果
+                all_relationships.extend(relationships)
+
+                # 添加调试信息
+                if region_id in [1, 7, 15] and layer == 'ALL':  # 您提供的示例中的区域
+                    logger.info(f"区域{region_id}_{layer} {level}排名: " +
+                                ', '.join([f"{d['type']}:r{i + 1}" for i, d in enumerate(layer_type_data[:5])]))
+
+        # 保存所有关系
+        self._save_relationships_batch(all_relationships, f"has_{level}")
+        logger.info(f"保存了 {len(all_relationships)} 个HAS_{level.upper()}关系")
 
     def generate_dominant_transcriptomic_relationships(self, merfish_cells: pd.DataFrame):
         """为所有层级(Class, Subclass, Supertype, Cluster)生成Dominant_transcriptomic关系"""
@@ -1333,79 +1364,77 @@ class EnhancedKnowledgeGraphBuilder:
             self._generate_dominant_transcriptomic_for_level(merfish_cells, level)
 
     def _generate_dominant_transcriptomic_for_level(self, merfish_cells: pd.DataFrame, level: str):
-        """为特定层级生成Dominant_transcriptomic关系，支持非皮层区域"""
+        """为特定层级生成Dominant_transcriptomic关系，每个区域只保留一个主导类型"""
         logger.info(f"生成{level.capitalize()}级别的Dominant_transcriptomic关系...")
 
         # 获取ID映射
-        if level == 'class':
-            id_map = self.class_id_map
-        elif level == 'subclass':
-            id_map = self.subclass_id_map
-        elif level == 'supertype':
-            id_map = self.supertype_id_map
-        else:  # cluster
-            id_map = self.cluster_id_map
-
+        id_map = getattr(self, f"{level}_id_map", {})
         if not id_map:
             logger.warning(f"{level} ID映射为空")
             return
 
-        # 按区域和类型分组计数
+        # 添加层信息（如果不存在）
+        if 'layer' not in merfish_cells.columns and 'celltype' in merfish_cells.columns:
+            merfish_cells = merfish_cells.copy()
+            merfish_cells['layer'] = merfish_cells['celltype'].apply(extract_layer_from_celltype)
+
+        # 筛选有效细胞
         valid_cells = merfish_cells[(merfish_cells[level].notna()) & (merfish_cells['region_id'] > 0)]
         if len(valid_cells) == 0:
             logger.warning(f"没有同时有{level}和区域ID的细胞")
             return
 
-        # 计算每个区域中每种类型的细胞数量
-        grouped = valid_cells.groupby(['region_id', level]).size().reset_index(name='count')
-
-        # 计算区域总数
-        region_totals = valid_cells.groupby('region_id').size().to_dict()
-
-        # 计算比例并找出每个区域的主导类型
+        # 计算每个区域中各细胞类型的数量
         relationships = []
-        processed_regions = set()
 
-        for region_id in grouped['region_id'].unique():
-            region_group = grouped[grouped['region_id'] == region_id]
-            total = region_totals.get(region_id, 1)
+        # 为每个区域找出主导类型
+        for region_id in valid_cells['region_id'].unique():
+            # 该区域的所有细胞
+            region_cells = valid_cells[valid_cells['region_id'] == region_id]
+            total = len(region_cells)
 
-            # 计算比例
-            region_group = region_group.copy()
-            region_group['pct'] = region_group['count'] / total
+            if total == 0:
+                continue
 
-            # 按比例排序并取前3个
-            top_types = region_group.sort_values('pct', ascending=False).head(3)
+            # 计算各类型的比例
+            type_counts = region_cells[level].value_counts()
+            type_data = []
 
-            for i, (_, row) in enumerate(top_types.iterrows()):
-                cell_type = row[level]
+            for cell_type, count in type_counts.items():
                 if cell_type in id_map:
-                    rel = {
-                        ':START_ID(Region)': int(region_id),
-                        f':END_ID({level.capitalize()})': id_map[cell_type],
-                        'pct:float': float(row['pct']),
-                        'rank:int': i + 1,
-                        ':TYPE': f'DOMINANT_TRANSCRIPTOMIC_{level.upper()}'
-                    }
-                    relationships.append(rel)
-                    processed_regions.add(region_id)
-                else:
-                    logger.warning(f"{level}类型 '{cell_type}' 不在ID映射中")
+                    pct = count / total
+                    type_data.append({
+                        'type': cell_type,
+                        'count': count,
+                        'pct': pct,
+                        'type_id': id_map[cell_type]
+                    })
+
+            # 按比例排序
+            type_data.sort(key=lambda x: x['pct'], reverse=True)
+
+            # 只取第一个（最主要的）类型
+            if type_data:
+                dominant_type = type_data[0]
+                rel = {
+                    ':START_ID(Region)': int(region_id),
+                    f':END_ID({level.capitalize()})': dominant_type['type_id'],
+                    'pct:float': float(dominant_type['pct']),
+                    'rank:int': 1,  # 固定为1，因为每个区域只有一个主导类型
+                    ':TYPE': f'DOMINANT_TRANSCRIPTOMIC_{level.upper()}'
+                }
+                relationships.append(rel)
+
+                # 记录调试信息
+                if region_id in [1, 2, 7, 9, 10]:  # 您提供的示例中的区域
+                    logger.info(f"区域{region_id}的主导{level}: {dominant_type['type']} ({dominant_type['pct']:.2f})")
 
         # 保存关系
         if relationships:
-            # 确保输出目录存在
-            rel_dir = self.relationships_dir
-            rel_dir.mkdir(parents=True, exist_ok=True)
-
-            # 确定输出文件
-            output_file = rel_dir / f"dominant_transcriptomic_{level}.csv"
-
-            # 创建DataFrame并保存
+            output_file = self.relationships_dir / f"dominant_transcriptomic_{level}.csv"
             df = pd.DataFrame(relationships)
             df.to_csv(output_file, index=False)
-
-            logger.info(f"保存了 {len(relationships)} 个{level}级别的Dominant_transcriptomic关系到 {output_file}")
+            logger.info(f"保存了 {len(relationships)} 个{level}级别的Dominant_transcriptomic关系")
         else:
             logger.warning(f"没有生成{level}级别的Dominant_transcriptomic关系")
     def generate_belongs_to_from_hierarchy(self):
@@ -1456,7 +1485,7 @@ class EnhancedKnowledgeGraphBuilder:
     def generate_project_to_relationships(self, projection_data: pd.DataFrame):
         """
         从神经元级别的投射数据生成区域间PROJECT_TO关系
-        使用info表匹配源区域信息
+        实现与测试脚本完全一致
         """
         if projection_data is None or projection_data.empty:
             logger.warning("没有投影数据")
@@ -1494,143 +1523,152 @@ class EnhancedKnowledgeGraphBuilder:
             logger.error("info表中没有区域信息列，无法确定源区域")
             return
 
-        # 2. 提取所有目标区域名称
-        target_regions = set()
+        # 2. 获取区域ID映射
         region_to_id = {}  # 区域名称到ID的映射
+        id_to_acronym = {}  # ID到区域名称的映射
 
-        # 加载区域ID映射
         if hasattr(self, 'region_analyzer') and self.region_analyzer:
-            # 从region_analyzer获取映射
             for region_id, info in self.region_analyzer.region_info.items():
                 acronym = info.get('acronym', '')
                 if acronym:
                     region_to_id[acronym] = region_id
+                    id_to_acronym[region_id] = acronym
 
-        # 补充从info表中获取的区域映射
-        if region_col == 'base_region':
-            # 加载tree_yzx.json获取acronym到ID的映射
-            tree_file = self.output_dir.parent / "data" / "tree_yzx.json"
-            if tree_file.exists():
-                with open(tree_file, 'r') as f:
-                    tree_data = json.load(f)
-
-                for node in tree_data:
-                    if 'id' in node and 'acronym' in node:
-                        region_to_id[node['acronym']] = node['id']
-
-        logger.info(f"加载了 {len(region_to_id)} 个区域ID映射")
-
-        # 3. 解析列名中的区域名称
+        # 3. 解析列名中的目标区域名称
+        target_regions = []
         for col in projection_data.columns:
             if col.startswith('proj_axon_') and (col.endswith('_rela') or col.endswith('_abs')):
-                parts = col.split('_')
-                if len(parts) >= 3:
-                    # 提取中间的区域名称部分
-                    region = '_'.join(parts[2:-1])  # 处理可能包含下划线的区域名
-                    target_regions.add(region)
+                # 提取区域名称
+                region = col.replace('proj_axon_', '').replace('_rela', '').replace('_abs', '')
+                target_regions.append(region)
 
         logger.info(f"从列名中提取到 {len(target_regions)} 个目标区域")
 
-        # 4. 将投射数据的索引转换为字符串以匹配info表
-        # 创建ID到源区域的映射
-        neuron_id_to_source = {}
-        neuron_id_to_source_id = {}
-
-        # 确保info表中的ID是字符串类型
+        # 4. 将ID转换为字符串以便匹配
         info_df['ID_str'] = info_df['ID'].astype(str)
+        proj_ids = [str(idx) for idx in projection_data.index]
 
-        # 为投射数据中的每个神经元找到源区域
-        for neuron_id in projection_data.index:
-            neuron_id_str = str(neuron_id)
+        # 打印样本以协助调试
+        logger.info(f"投射数据前5个ID: {proj_ids[:5]}")
+        logger.info(f"Info表前5个ID: {info_df['ID_str'].head(5).tolist()}")
 
-            # 在info表中查找匹配的行
-            matches = info_df[info_df['ID_str'] == neuron_id_str]
+        # 5. 构建神经元ID到源区域的映射
+        neuron_source_map = {}  # neuron_id -> (source_id, source_acronym)
 
+        # 第1步: 直接匹配ID
+        match_count = 0
+        for neuron_id in proj_ids:
+            matches = info_df[info_df['ID_str'] == neuron_id]
             if not matches.empty:
-                # 找到匹配，获取区域信息
-                if region_col == 'region_id':
-                    # 直接获取区域ID
-                    source_id = matches.iloc[0][region_col]
-                    if pd.notna(source_id):
-                        # 如果有对应的区域ID，查找其acronym
-                        if hasattr(self, 'region_analyzer') and self.region_analyzer:
-                            region_info = self.region_analyzer.region_info.get(source_id, {})
-                            acronym = region_info.get('acronym', '')
-                            if acronym:
-                                neuron_id_to_source[neuron_id] = acronym
-                                neuron_id_to_source_id[neuron_id] = source_id
+                match_count += 1
+                source_info = matches.iloc[0][region_col]
+
+                if pd.notna(source_info):
+                    # 处理不同类型的区域列
+                    if region_col == 'region_id':
+                        source_id = source_info
+                        source_acronym = id_to_acronym.get(source_id, '')
+                    else:  # base_region
+                        source_acronym = source_info
+                        source_id = region_to_id.get(source_acronym)
+
+                    if source_id and source_acronym:
+                        neuron_source_map[neuron_id] = (source_id, source_acronym)
+
+        logger.info(f"直接ID匹配: {match_count}/{len(proj_ids)} 个神经元匹配")
+        logger.info(f"有效源区域映射: {len(neuron_source_map)}/{len(proj_ids)}")
+
+        # 第2步: 如果匹配率低，尝试从复合ID中提取
+        if len(neuron_source_map) < len(proj_ids) * 0.1:  # 匹配率低于10%
+            logger.info("尝试从复合ID中提取...")
+            for neuron_id in proj_ids:
+                if neuron_id in neuron_source_map:
+                    continue
+
+                if 'SEU-ALLEN' in neuron_id:
+                    parts = neuron_id.split('_')
+                    if len(parts) >= 3:
+                        try:
+                            extracted_id = parts[2]
+                            matches = info_df[info_df['ID_str'] == extracted_id]
+                            if not matches.empty:
+                                source_info = matches.iloc[0][region_col]
+                                if pd.notna(source_info):
+                                    if region_col == 'region_id':
+                                        source_id = source_info
+                                        source_acronym = id_to_acronym.get(source_id, '')
+                                    else:
+                                        source_acronym = source_info
+                                        source_id = region_to_id.get(source_acronym)
+
+                                    if source_id and source_acronym:
+                                        neuron_source_map[neuron_id] = (source_id, source_acronym)
+                        except:
+                            continue
+
+            logger.info(f"复合ID提取后: {len(neuron_source_map)}/{len(proj_ids)} 个有效映射")
+
+        # 6. 计算区域间投射
+        region_projections = {}  # (source_id, target_id) -> {'total': 值, 'count': 数量}
+
+        # 遍历每个有源区域的神经元
+        for neuron_id, (source_id, source_acronym) in neuron_source_map.items():
+            # 获取该神经元的索引
+            try:
+                if neuron_id in projection_data.index:
+                    row = projection_data.loc[neuron_id]
                 else:
-                    # 使用base_region作为区域名称
-                    source_region = matches.iloc[0][region_col]
-                    if pd.notna(source_region) and source_region:
-                        neuron_id_to_source[neuron_id] = source_region
-                        # 查找对应的区域ID
-                        source_id = region_to_id.get(source_region)
-                        if source_id:
-                            neuron_id_to_source_id[neuron_id] = source_id
+                    # 可能需要找到原始索引
+                    orig_id = None
+                    for idx in projection_data.index:
+                        if str(idx) == neuron_id:
+                            orig_id = idx
+                            break
 
-        # 记录匹配统计
-        matched_count = len(neuron_id_to_source)
-        logger.info(f"从info表匹配到 {matched_count}/{len(projection_data)} 个神经元的源区域")
+                    if orig_id is None:
+                        continue
 
-        # 统计源区域分布
-        source_counts = {}
-        for source in neuron_id_to_source.values():
-            source_counts[source] = source_counts.get(source, 0) + 1
+                    row = projection_data.loc[orig_id]
 
-        # 记录前10个最常见的源区域
-        top_sources = sorted(source_counts.items(), key=lambda x: x[1], reverse=True)[:10]
-        logger.info(f"前10个最常见的源区域: {top_sources}")
+                # 处理该神经元到每个目标区域的投射
+                for target_acronym in target_regions:
+                    # 获取目标区域ID
+                    target_id = region_to_id.get(target_acronym)
+                    if not target_id:
+                        continue
 
-        # 5. 计算区域间的投射强度
-        region_connections = {}  # (源区域ID, 目标区域ID) -> 投射统计
+                    # 获取投射强度
+                    col = f"proj_axon_{target_acronym}_rela"
+                    if col in projection_data.columns:
+                        proj_strength = row[col]
 
-        for neuron_id, source in neuron_id_to_source.items():
-            source_id = neuron_id_to_source_id.get(neuron_id)
-            if not source_id:
+                        # 确保是数值且大于0
+                        if pd.notna(proj_strength) and proj_strength > 0:
+                            key = (source_id, target_id)
+                            if key not in region_projections:
+                                region_projections[key] = {
+                                    'total': 0,
+                                    'count': 0,
+                                    'source_acronym': source_acronym,
+                                    'target_acronym': target_acronym
+                                }
+
+                            region_projections[key]['total'] += proj_strength
+                            region_projections[key]['count'] += 1
+            except Exception as e:
+                # 跳过有问题的数据
                 continue
 
-            # 计算该神经元到各目标区域的投射
-            for target in target_regions:
-                target_id = region_to_id.get(target)
-                if not target_id:
-                    continue
-
-                rela_col = f"proj_axon_{target}_rela"
-                if rela_col not in projection_data.columns:
-                    continue
-
-                # 获取投射强度
-                try:
-                    val = projection_data.loc[neuron_id, rela_col]
-                    if pd.notna(val) and val > 0:
-                        # 记录投射
-                        conn_key = (source_id, target_id)
-                        if conn_key not in region_connections:
-                            region_connections[conn_key] = {
-                                'total': 0,
-                                'count': 0,
-                                'source_acronym': source,
-                                'target_acronym': target
-                            }
-
-                        region_connections[conn_key]['total'] += val
-                        region_connections[conn_key]['count'] += 1
-                except Exception as e:
-                    continue
-
-        # 6. 生成PROJECT_TO关系
+        # 7. 生成PROJECT_TO关系
         relationships = []
 
-        for (source_id, target_id), stats in region_connections.items():
-            # 计算平均投射强度
-            average = stats['total'] / stats['count'] if stats['count'] > 0 else 0
+        for (source_id, target_id), stats in region_projections.items():
+            avg_strength = stats['total'] / stats['count'] if stats['count'] > 0 else 0
 
-            # 创建关系
             rel = {
                 ':START_ID(Region)': source_id,
                 ':END_ID(Region)': target_id,
-                'weight:float': float(average),
+                'weight:float': float(avg_strength),
                 'total:float': float(stats['total']),
                 'neuron_count:int': int(stats['count']),
                 'source_acronym': stats['source_acronym'],
@@ -1640,12 +1678,18 @@ class EnhancedKnowledgeGraphBuilder:
 
             relationships.append(rel)
 
-        # 7. 保存关系
+        # 8. 保存关系
         if relationships:
             df = pd.DataFrame(relationships)
             output_file = self.relationships_dir / "project_to.csv"
             df.to_csv(output_file, index=False)
             logger.info(f"保存了 {len(df)} 个PROJECT_TO关系到 {output_file}")
+
+            # 打印前几条记录
+            logger.info("投射关系示例:")
+            for i, row in df.head(5).iterrows():
+                logger.info(
+                    f"  {row['source_acronym']} -> {row['target_acronym']}: {row['weight:float']:.4f} (神经元数: {row['neuron_count:int']})")
         else:
             logger.warning("没有生成任何PROJECT_TO关系")
 

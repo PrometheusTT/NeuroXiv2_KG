@@ -259,7 +259,9 @@ def load_data(data_dir: Union[str, Path], use_cached: bool = True) -> Dict[str, 
     projection_file = data_dir / PROJECTION_FILE
     if projection_file.exists():
         logger.info(f"加载投影数据: {PROJECTION_FILE}")
-        data['projection_df'] = pd.read_csv(projection_file)
+        data['projection_df'] = pd.read_csv(projection_file,index_col=0)
+        proj_df = data['projection_df']
+        data['projection_df'] = proj_df[~proj_df['ID'].str.contains('CCF-thin|local', na=False)]
         logger.info(f"加载了{len(data['projection_df'])}条投影连接")
     else:
         logger.warning(f"投影数据文件不存在: {projection_file}")
@@ -1146,7 +1148,7 @@ def load_morphology_data(data_dir: Path) -> pd.DataFrame:
     # 7. 筛选出至少有100个完整神经元的区域
     regions_with_sufficient_neurons = []
     for region_id, count in region_neuron_counts.items():
-        if count >= 100:
+        if count >= 0:
             regions_with_sufficient_neurons.append(region_id)
 
     logger.info(

@@ -637,6 +637,7 @@ class EnhancedKnowledgeGraphBuilder:
     """增强的知识图谱构建器"""
 
     def __init__(self, output_dir: Path):
+        self.layer_calculator = None
         self.region_name_id_map = None
         self.output_dir = Path(output_dir)
         ensure_dir(self.output_dir)
@@ -1782,7 +1783,7 @@ def main(data_dir: str = "../data",
 
     # 使用已存在的builder.region_analyzer
     layer_calculator = LayerSpecificMorphologyCalculator(data_path, builder.region_analyzer)
-
+    builder.layer_calculator = layer_calculator
     if layer_calculator.load_morphology_with_layers():
         # 设置layer_calculator
         builder.layer_calculator = layer_calculator

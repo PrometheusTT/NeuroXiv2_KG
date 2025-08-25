@@ -1638,7 +1638,7 @@ class EnhancedKnowledgeGraphBuilder:
                         continue
 
                     # 获取投射强度
-                    col = f"proj_axon_{target_acronym}_rela"
+                    col = f"proj_axon_{target_acronym}_abs"
                     if col in projection_data.columns:
                         proj_strength = row[col]
 

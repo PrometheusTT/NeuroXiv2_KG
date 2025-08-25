@@ -621,6 +621,7 @@ class EnhancedKnowledgeGraphBuilder:
     """增强的知识图谱构建器"""
 
     def __init__(self, output_dir: Path):
+        self.region_name_id_map = None
         self.output_dir = Path(output_dir)
         ensure_dir(self.output_dir)
         self.nodes_dir = self.output_dir / "nodes"
@@ -633,11 +634,45 @@ class EnhancedKnowledgeGraphBuilder:
         self.subclass_id_map = {}
         self.supertype_id_map = {}
         self.cluster_id_map = {}
-        self.region_name_id_map = {}
-        self.region_id_map = {}
 
         # 存储层级数据
         self.hierarchy_loader = None
+
+        # 初始化区域分析器
+        self.region_analyzer = None
+
+        # 有效的脑区acronym列表
+        self.valid_acronyms = set([
+            'AAA', 'ACAd', 'ACAv', 'ACB', 'ACVII', 'AD', 'ADP', 'AHN', 'AId', 'AIp', 'AIv',
+            'AM', 'AMB', 'AN', 'AOB', 'AON', 'AP', 'APN', 'APr', 'ARH', 'ASO', 'AT', 'AUDd',
+            'AUDp', 'AUDpo', 'AUDv', 'AV', 'AVP', 'AVPV', 'Acs5', 'B', 'BA', 'BAC', 'BLA',
+            'BMA', 'BST', 'CA1', 'CA2', 'CA3', 'CEA', 'CENT', 'CL', 'CLA', 'CLI', 'CM',
+            'COAa', 'COAp', 'COPY', 'CP', 'CS', 'CU', 'CUL', 'CUN', 'DCO', 'DEC', 'DG',
+            'DMH', 'DMX', 'DN', 'DP', 'DR', 'DT', 'DTN', 'ECT', 'ECU', 'ENTl', 'ENTm',
+            'EPd', 'EPv', 'EW', 'FC', 'FL', 'FN', 'FOTU', 'FRP', 'FS', 'GPe', 'GPi', 'GR',
+            'GRN', 'GU', 'HATA', 'I5', 'IA', 'IAD', 'IAM', 'IC', 'ICB', 'IF', 'IG', 'IGL',
+            'III', 'ILA', 'IMD', 'IO', 'IP', 'IPN', 'IRN', 'ISN', 'IV', 'IntG', 'L1', 'L2/3',
+            'L4', 'L5', 'L6a', 'L6b', 'LA', 'LAV', 'LC', 'LD', 'LDT', 'LGd', 'LGv', 'LH',
+            'LHA', 'LIN', 'LING', 'LM', 'LP', 'LPO', 'LRN', 'LSc', 'LSr', 'LSv', 'LT', 'MA',
+            'MA3', 'MARN', 'MD', 'MDRN', 'MDRNd', 'MDRNv', 'ME', 'MEA', 'MEPO', 'MEV', 'MG',
+            'MH', 'MM', 'MOB', 'MOp', 'MOs', 'MPN', 'MPO', 'MPT', 'MRN', 'MS', 'MT', 'MV',
+            'NB', 'NDB', 'NI', 'NLL', 'NLOT', 'NOD', 'NOT', 'NPC', 'NR', 'NTB', 'NTS', 'OP',
+            'ORBl', 'ORBm', 'ORBvl', 'OT', 'OV', 'P5', 'PA', 'PAA', 'PAG', 'PAR', 'PARN',
+            'PAS', 'PB', 'PBG', 'PC5', 'PCG', 'PCN', 'PD', 'PDTg', 'PERI', 'PF', 'PFL', 'PG',
+            'PGRNd', 'PGRNl', 'PH', 'PIL', 'PIR', 'PL', 'PMd', 'PMv', 'PN', 'PO', 'POL',
+            'POST', 'PP', 'PPN', 'PPT', 'PPY', 'PR', 'PRE', 'PRM', 'PRNc', 'PRNr', 'PRP',
+            'PS', 'PST', 'PSTN', 'PSV', 'PT', 'PVH', 'PVHd', 'PVT', 'PVa', 'PVi', 'PVp',
+            'PVpo', 'PYR', 'Pa4', 'Pa5', 'PeF', 'PoT', 'ProS', 'RCH', 'RE', 'RH', 'RL', 'RM',
+            'RN', 'RO', 'RPA', 'RPO', 'RR', 'RSPagl', 'RSPd', 'RSPv', 'RT', 'SAG', 'SBPV',
+            'SCH', 'SCO', 'SCm', 'SCs', 'SF', 'SFO', 'SG', 'SGN', 'SH', 'SI', 'SIM', 'SLC',
+            'SLD', 'SMT', 'SNc', 'SNr', 'SO', 'SOC', 'SPA', 'SPFm', 'SPFp', 'SPIV', 'SPVC',
+            'SPVI', 'SPVO', 'SSp-bfd', 'SSp-ll', 'SSp-m', 'SSp-n', 'SSp-tr', 'SSp-ul',
+            'SSp-un', 'SSs', 'STN', 'SUB', 'SUM', 'SUT', 'SUV', 'SubG', 'TEa', 'TMd', 'TMv',
+            'TR', 'TRN', 'TRS', 'TT', 'TU', 'UVU', 'V', 'VAL', 'VCO', 'VI', 'VII', 'VISC',
+            'VISa', 'VISal', 'VISam', 'VISl', 'VISli', 'VISp', 'VISpl', 'VISpm', 'VISpor',
+            'VISrl', 'VLPO', 'VM', 'VMH', 'VMPO', 'VPL', 'VPLpc', 'VPM', 'VPMpc', 'VTA',
+            'VTN', 'VeCB', 'XII', 'Xi', 'ZI', 'fiber tracts'
+        ])
 
     def set_hierarchy_loader(self, hierarchy_loader: MERFISHHierarchyLoader):
         """设置层级加载器"""
@@ -660,105 +695,92 @@ class EnhancedKnowledgeGraphBuilder:
         """生成Region节点，使用tree_yzx.json中的acronym作为名称"""
         logger.info("生成Region节点...")
 
-        # 加载tree_yzx.json获取正确的区域信息
-        tree_info = {}
+        # 保存region_data供其他方法使用
+        self.region_data = region_data
 
-        # 尝试直接从tree_yzx.json加载
-        try:
-            tree_file = Path("./data/tree_yzx.json")
-            possible_locations = [
-                self.output_dir.parent / "data" / "tree_yzx.json",
-                Path("./data/tree_yzx.json"),
-                Path("/home/wlj/NeuroXiv2/data/tree_yzx.json")
-            ]
+        # 确保有region_analyzer
+        if not hasattr(self, 'region_analyzer') or not self.region_analyzer:
+            logger.warning("没有初始化region_analyzer，尝试加载tree_yzx.json")
+            try:
+                tree_file = Path("./data/tree_yzx.json")
+                possible_locations = [
+                    self.output_dir.parent / "data" / "tree_yzx.json",
+                    Path("./data/tree_yzx.json"),
+                    Path("/home/wlj/NeuroXiv2/data/tree_yzx.json")
+                ]
 
-            for loc in possible_locations:
-                if loc.exists():
-                    tree_file = loc
-                    break
+                for loc in possible_locations:
+                    if loc.exists():
+                        tree_file = loc
+                        break
 
-            if tree_file.exists():
-                with open(tree_file, 'r') as f:
-                    tree_data = json.load(f)
+                if tree_file.exists():
+                    with open(tree_file, 'r') as f:
+                        tree_data = json.load(f)
 
-                # 构建区域ID到信息的映射
-                for node in tree_data:
-                    if 'id' in node:
-                        # 从structure_id_path推断parent_id
-                        parent_id = 0  # 默认值
-                        if 'structure_id_path' in node and len(node['structure_id_path']) > 1:
-                            # 倒数第二个元素是父节点ID
-                            parent_id = node['structure_id_path'][-2]
-
-                        tree_info[node['id']] = {
-                            'acronym': node.get('acronym', ''),
-                            'name': node.get('name', ''),
-                            'parent_id': parent_id,  # 从路径推断的父ID
-                            'color': node.get('rgb_triplet', [200, 200, 200])
-                        }
-
-                logger.info(f"从tree_yzx.json加载了 {len(tree_info)} 个区域信息")
-            else:
-                logger.warning(f"在所有可能的位置都找不到tree_yzx.json文件")
-        except Exception as e:
-            logger.error(f"加载tree_yzx.json失败: {e}")
-            logger.exception("详细错误")
+                    self.region_analyzer = RegionAnalyzer(tree_data)
+                    logger.info(f"成功加载tree_yzx.json并初始化region_analyzer")
+                else:
+                    logger.warning("找不到tree_yzx.json文件")
+            except Exception as e:
+                logger.error(f"加载tree_yzx.json失败: {e}")
 
         # 诊断信息
         logger.info(f"区域数据形状: {region_data.shape}")
-        logger.info(f"树信息条目数: {len(tree_info)}")
+        logger.info(
+            f"树信息条目数: {len(self.region_analyzer.region_info) if hasattr(self, 'region_analyzer') and self.region_analyzer else 0}")
 
-        # 首先构建区域名称到ID的映射
-        self.region_name_id_map = {}
-        for _, region in region_data.iterrows():
-            region_id = region.get('region_id')
-            if pd.isna(region_id):
-                continue
-
-            region_name = region.get('name', f'Region_{region_id}')
-            if region_name and not pd.isna(region_name):
-                self.region_name_id_map[region_name] = region_id
-
+        # 跟踪已处理的区域ID
+        processed_ids = set()
         regions = []
-        for _, region in region_data.iterrows():
-            # 获取区域ID
-            region_id = region.get('region_id')
 
+        # 1. 首先处理region_data中的区域
+        for _, region in region_data.iterrows():
+            region_id = region.get('region_id')
             if pd.isna(region_id):
-                logger.warning(f"跳过缺少region_id的区域: {region.get('name', 'Unknown')}")
                 continue
 
             try:
                 region_id_int = int(region_id)
+                processed_ids.add(region_id_int)
             except (ValueError, TypeError):
                 logger.warning(f"跳过非数字region_id: {region_id}")
                 continue
 
-            # 使用tree_yzx.json中的acronym作为名称
-            if region_id_int in tree_info:
-                region_acronym = tree_info[region_id_int]['acronym']
-                region_full_name = tree_info[region_id_int]['name']
-                parent_id = tree_info[region_id_int]['parent_id']  # 从推断的parent_id获取
-            else:
-                # 如果在tree中找不到，使用region_data中的值
-                region_acronym = region.get('acronym', '')
-                region_full_name = region.get('name', f'Region_{region_id}')
-                parent_id = region.get('parent_id', 0)  # 使用默认值
+            # 获取区域信息
+            region_info = {}
+            if hasattr(self, 'region_analyzer') and self.region_analyzer:
+                region_info = self.region_analyzer.get_region_info(region_id_int)
+
+            # 获取acronym
+            acronym = region_info.get('acronym', '') or region.get('acronym', '')
+
+            # 如果没有acronym，继续下一个区域
+            if not acronym:
+                logger.warning(f"区域 {region_id_int} 没有acronym，使用默认名称")
+                acronym = f"Region_{region_id_int}"
 
             # 创建区域字典
             region_dict = {
                 'region_id:ID(Region)': region_id_int,
-                'name': str(region_acronym) if region_acronym else f'Region_{region_id}',  # 使用acronym作为name
-                'full_name': str(region_full_name),  # 保留完整名称
-                'acronym': str(region_acronym) if region_acronym else '',
-                'parent_id:int': int(parent_id) if parent_id is not None else 0  # 确保有默认值
+                'name': str(acronym),
+                'full_name': str(region_info.get('name', '') or region.get('name', acronym)),
+                'acronym': str(acronym)
             }
 
-            # 添加颜色信息
-            if region_id_int in tree_info and 'color' in tree_info[region_id_int]:
-                color = tree_info[region_id_int]['color']
-                if isinstance(color, list) and len(color) == 3:
-                    region_dict['color:int[]'] = color
+            # 添加parent_id
+            if 'parent_id' in region_info:
+                parent_id = region_info['parent_id']
+                if parent_id is not None:
+                    region_dict['parent_id:int'] = int(parent_id)
+            elif 'parent_id' in region and not pd.isna(region['parent_id']):
+                region_dict['parent_id:int'] = int(region['parent_id'])
+            else:
+                region_dict['parent_id:int'] = 0
+
+            # 添加颜色
+            if 'color' in region_info:
+                region_dict['color:int[]'] = region_info['color']
 
             # 添加形态学属性
             for attr in MORPH_ATTRIBUTES:
@@ -775,6 +797,37 @@ class EnhancedKnowledgeGraphBuilder:
                 region_dict[f'{attr}:int'] = stat_values.get(attr, 0)
 
             regions.append(region_dict)
+
+        # 2. 处理有效acronym列表中的区域，但不在region_data中的
+        if hasattr(self, 'region_analyzer') and self.region_analyzer:
+            for acronym in self.valid_acronyms:
+                region_id = self.region_analyzer.get_region_by_acronym(acronym)
+                if region_id and region_id not in processed_ids:
+                    region_info = self.region_analyzer.get_region_info(region_id)
+
+                    # 创建区域字典
+                    region_dict = {
+                        'region_id:ID(Region)': region_id,
+                        'name': acronym,
+                        'full_name': region_info.get('name', acronym),
+                        'acronym': acronym,
+                        'parent_id:int': region_info.get('parent_id', 0) or 0
+                    }
+
+                    # 添加颜色
+                    if 'color' in region_info:
+                        region_dict['color:int[]'] = region_info['color']
+
+                    # 添加默认的形态学属性
+                    for attr in MORPH_ATTRIBUTES:
+                        region_dict[f'{attr}:float'] = 0.0
+
+                    # 添加默认的统计属性
+                    for attr in STAT_ATTRIBUTES:
+                        region_dict[f'{attr}:int'] = 0
+
+                    regions.append(region_dict)
+                    processed_ids.add(region_id)
 
         # 保存到CSV
         self._save_nodes(regions, "regions")
@@ -1688,12 +1741,13 @@ def main(data_dir: str = "../data",
 
     # 加载树结构用于区域分析
     tree_data = processed_data.get('tree', [])
-    region_analyzer = None
+    builder = EnhancedKnowledgeGraphBuilder(output_path)
+
     if tree_data:
         logger.info("初始化区域分析器...")
-        region_analyzer = RegionAnalyzer(tree_data)
-        logger.info(f"识别出 {len(region_analyzer.cortical_regions)} 个皮层区域")
-        logger.info(f"识别出 {len(region_analyzer.standard_regions)} 个标准CCF区域")
+        builder.region_analyzer = RegionAnalyzer(tree_data)
+        logger.info(f"识别出 {len(builder.region_analyzer.cortical_regions)} 个皮层区域")
+        logger.info(f"识别出 {len(builder.region_analyzer.standard_regions)} 个标准CCF区域")
 
     # Phase 2: 加载层级数据
     logger.info("Phase 2: 加载MERFISH层级数据")
@@ -1706,14 +1760,16 @@ def main(data_dir: str = "../data",
     # Phase 3: 计算层特异性形态数据
     logger.info("Phase 3: 计算层特异性形态数据")
     builder = EnhancedKnowledgeGraphBuilder(output_path)
-    # 传入区域分析器
-    layer_calculator = LayerSpecificMorphologyCalculator(data_path)
+
+    # 修改这一行，传入region_analyzer
+    layer_calculator = LayerSpecificMorphologyCalculator(data_path, builder.region_analyzer)
+
     if layer_calculator.load_morphology_with_layers():
         # 设置layer_calculator
         builder.layer_calculator = layer_calculator
 
         # 计算层特异性形态数据
-        regionlayer_data = layer_calculator.calculate_regionlayer_morphology(region_data)
+        regionlayer_data = layer_calculator.calculate_regionlayer_morphology(region_data, merfish_cells)
     else:
         logger.error("无法加载形态学数据和层信息")
         regionlayer_data = pd.DataFrame()
@@ -1724,7 +1780,6 @@ def main(data_dir: str = "../data",
 
     builder.set_hierarchy_loader(hierarchy_loader)
     builder.layer_calculator = layer_calculator
-    builder.region_analyzer = region_analyzer  # 设置区域分析器
 
     # 生成节点
     logger.info("生成节点...")

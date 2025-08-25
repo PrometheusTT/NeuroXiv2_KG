@@ -29,7 +29,7 @@ from data_loader_enhanced import (
 
 # 性能参数
 CHUNK_SIZE = 100000
-N_WORKERS = 32
+N_WORKERS = 100
 BATCH_SIZE = 10000
 PCT_THRESHOLD = 0.01
 
@@ -660,16 +660,39 @@ class EnhancedKnowledgeGraphBuilder:
     def generate_has_relationships_optimized(self,
                                              merfish_cells: pd.DataFrame,
                                              level: str):
-        """优化的HAS_*关系生成"""
+        """优化的HAS_*关系生成，处理缺失列的情况"""
         logger.info(f"生成HAS_{level.upper()}关系...")
 
+        # 验证必要的列是否存在
         if level not in merfish_cells.columns:
-            logger.warning(f"没有{level}数据")
-            return
+            logger.warning(f"没有{level}数据，列不存在")
+            # 尝试创建替代列
+            if level == 'class' and 'cell_class' in merfish_cells.columns:
+                merfish_cells = merfish_cells.copy()
+                merfish_cells[level] = merfish_cells['cell_class']
+                logger.info(f"使用 'cell_class' 列替代 '{level}' 列")
+            elif level == 'subclass' and 'cell_type' in merfish_cells.columns:
+                merfish_cells = merfish_cells.copy()
+                merfish_cells[level] = merfish_cells['cell_type']
+                logger.info(f"使用 'cell_type' 列替代 '{level}' 列")
+            elif level == 'cluster' and 'cluster_label' in merfish_cells.columns:
+                merfish_cells = merfish_cells.copy()
+                merfish_cells[level] = merfish_cells['cluster_label']
+                logger.info(f"使用 'cluster_label' 列替代 '{level}' 列")
+            else:
+                logger.error(f"无法找到 '{level}' 列的替代，无法继续")
+                return
 
         if 'region_id' not in merfish_cells.columns:
             logger.warning("细胞缺少region_id")
-            return
+            # 检查是否有替代列
+            if 'brain_region_id' in merfish_cells.columns:
+                merfish_cells = merfish_cells.copy()
+                merfish_cells['region_id'] = merfish_cells['brain_region_id']
+                logger.info("使用 'brain_region_id' 替代 'region_id'")
+            else:
+                logger.error("无法找到 'region_id' 的替代，无法继续")
+                return
 
         # 获取ID映射
         if level == 'class':
@@ -685,12 +708,22 @@ class EnhancedKnowledgeGraphBuilder:
             logger.warning(f"{level} ID映射为空")
             return
 
-        # 按区域和类型分组计数
+        # 记录有效数据的统计信息
         valid_cells = merfish_cells[merfish_cells[level].notna()]
-        grouped = valid_cells.groupby(['region_id', level]).size().reset_index(name='count')
+        logger.info(f"总细胞数: {len(merfish_cells)}, 有{level}值的细胞: {len(valid_cells)}")
+
+        valid_region_cells = valid_cells[valid_cells['region_id'] > 0]
+        logger.info(f"有region_id的{level}细胞: {len(valid_region_cells)}")
+
+        if len(valid_region_cells) == 0:
+            logger.error(f"没有同时有{level}和region_id的细胞，无法生成关系")
+            return
+
+        # 按区域和类型分组计数
+        grouped = valid_region_cells.groupby(['region_id', level]).size().reset_index(name='count')
 
         # 计算每个区域的总数
-        region_totals = valid_cells.groupby('region_id').size().to_dict()
+        region_totals = valid_region_cells.groupby('region_id').size().to_dict()
 
         # 生成关系
         relationships = []
@@ -720,6 +753,8 @@ class EnhancedKnowledgeGraphBuilder:
                             ':TYPE': f'HAS_{level.upper()}'
                         }
                         relationships.append(rel)
+                    else:
+                        logger.warning(f"类型 '{cell_type}' 不在 {level} ID映射中")
 
                 # 批量保存
                 if len(relationships) >= BATCH_SIZE:
@@ -730,7 +765,7 @@ class EnhancedKnowledgeGraphBuilder:
         if relationships:
             self._save_relationships_batch(relationships, f"has_{level}")
 
-        logger.info(f"完成HAS_{level.upper()}关系生成")
+        logger.info(f"完成HAS_{level.upper()}关系生成，共生成 {len(relationships)} 个关系")
 
     def generate_dominant_transcriptomic_relationships(self,
                                                        region_data: pd.DataFrame,
@@ -890,7 +925,7 @@ class EnhancedKnowledgeGraphBuilder:
             return self.region_data
 
         def load_merfish_cells_parallel(self) -> pd.DataFrame:
-            """并行加载MERFISH细胞数据"""
+            """并行加载MERFISH细胞数据并映射到区域"""
             logger.info("并行加载MERFISH细胞数据...")
 
             # 获取所有MERFISH文件
@@ -915,7 +950,7 @@ class EnhancedKnowledgeGraphBuilder:
                 self.merfish_cells = pd.concat(all_cells, ignore_index=True)
                 logger.info(f"加载了 {len(self.merfish_cells)} 个细胞")
 
-                # 验证并修复坐标列
+                # 1. 验证并修复坐标列
                 required_cols = ['x_ccf', 'y_ccf', 'z_ccf']
                 missing_cols = [col for col in required_cols if col not in self.merfish_cells.columns]
 
@@ -937,22 +972,116 @@ class EnhancedKnowledgeGraphBuilder:
                                 logger.info(f"使用列 '{candidate}' 作为 '{missing_col}'")
                                 break
 
-                    # 再次检查是否仍有缺失列
-                    still_missing = [col for col in required_cols if col not in self.merfish_cells.columns]
-                    if still_missing:
-                        logger.error(f"无法修复所有缺失的坐标列: {still_missing}")
+                # 2. 调用 data_loader_enhanced 中的函数映射细胞到区域
+                from data_loader_enhanced import map_cells_to_regions_fixed
+                try:
+                    # 加载注释体积
+                    logger.info("加载注释体积以映射细胞...")
+                    data = load_data(self.data_dir)
+
+                    if 'annotation' in data and 'volume' in data['annotation'] and 'header' in data['annotation']:
+                        logger.info("开始映射细胞到区域...")
+                        self.merfish_cells = map_cells_to_regions_fixed(
+                            self.merfish_cells,
+                            data['annotation']['volume'],
+                            data['annotation']['header']
+                        )
+                        logger.info(f"映射完成，有区域ID的细胞数: {(self.merfish_cells['region_id'] > 0).sum()}")
+                    else:
+                        logger.error("无法加载注释体积数据，无法映射细胞到区域")
+                except Exception as e:
+                    logger.error(f"映射细胞到区域时出错: {e}")
+
+                # 3. 添加区域名称和层级信息
+                try:
+                    # 加载树结构
+                    tree_file = self.data_dir / "tree_yzx.json"
+                    if tree_file.exists():
+                        logger.info("加载树结构以获取区域信息...")
+                        with open(tree_file, 'r') as f:
+                            tree_data = json.load(f)
+
+                        # 创建区域ID到信息的映射
+                        region_info = {}
+                        for node in tree_data:
+                            if 'id' in node and 'acronym' in node:
+                                region_id = node['id']
+                                region_info[region_id] = {
+                                    'acronym': node.get('acronym', ''),
+                                    'name': node.get('name', ''),
+                                    'parent_id': node.get('parent_id', 0)
+                                }
+
+                        # 添加区域名称列
+                        self.merfish_cells['region_acronym'] = self.merfish_cells['region_id'].map(
+                            lambda x: region_info.get(x, {}).get('acronym', '') if x > 0 else ''
+                        )
+
+                        self.merfish_cells['region_name'] = self.merfish_cells['region_id'].map(
+                            lambda x: region_info.get(x, {}).get('name', '') if x > 0 else ''
+                        )
+
+                        logger.info("已添加区域名称信息")
+
+                        # 4. 尝试识别缺失的level列
+                        # 如果merfish_cells中没有level列(class, subclass等)，尝试从元数据提取
+                        level_columns = ['class', 'subclass', 'supertype', 'cluster']
+                        missing_levels = [col for col in level_columns if col not in self.merfish_cells.columns]
+
+                        if missing_levels:
+                            logger.warning(f"缺少细胞层级列: {missing_levels}")
+
+                            # 尝试从其他列推断
+                            possible_sources = ['cell_class', 'cell_type', 'cell_cluster', 'type', 'cluster_label']
+
+                            for level in missing_levels:
+                                # 尝试从可能的源列中查找
+                                for source in possible_sources:
+                                    if source in self.merfish_cells.columns:
+                                        self.merfish_cells[level] = self.merfish_cells[source]
+                                        logger.info(f"使用列 '{source}' 作为 '{level}'")
+                                        break
+
+                        # 记录层级列的可用性
+                        for level in level_columns:
+                            if level in self.merfish_cells.columns:
+                                unique_values = self.merfish_cells[level].nunique()
+                                logger.info(f"列 '{level}' 有 {unique_values} 个唯一值")
+                            else:
+                                logger.warning(f"列 '{level}' 不存在")
+
+                    else:
+                        logger.warning(f"树结构文件不存在: {tree_file}")
+                except Exception as e:
+                    logger.error(f"添加区域名称和层级信息时出错: {e}")
             else:
                 self.merfish_cells = pd.DataFrame()
 
             return self.merfish_cells
 
         def _load_merfish_file(self, coord_file: Path, index: int) -> pd.DataFrame:
-            """加载单个MERFISH文件"""
-            try:
-                # 加载坐标
-                coords = pd.read_csv(coord_file)
+            """
+            加载单个MERFISH文件，并进行坐标标准化和缩放处理
 
-                # 确保坐标列名正确 - 处理不同的列名情况
+            参数:
+                coord_file: 坐标文件路径
+                index: 文件索引
+
+            返回:
+                处理后的细胞数据DataFrame
+            """
+            try:
+                # 记录开始加载
+                logger.info(f"加载MERFISH坐标文件: {coord_file.name}")
+
+                # 加载坐标文件
+                coords = pd.read_csv(coord_file)
+                logger.info(f"成功加载 {len(coords)} 行坐标数据")
+
+                # 记录原始列
+                logger.debug(f"原始坐标文件列: {coords.columns.tolist()}")
+
+                # 1. 标准化坐标列名 - 确保坐标列使用标准名称
                 coord_mapping = {
                     'x': 'x_ccf',
                     'y': 'y_ccf',
@@ -968,37 +1097,109 @@ class EnhancedKnowledgeGraphBuilder:
                     'ccf_z': 'z_ccf'
                 }
 
-                # 重命名坐标列
+                # 应用列名映射
                 for old_col, new_col in coord_mapping.items():
                     if old_col in coords.columns and new_col not in coords.columns:
                         coords = coords.rename(columns={old_col: new_col})
                         logger.debug(f"将列 '{old_col}' 重命名为 '{new_col}'")
 
-                # 尝试加载对应的元数据
-                meta_file = coord_file.parent / f"cell_metadata_with_cluster_annotation_{index + 1}.csv"
-                if meta_file.exists():
-                    meta = pd.read_csv(meta_file)
+                # 2. 检查并缩放坐标 - 确保坐标使用25μm分辨率
+                for col in ['x_ccf', 'y_ccf', 'z_ccf']:
+                    if col in coords.columns:
+                        # 检查是否需要缩放 (如果最大值小于20，假设是毫米单位)
+                        max_val = coords[col].max()
+                        if max_val is not None and max_val < 20:
+                            # 记录原始范围
+                            orig_range = f"{coords[col].min():.2f} - {max_val:.2f}"
 
-                    # 合并坐标和元数据
-                    if 'cell_label' in coords.columns and 'cell_label' in meta.columns:
-                        coords = pd.merge(coords, meta, on='cell_label', how='left')
-                    elif len(coords) == len(meta):
-                        # 如果长度相同，假设顺序对应
-                        for col in meta.columns:
-                            if col not in coords.columns:
-                                coords[col] = meta[col].values
+                            # 应用缩放因子40 (将毫米转换为25μm单位)
+                            coords[col] = coords[col] * 40
 
-                # 最后再次检查必要的坐标列是否存在
+                            # 记录缩放后范围
+                            new_max = coords[col].max()
+                            new_range = f"{coords[col].min():.2f} - {new_max:.2f}"
+
+                            logger.info(f"将{col}从mm转换为25μm分辨率 (×40): {orig_range} -> {new_range}")
+
+                # 3. 验证所需的坐标列是否存在
                 missing_cols = [col for col in ['x_ccf', 'y_ccf', 'z_ccf'] if col not in coords.columns]
                 if missing_cols:
-                    logger.warning(f"文件 {coord_file.name} 处理后仍缺少坐标列: {missing_cols}")
+                    logger.warning(f"坐标文件 {coord_file.name} 缺少必要的列: {missing_cols}")
                     logger.warning(f"可用列: {coords.columns.tolist()}")
+
+                # 4. 加载元数据文件并合并
+                meta_file = coord_file.parent / f"cell_metadata_with_cluster_annotation_{index + 1}.csv"
+                if meta_file.exists():
+                    logger.info(f"加载对应的元数据文件: {meta_file.name}")
+                    try:
+                        meta = pd.read_csv(meta_file)
+                        logger.info(f"成功加载 {len(meta)} 行元数据")
+
+                        # 记录元数据列
+                        logger.debug(f"元数据文件列: {meta.columns.tolist()}")
+
+                        # 尝试基于cell_label合并
+                        if 'cell_label' in coords.columns and 'cell_label' in meta.columns:
+                            logger.info("使用'cell_label'列合并坐标和元数据")
+                            # 记录合并前行数
+                            pre_merge_rows = len(coords)
+
+                            # 执行合并
+                            coords = pd.merge(coords, meta, on='cell_label', how='left')
+
+                            # 验证合并结果
+                            logger.info(f"合并后行数: {len(coords)} (原始坐标行数: {pre_merge_rows})")
+
+                            # 检查缺失值
+                            null_pct = (coords.isnull().sum() / len(coords)).max() * 100
+                            if null_pct > 10:
+                                logger.warning(f"合并后存在较多缺失值 (最大缺失率: {null_pct:.1f}%)")
+
+                        # 如果没有公共的cell_label列但行数相同，假设顺序对应
+                        elif len(coords) == len(meta):
+                            logger.info("坐标和元数据行数相同，假设顺序对应")
+
+                            # 跳过已存在的列(避免重复)
+                            for col in meta.columns:
+                                if col not in coords.columns:
+                                    coords[col] = meta[col].values
+
+                            logger.info(f"已添加 {len(meta.columns)} 个元数据列")
+                        else:
+                            logger.warning("无法合并元数据：没有共同的cell_label列且行数不同")
+                    except Exception as e:
+                        logger.error(f"加载或合并元数据时出错: {e}")
+                else:
+                    logger.warning(f"元数据文件不存在: {meta_file}")
+
+                # 5. 添加文件来源信息
+                coords['source_file'] = coord_file.name
+
+                # 6. 数据清理和标准化
+
+                # 确保有cell_label列
+                if 'cell_label' not in coords.columns:
+                    # 尝试从其他列创建
+                    for id_col in ['id', 'cell_id', 'ID', 'Cell_ID']:
+                        if id_col in coords.columns:
+                            coords['cell_label'] = coords[id_col]
+                            logger.info(f"使用 '{id_col}' 创建 'cell_label' 列")
+                            break
+                    else:
+                        # 如果没有合适的列，创建序列号作为cell_label
+                        coords['cell_label'] = [f"cell_{coord_file.stem}_{i}" for i in range(len(coords))]
+                        logger.info("没有找到ID列，创建序列号作为cell_label")
+
+                # 记录处理后的列
+                logger.debug(f"处理后的列: {coords.columns.tolist()}")
+                logger.info(f"完成文件 {coord_file.name} 的处理，返回 {len(coords)} 行数据")
 
                 return coords
 
             except Exception as e:
                 logger.error(f"加载文件 {coord_file} 失败: {e}")
-                return None
+                # 返回一个空的DataFrame而不是None，这样合并时不会出错
+                return pd.DataFrame()
 
         def load_projection_data(self) -> pd.DataFrame:
             """加载投影数据"""
@@ -1325,11 +1526,11 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='NeuroXiv 2.0 知识图谱构建 - 完整增强版')
-    parser.add_argument('--data_dir', type=str, default='../data',
+    parser.add_argument('--data_dir', type=str, default='/home/wlj/NeuroXiv2/data',
                         help='数据目录路径')
     parser.add_argument('--output_dir', type=str, default='./knowledge_graph',
                         help='输出目录路径')
-    parser.add_argument('--hierarchy_json', type=str, default=None,
+    parser.add_argument('--hierarchy_json', type=str, default='/home/wlj/NeuroXiv2/data/tran-data-type-tree.json',
                         help='MERFISH层级JSON文件路径')
 
     args = parser.parse_args()

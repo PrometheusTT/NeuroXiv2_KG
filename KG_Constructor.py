@@ -688,7 +688,7 @@ class EnhancedKnowledgeGraphBuilder:
     """增强的知识图谱构建器"""
 
     def __init__(self, output_dir: Path):
-        self.region_name_id_map = None
+        self.region_name_id_map = {}
         self.output_dir = Path(output_dir)
         ensure_dir(self.output_dir)
         self.nodes_dir = self.output_dir / "nodes"
@@ -705,6 +705,46 @@ class EnhancedKnowledgeGraphBuilder:
         # 存储层级数据
         self.hierarchy_loader = None
 
+    def _get_numeric_region_id(self, region_id):
+        """
+        将区域ID转换为数字ID
+
+        参数:
+            region_id: 区域ID，可以是数字、字符串或其他类型
+
+        返回:
+            数字区域ID
+        """
+        # 处理NaN值
+        if pd.isna(region_id):
+            return -1
+
+        # 处理数字值
+        if isinstance(region_id, (int, float)):
+            return int(region_id)
+
+        # 处理字符串值
+        if isinstance(region_id, str):
+            # 如果是纯数字字符串
+            if region_id.isdigit():
+                return int(region_id)
+
+            # 尝试从字符串中提取数字
+            import re
+            match = re.search(r'(\d+)', region_id)
+            if match:
+                return int(match.group(1))
+
+            # 如果是区域名称，尝试从区域名称映射中查找
+            if hasattr(self, 'region_name_id_map') and region_id in self.region_name_id_map:
+                return self.region_name_id_map[region_id]
+
+        # 如果是其他类型或无法转换，使用哈希值作为ID
+        try:
+            return abs(hash(str(region_id))) % (10 ** 9)
+        except:
+            # 如果所有方法都失败，返回默认值
+            return -1
     def set_hierarchy_loader(self, hierarchy_loader: MERFISHHierarchyLoader):
         """设置层级加载器"""
         self.hierarchy_loader = hierarchy_loader

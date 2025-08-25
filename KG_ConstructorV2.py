@@ -101,12 +101,21 @@ def extract_layer_from_celltype(celltype: str) -> str:
 
     return 'Unknown'
 
+
 def extract_base_region_from_celltype(celltype: str) -> str:
     """从celltype提取基础区域名（去除层信息）"""
     if pd.isna(celltype):
         return celltype
 
     celltype = str(celltype)
+
+    # 特殊区域列表 - 这些区域名称中的数字不应被移除
+    special_regions = ['CA1', 'CA2', 'CA3', 'LGd1', 'LGd2', 'LGd3', 'LGd4', 'LGd5', 'LGd6']
+
+    # 检查是否为特殊区域
+    for special in special_regions:
+        if celltype.startswith(special):
+            return special
 
     # 移除层后缀
     layer_suffixes = ['1', '2/3', '2', '3', '4', '5', '5a', '5b', '6', '6a', '6b']
@@ -326,6 +335,13 @@ class RegionAnalyzer:
 
             if is_cortical:
                 self.cortical_regions.add(region_id)
+
+    def get_region_by_acronym(self, acronym: str) -> int:
+        """通过acronym获取区域ID"""
+        for region_id, info in self.region_info.items():
+            if info.get('acronym') == acronym:
+                return region_id
+        return None
 
     def _has_cortical_ancestor(self, region_id: int, visited: Set[int] = None) -> bool:
         """检查是否有皮层祖先"""
@@ -1742,10 +1758,11 @@ def main(data_dir: str = "../data",
     merfish_cells = processed_data.get('merfish_cells', pd.DataFrame())
     projection_data = processed_data.get('projection_df', pd.DataFrame())
 
-    # 加载树结构用于区域分析
-    tree_data = processed_data.get('tree', [])
+    # 创建builder实例 - 只创建一次
     builder = EnhancedKnowledgeGraphBuilder(output_path)
 
+    # 加载树结构用于区域分析
+    tree_data = processed_data.get('tree', [])
     if tree_data:
         logger.info("初始化区域分析器...")
         builder.region_analyzer = RegionAnalyzer(tree_data)
@@ -1762,9 +1779,8 @@ def main(data_dir: str = "../data",
 
     # Phase 3: 计算层特异性形态数据
     logger.info("Phase 3: 计算层特异性形态数据")
-    builder = EnhancedKnowledgeGraphBuilder(output_path)
 
-    # 修改这一行，传入region_analyzer
+    # 使用已存在的builder.region_analyzer
     layer_calculator = LayerSpecificMorphologyCalculator(data_path, builder.region_analyzer)
 
     if layer_calculator.load_morphology_with_layers():
@@ -1780,13 +1796,11 @@ def main(data_dir: str = "../data",
     # Phase 4: 知识图谱生成
     logger.info("Phase 4: 知识图谱生成")
 
-
     builder.set_hierarchy_loader(hierarchy_loader)
-    builder.layer_calculator = layer_calculator
 
     # 生成节点
     logger.info("生成节点...")
-    builder.generate_region_nodes(region_data, merfish_cells)  # 使用修改后的方法
+    builder.generate_region_nodes(region_data, merfish_cells)
     builder.generate_regionlayer_nodes(regionlayer_data, merfish_cells)
     builder.generate_merfish_nodes_from_hierarchy(merfish_cells)
 

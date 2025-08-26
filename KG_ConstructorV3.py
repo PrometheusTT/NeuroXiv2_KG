@@ -1,9 +1,9 @@
 """
-NeuroXiv 2.0 知识图谱构建器 - 修复版
-整合MERFISH层级JSON和层特异性形态计算
+NeuroXiv 2.0 知识图谱构建器 - 统一区域节点版本
+整合MERFISH层级JSON和形态计算
 
-作者: PrometheusTT
-日期: 2025-08-25
+作者: wangmajortom
+日期: 2025-08-26
 """
 import csv
 import json
@@ -57,7 +57,6 @@ FULL_MORPH_FEATURES = MORPH_ATTRIBUTES + [
     'Average Contraction', 'Max Euclidean Distance', 'Max Path Distance',
     'Average Euclidean Distance', 'Average Path Distance', '2D Density', '3D Density'
 ]
-
 
 # ==================== 工具函数 ====================
 
@@ -128,6 +127,7 @@ def extract_base_region_from_celltype(celltype: str) -> str:
             return base
 
     return celltype
+
 
 # ==================== MERFISH层级数据加载器 ====================
 
@@ -373,21 +373,22 @@ class RegionAnalyzer:
     def get_region_info(self, region_id: int) -> Dict:
         """获取区域信息"""
         return self.region_info.get(region_id, {})
-# ==================== 层特异性形态计算 ====================
 
-class LayerSpecificMorphologyCalculator:
-    """层特异性形态学计算器"""
+
+# ==================== 形态数据加载器 ====================
+
+class MorphologyDataLoader:
+    """形态学数据加载器 - 按脑区计算"""
 
     def __init__(self, data_dir: Path, region_analyzer: RegionAnalyzer = None):
         self.data_dir = Path(data_dir)
         self.info_df = None
         self.axon_df = None
         self.dendrite_df = None
-        self.region_name_id_map = {}
-        self.region_analyzer = region_analyzer  # 添加区域分析器
+        self.region_analyzer = region_analyzer
 
-    def load_morphology_with_layers(self) -> bool:
-        """加载形态数据和层信息，处理celltype映射"""
+    def load_morphology_data(self) -> bool:
+        """加载形态数据"""
         # 加载info.csv
         info_file = self.data_dir / "info.csv"
         if not info_file.exists():
@@ -397,33 +398,25 @@ class LayerSpecificMorphologyCalculator:
         self.info_df = pd.read_csv(info_file)
         logger.info(f"加载了 {len(self.info_df)} 条神经元信息")
 
+        # 过滤掉包含CCF-thin和local的行
+        if 'ID' in self.info_df.columns:
+            orig_len = len(self.info_df)
+            self.info_df = self.info_df[~self.info_df['ID'].astype(str).str.contains('CCF-thin|local', na=False)]
+            filtered_count = orig_len - len(self.info_df)
+            logger.info(f"从info表中过滤掉了 {filtered_count} 条包含CCF-thin或local的行")
+
         # 提取基础区域和层信息
         if 'celltype' in self.info_df.columns:
             # 提取基础区域（不含层信息）
-            self.info_df['base_region'] = self.info_df['celltype'].apply(extract_base_region_from_celltype)
-            # 提取层信息
+            self.info_df['base_region'] = self.info_df['celltype']
+            # 提取层信息作为元数据
             self.info_df['layer'] = self.info_df['celltype'].apply(extract_layer_from_celltype)
 
-            layer_counts = self.info_df['layer'].value_counts()
-            logger.info(f"层分布: {layer_counts.to_dict()}")
-
-            base_region_counts = self.info_df['base_region'].value_counts()
-            logger.info(f"找到 {len(base_region_counts)} 个基础区域")
-
-            # 加载tree_yzx.json获取acronym到region_id的映射
-            tree_file = self.data_dir / "tree_yzx.json"
-            acronym_to_id = {}
-
-            if tree_file.exists():
-                with open(tree_file, 'r') as f:
-                    tree_data = json.load(f)
-
-                for node in tree_data:
-                    if 'id' in node and 'acronym' in node:
-                        acronym_to_id[node['acronym']] = node['id']
-
-                # 将base_region映射到region_id
-                self.info_df['region_id'] = self.info_df['base_region'].map(acronym_to_id)
+            # 将base_region映射到region_id
+            if self.region_analyzer:
+                self.info_df['region_id'] = self.info_df['base_region'].apply(
+                    lambda x: self.region_analyzer.get_region_by_acronym(x) if pd.notna(x) else None
+                )
                 valid_region_count = self.info_df['region_id'].notna().sum()
                 logger.info(f"从base_region映射到region_id: {valid_region_count}/{len(self.info_df)}个有效映射")
         else:
@@ -431,214 +424,142 @@ class LayerSpecificMorphologyCalculator:
             self.info_df['layer'] = 'Unknown'
             self.info_df['base_region'] = 'Unknown'
 
-        # 加载轴突形态数据
+        # 加载轴突形态数据 - 过滤掉CCF-thin和local数据
         axon_file = self.data_dir / "axonfull_morpho.csv"
         if axon_file.exists():
             self.axon_df = pd.read_csv(axon_file)
             if 'name' in self.axon_df.columns:
+                orig_len = len(self.axon_df)
                 self.axon_df = self.axon_df[~self.axon_df['name'].str.contains('CCF-thin|local', na=False)]
-            logger.info(f"加载了 {len(self.axon_df)} 条轴突形态数据")
+                filtered_count = orig_len - len(self.axon_df)
+                logger.info(f"加载了 {len(self.axon_df)} 条轴突形态数据 (过滤了 {filtered_count} 条CCF-thin或local数据)")
+            else:
+                logger.info(f"加载了 {len(self.axon_df)} 条轴突形态数据")
 
-        # 加载树突形态数据
+        # 加载树突形态数据 - 过滤掉CCF-thin和local数据
         dendrite_file = self.data_dir / "denfull_morpho.csv"
         if dendrite_file.exists():
             self.dendrite_df = pd.read_csv(dendrite_file)
             if 'name' in self.dendrite_df.columns:
+                orig_len = len(self.dendrite_df)
                 self.dendrite_df = self.dendrite_df[~self.dendrite_df['name'].str.contains('CCF-thin|local', na=False)]
-            logger.info(f"加载了 {len(self.dendrite_df)} 条树突形态数据")
+                filtered_count = orig_len - len(self.dendrite_df)
+                logger.info(f"加载了 {len(self.dendrite_df)} 条树突形态数据 (过滤了 {filtered_count} 条CCF-thin或local数据)")
+            else:
+                logger.info(f"加载了 {len(self.dendrite_df)} 条树突形态数据")
 
         return True
 
-    def calculate_regionlayer_morphology(self, region_data: pd.DataFrame,
-                                         merfish_cells: pd.DataFrame = None) -> pd.DataFrame:
-        """计算层特异性形态特征 - 只为皮层区域创建层"""
-        logger.info("计算层特异性形态特征（仅皮层区域）...")
+    def calculate_region_morphology(self, region_id: int) -> Dict:
+        """计算特定区域的形态学特征"""
+        stats = {}
 
-        if region_data.empty:
-            logger.warning("输入的region_data为空")
-            return pd.DataFrame()
+        # 确保数据已加载
+        if self.info_df is None or self.axon_df is None or self.dendrite_df is None:
+            logger.warning(f"缺少必要的形态数据，无法计算区域{region_id}的统计信息")
+            return {attr: 0 for attr in MORPH_ATTRIBUTES + STAT_ATTRIBUTES}
 
-        if self.axon_df is None or self.dendrite_df is None or self.info_df is None:
-            logger.warning("缺少必要的形态数据")
-            return pd.DataFrame()
+        # 找到属于该区域的神经元
+        region_neurons = self.info_df[self.info_df['region_id'] == region_id]
+        neuron_count = len(region_neurons)
 
-        # 构建区域名称到ID的映射
-        for _, region in region_data.iterrows():
-            region_id = region.get('region_id')
-            region_name = region.get('name', '')
-            region_acronym = region.get('acronym', '')
+        if neuron_count == 0:
+            logger.debug(f"区域{region_id}没有匹配到神经元")
+            return {attr: 0 for attr in MORPH_ATTRIBUTES + STAT_ATTRIBUTES}
 
-            if region_id and not pd.isna(region_id):
-                # 使用acronym或name作为映射键
-                if region_acronym:
-                    self.region_name_id_map[region_acronym] = region_id
-                if region_name:
-                    self.region_name_id_map[region_name] = region_id
+        logger.info(f"区域{region_id}匹配到 {neuron_count} 个神经元")
 
-        # 添加region_id到info_df（基于base_region）
-        if 'region_id' not in self.info_df.columns:
-            self.info_df['region_id'] = self.info_df['base_region'].map(self.region_name_id_map).fillna(-1).astype(int)
+        # 计算基本统计数据
+        stats['number_of_neuron_morphologies'] = neuron_count
+        stats['number_of_axonal_morphologies'] = 0
+        stats['number_of_dendritic_morphologies'] = 0
+        stats['number_of_apical_dendritic_morphologies'] = 0
 
-        # 创建结果数据框
-        regionlayer_data = []
+        # 形态特征初始值
+        for attr in MORPH_ATTRIBUTES:
+            stats[attr] = 0.0
 
-        # 形态特征映射
-        morph_mapping = {
-            'Average Bifurcation Angle Remote': 'bifurcation_remote_angle',
-            'Number of Bifurcations': 'branches',
-            'Total Length': 'length',
-            'Max Branch Order': 'maximum_branch_order'
+        # 获取神经元ID集合
+        if 'ID' not in region_neurons.columns:
+            return stats
+
+        neuron_ids = set(region_neurons['ID'].dropna().astype(str).tolist())
+        if not neuron_ids:
+            return stats
+
+        # 定义列名映射 - 添加键值对确保所有MORPH_ATTRIBUTES都有映射
+        column_mapping = {
+            "Average Bifurcation Angle Remote": ["axonal_bifurcation_remote_angle", "dendritic_bifurcation_remote_angle"],
+            "Number of Bifurcations": ["axonal_branches", "dendritic_branches"],
+            "Total Length": ["axonal_length", "dendritic_length"],
+            "Max Branch Order": ["axonal_maximum_branch_order", "dendritic_maximum_branch_order"]
         }
 
-        # 统计皮层和非皮层区域
-        cortical_count = 0
-        non_cortical_count = 0
+        # 计算轴突特征
+        if self.axon_df is not None:
+            # 确保ID为字符串类型以便匹配
+            self.axon_df['ID_str'] = self.axon_df['ID'].astype(str)
+            axon_neurons = self.axon_df[self.axon_df['ID_str'].isin(neuron_ids)]
 
-        # 为每个区域处理
-        for _, region in region_data.iterrows():
-            region_id = region.get('region_id')
-            if not region_id or pd.isna(region_id):
-                continue
+            if not axon_neurons.empty:
+                axon_count = len(axon_neurons['ID_str'].unique())
+                stats['number_of_axonal_morphologies'] = axon_count
 
-            region_name = region.get('name', f'Region {region_id}')
+                # 计算平均形态特征
+                for csv_col, feature_cols in column_mapping.items():
+                    if csv_col in axon_neurons.columns:
+                        values = axon_neurons[csv_col].dropna()
+                        if len(values) > 0:
+                            # 只使用轴突相关的特征列
+                            for feature_col in feature_cols:
+                                if feature_col.startswith('axonal_'):
+                                    stats[feature_col] = values.mean()
 
-            # 判断是否是皮层区域
-            is_cortical = False
-            if self.region_analyzer:
-                is_cortical = self.region_analyzer.is_cortical_region(region_id)
-            else:
-                # 如果没有区域分析器，使用简单规则判断
-                region_acronym = region.get('acronym', '')
-                cortical_prefixes = ['SSp', 'SSs', 'MOp', 'MOs', 'VIS', 'AUD', 'RSP', 'ACA', 'ENT', 'AI']
-                is_cortical = any(region_acronym.startswith(prefix) for prefix in cortical_prefixes)
+        # 计算树突特征
+        if self.dendrite_df is not None:
+            # 确保ID为字符串类型以便匹配
+            self.dendrite_df['ID_str'] = self.dendrite_df['ID'].astype(str)
+            dendrite_neurons = self.dendrite_df[self.dendrite_df['ID_str'].isin(neuron_ids)]
 
-            if is_cortical:
-                cortical_count += 1
-                # 皮层区域：为每个层创建节点
-                layers_to_create = LAYERS
-            else:
-                non_cortical_count += 1
-                # 非皮层区域：创建单个"全区域"节点
-                layers_to_create = ['ALL']  # 使用ALL表示整个区域
+            if not dendrite_neurons.empty:
+                dendrite_count = len(dendrite_neurons['ID_str'].unique())
+                stats['number_of_dendritic_morphologies'] = dendrite_count
 
-            # 获取该区域的所有神经元
-            region_neurons = self.info_df[self.info_df['region_id'] == region_id]
+                # 计算顶树突数量
+                if 'type' in dendrite_neurons.columns:
+                    apical_neurons = dendrite_neurons[dendrite_neurons['type'].str.contains('apical', case=False, na=False)]
+                    stats['number_of_apical_dendritic_morphologies'] = len(apical_neurons['ID_str'].unique())
 
-            for layer in layers_to_create:
-                if layer == 'ALL':
-                    # 非皮层区域，使用所有神经元
-                    layer_neurons = region_neurons
-                    layer_neuron_ids = set(layer_neurons['ID'].values) if 'ID' in layer_neurons.columns else set()
-                    rl_id = f"{region_id}_ALL"
-                else:
-                    # 皮层区域，筛选特定层的神经元
-                    layer_neurons = region_neurons[region_neurons['layer'] == layer]
-                    layer_neuron_ids = set(layer_neurons['ID'].values) if 'ID' in layer_neurons.columns else set()
-                    rl_id = f"{region_id}_{layer}"
+                # 计算平均形态特征
+                for csv_col, feature_cols in column_mapping.items():
+                    if csv_col in dendrite_neurons.columns:
+                        values = dendrite_neurons[csv_col].dropna()
+                        if len(values) > 0:
+                            # 只使用树突相关的特征列
+                            for feature_col in feature_cols:
+                                if feature_col.startswith('dendritic_'):
+                                    stats[feature_col] = values.mean()
 
-                # 计算统计属性
-                axon_count = 0
-                if self.axon_df is not None and 'ID' in self.axon_df.columns and len(layer_neuron_ids) > 0:
-                    layer_axons = self.axon_df[self.axon_df['ID'].isin(layer_neuron_ids)]
-                    axon_count = len(layer_axons['ID'].unique())
+        # 添加调试信息
+        logger.info(f"区域{region_id}形态统计: 神经元={stats['number_of_neuron_morphologies']}, "
+                    f"轴突={stats['number_of_axonal_morphologies']}, "
+                    f"树突={stats['number_of_dendritic_morphologies']}")
 
-                dendrite_count = 0
-                apical_dendrite_count = 0
-                if self.dendrite_df is not None and 'ID' in self.dendrite_df.columns and len(layer_neuron_ids) > 0:
-                    layer_dendrites = self.dendrite_df[self.dendrite_df['ID'].isin(layer_neuron_ids)]
-                    dendrite_count = len(layer_dendrites['ID'].unique())
+        # 记录非零形态特征
+        non_zero_features = {k: v for k, v in stats.items() if k in MORPH_ATTRIBUTES and v > 0}
+        if non_zero_features:
+            logger.info(f"区域{region_id}非零形态特征: {non_zero_features}")
 
-                    if 'type' in layer_dendrites.columns:
-                        apical_dendrites = layer_dendrites[
-                            layer_dendrites['type'].str.contains('apical', case=False, na=False)]
-                        apical_dendrite_count = len(apical_dendrites['ID'].unique())
-
-                neuron_count = len(layer_neuron_ids)
-
-                # 转录组神经元数量
-                transcriptomic_count = 0
-                if merfish_cells is not None and not merfish_cells.empty:
-                    if 'region_id' in merfish_cells.columns:
-                        if layer == 'ALL':
-                            # 非皮层区域，计算所有细胞
-                            region_cells = merfish_cells[merfish_cells['region_id'] == region_id]
-                            transcriptomic_count = len(region_cells)
-                        else:
-                            # 皮层区域，计算特定层的细胞
-                            if 'celltype' in merfish_cells.columns:
-                                merfish_cells_copy = merfish_cells.copy()
-                                merfish_cells_copy['layer'] = merfish_cells_copy['celltype'].apply(
-                                    extract_layer_from_celltype)
-                                layer_cells = merfish_cells_copy[
-                                    (merfish_cells_copy['region_id'] == region_id) &
-                                    (merfish_cells_copy['layer'] == layer)
-                                    ]
-                                transcriptomic_count = len(layer_cells)
-
-                # 创建RegionLayer记录
-                rl_dict = {
-                    'rl_id': rl_id,
-                    'region_id': region_id,
-                    'layer': layer,
-                    'region_name': region_name,
-                    'is_cortical': is_cortical,
-                    'number_of_neuron_morphologies': neuron_count,
-                    'number_of_axonal_morphologies': axon_count,
-                    'number_of_dendritic_morphologies': dendrite_count,
-                    'number_of_apical_dendritic_morphologies': apical_dendrite_count,
-                    'number_of_transcriptomic_neurons': transcriptomic_count
-                }
-
-                # 计算形态特征
-                if len(layer_neuron_ids) >= 5:
-                    # 计算轴突特征
-                    if self.axon_df is not None and 'ID' in self.axon_df.columns:
-                        layer_axons = self.axon_df[self.axon_df['ID'].isin(layer_neuron_ids)]
-                        if len(layer_axons) > 0:
-                            for source_feat, target_feat in morph_mapping.items():
-                                if source_feat in layer_axons.columns:
-                                    values = layer_axons[source_feat].dropna()
-                                    if len(values) > 0:
-                                        rl_dict[f'axonal_{target_feat}'] = values.mean()
-                                    else:
-                                        rl_dict[f'axonal_{target_feat}'] = 0.0
-
-                    # 计算树突特征
-                    if self.dendrite_df is not None and 'ID' in self.dendrite_df.columns:
-                        layer_dendrites = self.dendrite_df[self.dendrite_df['ID'].isin(layer_neuron_ids)]
-                        if len(layer_dendrites) > 0:
-                            for source_feat, target_feat in morph_mapping.items():
-                                if source_feat in layer_dendrites.columns:
-                                    values = layer_dendrites[source_feat].dropna()
-                                    if len(values) > 0:
-                                        rl_dict[f'dendritic_{target_feat}'] = values.mean()
-                                    else:
-                                        rl_dict[f'dendritic_{target_feat}'] = 0.0
-                else:
-                    # 神经元太少，使用默认值
-                    for attr in MORPH_ATTRIBUTES:
-                        rl_dict[attr] = 0.0
-
-                regionlayer_data.append(rl_dict)
-
-        # 转换为DataFrame
-        result_df = pd.DataFrame(regionlayer_data)
-
-        logger.info(f"生成了 {len(result_df)} 个RegionLayer节点")
-        logger.info(f"  - 皮层区域: {cortical_count} 个 (生成 {cortical_count * len(LAYERS)} 个层节点)")
-        logger.info(f"  - 非皮层区域: {non_cortical_count} 个 (生成 {non_cortical_count} 个全区域节点)")
-
-        return result_df
+        return stats
 
 
-# ==================== 增强的知识图谱构建器 ====================
+# ==================== 知识图谱构建器 ====================
 
-class EnhancedKnowledgeGraphBuilder:
-    """增强的知识图谱构建器"""
+class KnowledgeGraphBuilder:
+    """知识图谱构建器 - 统一区域节点版本"""
 
     def __init__(self, output_dir: Path):
-        self.layer_calculator = None
-        self.region_name_id_map = None
+        self.morphology_loader = None
         self.output_dir = Path(output_dir)
         ensure_dir(self.output_dir)
         self.nodes_dir = self.output_dir / "nodes"
@@ -657,39 +578,6 @@ class EnhancedKnowledgeGraphBuilder:
 
         # 初始化区域分析器
         self.region_analyzer = None
-
-        # 有效的脑区acronym列表
-        self.valid_acronyms = set([
-            'AAA', 'ACAd', 'ACAv', 'ACB', 'ACVII', 'AD', 'ADP', 'AHN', 'AId', 'AIp', 'AIv',
-            'AM', 'AMB', 'AN', 'AOB', 'AON', 'AP', 'APN', 'APr', 'ARH', 'ASO', 'AT', 'AUDd',
-            'AUDp', 'AUDpo', 'AUDv', 'AV', 'AVP', 'AVPV', 'Acs5', 'B', 'BA', 'BAC', 'BLA',
-            'BMA', 'BST', 'CA1', 'CA2', 'CA3', 'CEA', 'CENT', 'CL', 'CLA', 'CLI', 'CM',
-            'COAa', 'COAp', 'COPY', 'CP', 'CS', 'CU', 'CUL', 'CUN', 'DCO', 'DEC', 'DG',
-            'DMH', 'DMX', 'DN', 'DP', 'DR', 'DT', 'DTN', 'ECT', 'ECU', 'ENTl', 'ENTm',
-            'EPd', 'EPv', 'EW', 'FC', 'FL', 'FN', 'FOTU', 'FRP', 'FS', 'GPe', 'GPi', 'GR',
-            'GRN', 'GU', 'HATA', 'I5', 'IA', 'IAD', 'IAM', 'IC', 'ICB', 'IF', 'IG', 'IGL',
-            'III', 'ILA', 'IMD', 'IO', 'IP', 'IPN', 'IRN', 'ISN', 'IV', 'IntG', 'L1', 'L2/3',
-            'L4', 'L5', 'L6a', 'L6b', 'LA', 'LAV', 'LC', 'LD', 'LDT', 'LGd', 'LGv', 'LH',
-            'LHA', 'LIN', 'LING', 'LM', 'LP', 'LPO', 'LRN', 'LSc', 'LSr', 'LSv', 'LT', 'MA',
-            'MA3', 'MARN', 'MD', 'MDRN', 'MDRNd', 'MDRNv', 'ME', 'MEA', 'MEPO', 'MEV', 'MG',
-            'MH', 'MM', 'MOB', 'MOp', 'MOs', 'MPN', 'MPO', 'MPT', 'MRN', 'MS', 'MT', 'MV',
-            'NB', 'NDB', 'NI', 'NLL', 'NLOT', 'NOD', 'NOT', 'NPC', 'NR', 'NTB', 'NTS', 'OP',
-            'ORBl', 'ORBm', 'ORBvl', 'OT', 'OV', 'P5', 'PA', 'PAA', 'PAG', 'PAR', 'PARN',
-            'PAS', 'PB', 'PBG', 'PC5', 'PCG', 'PCN', 'PD', 'PDTg', 'PERI', 'PF', 'PFL', 'PG',
-            'PGRNd', 'PGRNl', 'PH', 'PIL', 'PIR', 'PL', 'PMd', 'PMv', 'PN', 'PO', 'POL',
-            'POST', 'PP', 'PPN', 'PPT', 'PPY', 'PR', 'PRE', 'PRM', 'PRNc', 'PRNr', 'PRP',
-            'PS', 'PST', 'PSTN', 'PSV', 'PT', 'PVH', 'PVHd', 'PVT', 'PVa', 'PVi', 'PVp',
-            'PVpo', 'PYR', 'Pa4', 'Pa5', 'PeF', 'PoT', 'ProS', 'RCH', 'RE', 'RH', 'RL', 'RM',
-            'RN', 'RO', 'RPA', 'RPO', 'RR', 'RSPagl', 'RSPd', 'RSPv', 'RT', 'SAG', 'SBPV',
-            'SCH', 'SCO', 'SCm', 'SCs', 'SF', 'SFO', 'SG', 'SGN', 'SH', 'SI', 'SIM', 'SLC',
-            'SLD', 'SMT', 'SNc', 'SNr', 'SO', 'SOC', 'SPA', 'SPFm', 'SPFp', 'SPIV', 'SPVC',
-            'SPVI', 'SPVO', 'SSp-bfd', 'SSp-ll', 'SSp-m', 'SSp-n', 'SSp-tr', 'SSp-ul',
-            'SSp-un', 'SSs', 'STN', 'SUB', 'SUM', 'SUT', 'SUV', 'SubG', 'TEa', 'TMd', 'TMv',
-            'TR', 'TRN', 'TRS', 'TT', 'TU', 'UVU', 'V', 'VAL', 'VCO', 'VI', 'VII', 'VISC',
-            'VISa', 'VISal', 'VISam', 'VISl', 'VISli', 'VISp', 'VISpl', 'VISpm', 'VISpor',
-            'VISrl', 'VLPO', 'VM', 'VMH', 'VMPO', 'VPL', 'VPLpc', 'VPM', 'VPMpc', 'VTA',
-            'VTN', 'VeCB', 'XII', 'Xi', 'ZI', 'fiber tracts'
-        ])
 
     def set_hierarchy_loader(self, hierarchy_loader: MERFISHHierarchyLoader):
         """设置层级加载器"""
@@ -727,8 +615,8 @@ class EnhancedKnowledgeGraphBuilder:
         info_regions = set()
         layer_mapping = {}  # 存储区域ID到layer的映射
 
-        if hasattr(self, 'layer_calculator') and self.layer_calculator and self.layer_calculator.info_df is not None:
-            info_df = self.layer_calculator.info_df
+        if hasattr(self, 'morphology_loader') and self.morphology_loader and self.morphology_loader.info_df is not None:
+            info_df = self.morphology_loader.info_df
 
             # 2.1 如果info表有region_id列，直接使用
             if 'region_id' in info_df.columns:
@@ -749,7 +637,7 @@ class EnhancedKnowledgeGraphBuilder:
             # 2.2 如果info表只有celltype列，需要转换为region_id
             elif 'celltype' in info_df.columns and hasattr(self, 'region_analyzer') and self.region_analyzer:
                 # 从celltype提取基础区域
-                info_df['base_region'] = info_df['celltype'].apply(extract_base_region_from_celltype)
+                info_df['base_region'] = info_df['celltype']
 
                 # 将base_region转换为region_id
                 for region_name in info_df['base_region'].dropna().unique():
@@ -852,16 +740,13 @@ class EnhancedKnowledgeGraphBuilder:
         # 转换为列表字典以便更新
         regions = regions_df.to_dict('records')
 
-        # 获取region_id列表
-        region_ids = [region['region_id:ID(Region)'] for region in regions]
-
         # 1. 计算形态学特征
-        if hasattr(self, 'layer_calculator') and self.layer_calculator:
+        if hasattr(self, 'morphology_loader') and self.morphology_loader:
             for i, region in enumerate(regions):
                 region_id = region['region_id:ID(Region)']
 
-                # 计算形态学统计数据
-                stats = self._calculate_morphology_statistics(region_id)
+                # 使用新的计算方法
+                stats = self.morphology_loader.calculate_region_morphology(region_id)
 
                 # 更新形态学属性
                 for attr in MORPH_ATTRIBUTES:
@@ -899,25 +784,12 @@ class EnhancedKnowledgeGraphBuilder:
         logger.info("生成PROJECT_TO关系...")
         logger.info(f"投影数据形状: {projection_data.shape}")
 
-        # 0. 检查投射数据索引类型，如果是整数索引，尝试重新加载
-        if isinstance(projection_data.index, pd.RangeIndex):
-            logger.warning("检测到投射数据使用了自动生成的整数索引，尝试重新加载...")
-            try:
-                proj_file = self.output_dir.parent / "data" / "Proj_Axon_Final.csv"
-                if proj_file.exists():
-                    projection_data = pd.read_csv(proj_file, index_col=0)
-                    logger.info(f"重新加载投射数据，新形状: {projection_data.shape}")
-                    logger.info(f"新的索引样本: {list(projection_data.index[:5])}")
-            except Exception as e:
-                logger.error(f"重新加载投射数据失败: {e}")
-
-        # 1. 确保我们有info表数据
-        if not hasattr(self,
-                       'layer_calculator') or self.layer_calculator is None or self.layer_calculator.info_df is None:
+        # 确保我们有info表数据
+        if not hasattr(self, 'morphology_loader') or self.morphology_loader is None or self.morphology_loader.info_df is None:
             logger.error("缺少info表数据，无法匹配源区域")
             return
 
-        info_df = self.layer_calculator.info_df
+        info_df = self.morphology_loader.info_df
         logger.info(f"info表形状: {info_df.shape}")
 
         # 确保ID列在info表中
@@ -925,22 +797,17 @@ class EnhancedKnowledgeGraphBuilder:
             logger.error("info表中没有ID列，无法匹配神经元")
             return
 
-        # 确保有区域信息列
-        region_col = None
-        if 'region_id' in info_df.columns:
-            region_col = 'region_id'
-        elif 'base_region' in info_df.columns:
-            region_col = 'base_region'
-        elif 'celltype' in info_df.columns:
-            # 创建base_region列
-            info_df['base_region'] = info_df['celltype'].apply(extract_base_region_from_celltype)
-            region_col = 'base_region'
+        # 创建标准化ID函数 - 处理ID格式差异
+        def normalize_id(id_str):
+            """标准化ID格式，移除CCF-thin或CCFv3后缀"""
+            id_str = str(id_str)
+            id_str = id_str.replace('CCF-thin', '').replace('CCFv3', '').strip('_')
+            return id_str
 
-        if not region_col:
-            logger.error("info表中没有区域信息列，无法确定源区域")
-            return
+        # 标准化info表中的ID
+        info_df['normalized_id'] = info_df['ID'].apply(normalize_id)
 
-        # 2. 获取区域ID映射
+        # 获取区域ID映射
         region_to_id = {}  # 区域名称到ID的映射
         id_to_acronym = {}  # ID到区域名称的映射
 
@@ -951,133 +818,71 @@ class EnhancedKnowledgeGraphBuilder:
                     region_to_id[acronym] = region_id
                     id_to_acronym[region_id] = acronym
 
-        # 3. 解析列名中的目标区域名称
+        # 解析列名中的目标区域名称
         target_regions = []
         for col in projection_data.columns:
-            if col.startswith('proj_axon_') and col.endswith('_rela'):
+            if col.startswith('proj_axon_') and col.endswith('_abs'):
                 # 提取区域名称
-                region = col.replace('proj_axon_', '').replace('_rela', '')
+                region = col.replace('proj_axon_', '').replace('_abs', '')
                 target_regions.append(region)
 
         logger.info(f"找到 {len(target_regions)} 个目标区域")
 
-        # 4. 将ID转换为字符串以便匹配
-        info_df['ID_str'] = info_df['ID'].astype(str)
-        proj_ids = [str(idx) for idx in projection_data.index]
+        # 将投射数据索引转换为规范化ID进行匹配
+        proj_normalized_ids = {}
+        for idx in projection_data.index:
+            proj_normalized_ids[normalize_id(idx)] = idx
 
-        # 打印样本以协助调试
-        logger.info(f"投射数据前5个ID: {proj_ids[:5]}")
-        logger.info(f"Info表前5个ID: {info_df['ID_str'].head(5).tolist()}")
-
-        # 5. 构建神经元ID到源区域的映射
+        # 构建神经元ID到源区域的映射
         neuron_source_map = {}  # neuron_id -> (source_id, source_acronym)
 
-        # 第1步: 直接匹配ID
-        match_count = 0
-        for neuron_id in proj_ids:
-            matches = info_df[info_df['ID_str'] == neuron_id]
-            if not matches.empty:
-                match_count += 1
-                source_info = matches.iloc[0][region_col]
+        # 使用规范化ID进行匹配
+        for normalized_id, info_rows in info_df.groupby('normalized_id'):
+            if normalized_id in proj_normalized_ids:
+                orig_idx = proj_normalized_ids[normalized_id]
 
-                if pd.notna(source_info):
-                    # 处理不同类型的区域列
-                    if region_col == 'region_id':
-                        source_id = source_info
+                # 获取源区域信息
+                if 'region_id' in info_rows.columns:
+                    source_id = info_rows.iloc[0]['region_id']
+                    if pd.notna(source_id):
                         source_acronym = id_to_acronym.get(source_id, '')
-                    else:  # base_region
-                        source_acronym = source_info
+                        if source_acronym:
+                            neuron_source_map[orig_idx] = (source_id, source_acronym)
+                elif 'base_region' in info_rows.columns:
+                    source_acronym = info_rows.iloc[0]['base_region']
+                    if pd.notna(source_acronym):
                         source_id = region_to_id.get(source_acronym)
+                        if source_id:
+                            neuron_source_map[orig_idx] = (source_id, source_acronym)
 
-                    if source_id and source_acronym:
-                        neuron_source_map[neuron_id] = (source_id, source_acronym)
+        logger.info(f"规范化ID匹配: {len(neuron_source_map)}/{len(projection_data)} 个神经元匹配")
 
-        logger.info(f"直接ID匹配: {match_count}/{len(proj_ids)} 个神经元匹配")
-        logger.info(f"有效源区域映射: {len(neuron_source_map)}/{len(proj_ids)}")
-
-        # 第2步: 如果匹配率低，尝试从复合ID中提取
-        if len(neuron_source_map) < len(proj_ids) * 0.1:  # 匹配率低于10%
-            logger.info("尝试从复合ID中提取...")
-            for neuron_id in proj_ids:
-                if neuron_id in neuron_source_map:
-                    continue
-
-                if 'SEU-ALLEN' in neuron_id:
-                    parts = neuron_id.split('_')
-                    if len(parts) >= 3:
-                        try:
-                            extracted_id = parts[2]
-                            matches = info_df[info_df['ID_str'] == extracted_id]
-                            if not matches.empty:
-                                source_info = matches.iloc[0][region_col]
-                                if pd.notna(source_info):
-                                    if region_col == 'region_id':
-                                        source_id = source_info
-                                        source_acronym = id_to_acronym.get(source_id, '')
-                                    else:
-                                        source_acronym = source_info
-                                        source_id = region_to_id.get(source_acronym)
-
-                                    if source_id and source_acronym:
-                                        neuron_source_map[neuron_id] = (source_id, source_acronym)
-                        except:
-                            continue
-
-            logger.info(f"复合ID提取后: {len(neuron_source_map)}/{len(proj_ids)} 个有效映射")
-
-        # 如果匹配仍然不足，使用默认源区域作为后备选项
-        if len(neuron_source_map) < 10:
-            default_source = "MOs"
-            default_source_id = region_to_id.get(default_source)
-
-            if default_source_id:
-                logger.warning(f"匹配神经元太少，使用默认源区域: {default_source}")
-                for neuron_id in proj_ids:
-                    if neuron_id not in neuron_source_map:
-                        neuron_source_map[neuron_id] = (default_source_id, default_source)
-            else:
-                logger.error("无法确定足够神经元的源区域，无法生成投射关系")
-                return
-
-        # 6. 计算区域间投射 - 新的计算逻辑
+        # 计算区域间投射
         region_connections = {}  # (source_id, target_id) -> {'total': 值, 'count': 数量}
 
-        # 按源区域和目标区域分组计算
+        # 遍历每个有源区域的神经元
         for neuron_id, (source_id, source_acronym) in neuron_source_map.items():
             # 获取该神经元的投射数据
-            try:
-                if neuron_id in projection_data.index:
-                    neuron_data = projection_data.loc[neuron_id]
-                else:
-                    # 查找索引
-                    orig_id = None
-                    for idx in projection_data.index:
-                        if str(idx) == neuron_id:
-                            orig_id = idx
-                            break
+            neuron_data = projection_data.loc[neuron_id]
 
-                    if orig_id is None:
-                        continue
+            # 处理该神经元到各目标区域的投射
+            for target_acronym in target_regions:
+                # 跳过同源投射
+                if source_acronym == target_acronym:
+                    continue
 
-                    neuron_data = projection_data.loc[orig_id]
+                # 获取目标区域ID
+                target_id = region_to_id.get(target_acronym)
+                if not target_id:
+                    continue
 
-                # 处理该神经元到各目标区域的投射
-                for target_acronym in target_regions:
-                    # 跳过同源投射
-                    if source_acronym == target_acronym:
-                        continue
+                # 获取投射强度列名
+                proj_col = f"proj_axon_{target_acronym}_abs"  # 使用绝对值列
+                if proj_col not in projection_data.columns:
+                    continue
 
-                    # 获取目标区域ID
-                    target_id = region_to_id.get(target_acronym)
-                    if not target_id:
-                        continue
-
-                    # 获取投射强度列名
-                    proj_col = f"proj_axon_{target_acronym}_rela"
-                    if proj_col not in neuron_data.index:
-                        continue
-
-                    # 获取投射强度
+                # 获取投射强度
+                try:
                     proj_value = neuron_data[proj_col]
 
                     # 只处理有效的投射值（大于0）
@@ -1091,12 +896,13 @@ class EnhancedKnowledgeGraphBuilder:
                                 'target_acronym': target_acronym
                             }
 
-                        region_connections[conn_key]['total'] += proj_value
+                        region_connections[conn_key]['total'] += float(proj_value)
                         region_connections[conn_key]['count'] += 1
-            except Exception as e:
-                continue
+                except Exception as e:
+                    logger.debug(f"处理投射数据时出错: {e}")
+                    continue
 
-        # 7. 生成PROJECT_TO关系
+        # 生成PROJECT_TO关系
         relationships = []
 
         for (source_id, target_id), stats in region_connections.items():
@@ -1117,7 +923,7 @@ class EnhancedKnowledgeGraphBuilder:
 
             relationships.append(rel)
 
-        # 8. 保存关系
+        # 保存关系
         if relationships:
             df = pd.DataFrame(relationships)
             output_file = self.relationships_dir / "project_to.csv"
@@ -1164,481 +970,53 @@ class EnhancedKnowledgeGraphBuilder:
         valid_cells = merfish_cells[(merfish_cells[level].notna()) & (merfish_cells['region_id'] > 0)]
 
         # 按区域和类型分组计数
-        grouped = valid_cells.groupby(['region_id', level]).size().reset_index(name='count')
-        region_totals = valid_cells.groupby('region_id').size().to_dict()
+        counts_df = valid_cells.groupby(['region_id', level]).size().reset_index(name='count')
 
-        # 为每个区域生成关系
+        # 添加比例列
+        region_totals = valid_cells.groupby('region_id')['region_id'].count().reset_index(name='total')
+        counts_df = pd.merge(counts_df, region_totals, on='region_id')
+        counts_df['pct'] = counts_df['count'] / counts_df['total']
+
+        # 过滤低于阈值的行
+        counts_df = counts_df[counts_df['pct'] >= PCT_THRESHOLD]
+
+        # 为每个区域计算rank
         relationships = []
 
-        for _, row in grouped.iterrows():
-            region_id = row['region_id']
-            cell_type = row[level]
-            count = row['count']
-            total = region_totals.get(region_id, 1)
+        for region_id in counts_df['region_id'].unique():
+            # 获取该区域的所有细胞类型
+            region_df = counts_df[counts_df['region_id'] == region_id].copy()
 
-            # 计算比例
-            pct = count / total
+            # 按比例降序排序
+            region_df = region_df.sort_values('pct', ascending=False)
 
-            # 只保留比例超过阈值的关系
-            if pct >= PCT_THRESHOLD and cell_type in id_map:
-                # 为区域内的细胞类型排名
-                region_group = grouped[grouped['region_id'] == region_id].copy()
-                region_group['pct'] = region_group['count'] / total
-                region_group = region_group[region_group['pct'] >= PCT_THRESHOLD]
-                region_group['rank'] = region_group['pct'].rank(ascending=False, method='dense').astype(int)
+            # 明确分配rank (1-based)
+            region_df['rank'] = range(1, len(region_df) + 1)
 
-                # 找到当前类型的排名
-                current_rank = region_group[region_group[level] == cell_type]['rank'].iloc[0]
+            # 创建关系
+            for _, row in region_df.iterrows():
+                cell_type = row[level]
 
-                rel = {
-                    ':START_ID(Region)': int(region_id),
-                    f':END_ID({level.capitalize()})': id_map[cell_type],
-                    'pct_cells:float': float(pct),
-                    'rank:int': int(current_rank),
-                    ':TYPE': f'HAS_{level.upper()}'
-                }
-                relationships.append(rel)
+                if cell_type in id_map:
+                    rel = {
+                        ':START_ID(Region)': int(region_id),
+                        f':END_ID({level.capitalize()})': id_map[cell_type],
+                        'pct_cells:float': float(row['pct']),
+                        'rank:int': int(row['rank']),
+                        ':TYPE': f'HAS_{level.upper()}'
+                    }
+                    relationships.append(rel)
 
         # 保存关系
         self._save_relationships_batch(relationships, f"has_{level}")
         logger.info(f"保存了 {len(relationships)} 个HAS_{level.upper()}关系")
-    # def generate_region_nodes(self, region_data: pd.DataFrame, merfish_cells: pd.DataFrame = None):
-    #     """生成Region节点，使用tree_yzx.json中的acronym作为名称"""
-    #     logger.info("生成Region节点...")
-    #
-    #     # 保存region_data供其他方法使用
-    #     self.region_data = region_data
-    #
-    #     # 确保有region_analyzer
-    #     if not hasattr(self, 'region_analyzer') or not self.region_analyzer:
-    #         logger.warning("没有初始化region_analyzer，尝试加载tree_yzx.json")
-    #         try:
-    #             tree_file = Path("./data/tree_yzx.json")
-    #             possible_locations = [
-    #                 self.output_dir.parent / "data" / "tree_yzx.json",
-    #                 Path("./data/tree_yzx.json"),
-    #                 Path("/home/wlj/NeuroXiv2/data/tree_yzx.json")
-    #             ]
-    #
-    #             for loc in possible_locations:
-    #                 if loc.exists():
-    #                     tree_file = loc
-    #                     break
-    #
-    #             if tree_file.exists():
-    #                 with open(tree_file, 'r') as f:
-    #                     tree_data = json.load(f)
-    #
-    #                 self.region_analyzer = RegionAnalyzer(tree_data)
-    #                 logger.info(f"成功加载tree_yzx.json并初始化region_analyzer")
-    #             else:
-    #                 logger.warning("找不到tree_yzx.json文件")
-    #         except Exception as e:
-    #             logger.error(f"加载tree_yzx.json失败: {e}")
-    #
-    #     # 诊断信息
-    #     logger.info(f"区域数据形状: {region_data.shape}")
-    #     logger.info(
-    #         f"树信息条目数: {len(self.region_analyzer.region_info) if hasattr(self, 'region_analyzer') and self.region_analyzer else 0}")
-    #
-    #     # 跟踪已处理的区域ID
-    #     processed_ids = set()
-    #     regions = []
-    #
-    #     # 1. 首先处理region_data中的区域
-    #     for _, region in region_data.iterrows():
-    #         region_id = region.get('region_id')
-    #         if pd.isna(region_id):
-    #             continue
-    #
-    #         try:
-    #             region_id_int = int(region_id)
-    #             processed_ids.add(region_id_int)
-    #         except (ValueError, TypeError):
-    #             logger.warning(f"跳过非数字region_id: {region_id}")
-    #             continue
-    #
-    #         # 获取区域信息
-    #         region_info = {}
-    #         if hasattr(self, 'region_analyzer') and self.region_analyzer:
-    #             region_info = self.region_analyzer.get_region_info(region_id_int)
-    #
-    #         # 获取acronym
-    #         acronym = region_info.get('acronym', '') or region.get('acronym', '')
-    #
-    #         # 如果没有acronym，继续下一个区域
-    #         if not acronym:
-    #             logger.warning(f"区域 {region_id_int} 没有acronym，使用默认名称")
-    #             acronym = f"Region_{region_id_int}"
-    #
-    #         # 创建区域字典
-    #         region_dict = {
-    #             'region_id:ID(Region)': region_id_int,
-    #             'name': str(acronym),
-    #             'full_name': str(region_info.get('name', '') or region.get('name', acronym)),
-    #             'acronym': str(acronym)
-    #         }
-    #
-    #         # 添加parent_id
-    #         if 'parent_id' in region_info:
-    #             parent_id = region_info['parent_id']
-    #             if parent_id is not None:
-    #                 region_dict['parent_id:int'] = int(parent_id)
-    #         elif 'parent_id' in region and not pd.isna(region['parent_id']):
-    #             region_dict['parent_id:int'] = int(region['parent_id'])
-    #         else:
-    #             region_dict['parent_id:int'] = 0
-    #
-    #         # 添加颜色
-    #         if 'color' in region_info:
-    #             region_dict['color:int[]'] = region_info['color']
-    #
-    #         # 添加形态学属性
-    #         for attr in MORPH_ATTRIBUTES:
-    #             if attr in region:
-    #                 region_dict[f'{attr}:float'] = float(region[attr])
-    #             else:
-    #                 region_dict[f'{attr}:float'] = 0.0
-    #
-    #         # 计算统计属性
-    #         stat_values = self._calculate_region_statistics(region_id_int, region_data, merfish_cells)
-    #
-    #         # 添加统计属性
-    #         for attr in STAT_ATTRIBUTES:
-    #             region_dict[f'{attr}:int'] = stat_values.get(attr, 0)
-    #
-    #         regions.append(region_dict)
-    #
-    #     # 2. 处理有效acronym列表中的区域，但不在region_data中的
-    #     if hasattr(self, 'region_analyzer') and self.region_analyzer:
-    #         for acronym in self.valid_acronyms:
-    #             region_id = self.region_analyzer.get_region_by_acronym(acronym)
-    #             if region_id and region_id not in processed_ids:
-    #                 region_info = self.region_analyzer.get_region_info(region_id)
-    #
-    #                 # 创建区域字典
-    #                 region_dict = {
-    #                     'region_id:ID(Region)': region_id,
-    #                     'name': acronym,
-    #                     'full_name': region_info.get('name', acronym),
-    #                     'acronym': acronym,
-    #                     'parent_id:int': region_info.get('parent_id', 0) or 0
-    #                 }
-    #
-    #                 # 添加颜色
-    #                 if 'color' in region_info:
-    #                     region_dict['color:int[]'] = region_info['color']
-    #
-    #                 # 添加默认的形态学属性
-    #                 for attr in MORPH_ATTRIBUTES:
-    #                     region_dict[f'{attr}:float'] = 0.0
-    #
-    #                 # 添加默认的统计属性
-    #                 for attr in STAT_ATTRIBUTES:
-    #                     region_dict[f'{attr}:int'] = 0
-    #
-    #                 regions.append(region_dict)
-    #                 processed_ids.add(region_id)
-    #
-    #     # 保存到CSV
-    #     self._save_nodes(regions, "regions")
-    #     logger.info(f"保存了 {len(regions)} 个Region节点")
 
-    def _calculate_morphology_statistics(self, region_id, layer=None):
-        """
-        计算区域或区域层的形态统计数据
-
-        参数:
-            region_id: 区域ID
-            layer: 层名称(如'L1'，'L2/3'等)，为None表示计算整个区域
-
-        返回:
-            包含统计数据的字典
-        """
-        stats = {}
-
-        # 确保layer_calculator存在且已加载数据
-        if not hasattr(self, 'layer_calculator') or not self.layer_calculator or self.layer_calculator.info_df is None:
-            logger.warning(f"没有可用的神经元形态数据，无法计算统计信息")
-            return {attr: 0 for attr in STAT_ATTRIBUTES}
-
-        info_df = self.layer_calculator.info_df
-
-        # 步骤1: 找到属于该区域的神经元
-        if 'region_id' in info_df.columns:
-            # 直接使用region_id过滤
-            region_neurons = info_df[info_df['region_id'] == region_id]
-        else:
-            # 通过celltype前缀匹配
-            region_acronym = self._get_region_acronym(region_id)
-            if not region_acronym:
-                logger.warning(f"无法获取区域{region_id}的acronym，无法匹配神经元")
-                return {attr: 0 for attr in STAT_ATTRIBUTES}
-
-            # 使用前缀匹配
-            region_neurons = info_df[info_df['celltype'].str.startswith(region_acronym, na=False)]
-
-        # 步骤2: 如果指定了层，进一步过滤
-        if layer and layer != 'ALL':
-            if 'layer' in region_neurons.columns:
-                layer_neurons = region_neurons[region_neurons['layer'] == layer]
-            else:
-                # 尝试从celltype中提取层信息
-                layer_neurons = region_neurons[region_neurons['celltype'].apply(
-                    lambda x: extract_layer_from_celltype(x) == layer if isinstance(x, str) else False
-                )]
-        else:
-            layer_neurons = region_neurons
-
-        # 记录匹配到的神经元数量
-        neuron_count = len(layer_neurons)
-        layer_str = f"层{layer}" if layer else "所有层"
-        logger.info(f"区域{region_id}{layer_str}匹配到 {neuron_count} 个神经元")
-
-        # 步骤3: 计算统计数据
-        # 1. 总神经元数
-        stats['number_of_neuron_morphologies'] = neuron_count
-
-        # 2. 使用has_apical, has_recon_axon, has_recon_den列计算
-        if 'has_apical' in layer_neurons.columns:
-            stats['number_of_apical_dendritic_morphologies'] = int(layer_neurons['has_apical'].sum())
-
-        if 'has_recon_axon' in layer_neurons.columns:
-            stats['number_of_axonal_morphologies'] = int(layer_neurons['has_recon_axon'].sum())
-
-        if 'has_recon_den' in layer_neurons.columns:
-            stats['number_of_dendritic_morphologies'] = int(layer_neurons['has_recon_den'].sum())
-
-        # 3. 如果没有这些列，尝试从axon_df和dendrite_df中统计
-        neuron_ids = set(layer_neurons['ID'].tolist()) if 'ID' in layer_neurons.columns else set()
-
-        if neuron_ids and 'number_of_axonal_morphologies' not in stats and self.layer_calculator.axon_df is not None:
-            axon_df = self.layer_calculator.axon_df
-            if 'ID' in axon_df.columns:
-                axon_neurons = axon_df[axon_df['ID'].isin(neuron_ids)]
-                stats['number_of_axonal_morphologies'] = len(axon_neurons['ID'].unique())
-
-        if neuron_ids and 'number_of_dendritic_morphologies' not in stats and self.layer_calculator.dendrite_df is not None:
-            dendrite_df = self.layer_calculator.dendrite_df
-            if 'ID' in dendrite_df.columns:
-                dendrite_neurons = dendrite_df[dendrite_df['ID'].isin(neuron_ids)]
-                stats['number_of_dendritic_morphologies'] = len(dendrite_neurons['ID'].unique())
-
-                # 计算顶树突数量
-                if 'number_of_apical_dendritic_morphologies' not in stats and 'type' in dendrite_df.columns:
-                    apical_neurons = dendrite_neurons[
-                        dendrite_neurons['type'].str.contains('apical', case=False, na=False)]
-                    stats['number_of_apical_dendritic_morphologies'] = len(apical_neurons['ID'].unique())
-
-        # 确保所有统计属性都有值
-        for attr in STAT_ATTRIBUTES:
-            if attr not in stats:
-                stats[attr] = 0
-
-        return stats
-
-    def _get_region_acronym(self, region_id):
-        """获取区域的acronym"""
-        # 从region_analyzer获取
-        if hasattr(self, 'region_analyzer') and self.region_analyzer:
-            region_info = self.region_analyzer.get_region_info(region_id)
-            if region_info and 'acronym' in region_info:
-                return region_info['acronym']
-
-        # 从region_data获取
-        if hasattr(self, 'region_data') and self.region_data is not None:
-            region_row = self.region_data[self.region_data['region_id'] == region_id]
-            if not region_row.empty and 'acronym' in region_row.columns:
-                return region_row.iloc[0]['acronym']
-
-        return None
-
-    def calculate_region_morphology(self, region_id: int) -> Dict:
-        """计算特定区域的形态学特征 - 修复版"""
-        stats = {}
-
-        # 确保数据已加载
-        if self.info_df is None or self.axon_df is None or self.dendrite_df is None:
-            logger.warning(f"缺少必要的形态数据，无法计算区域{region_id}的统计信息")
-            return {attr: 0 for attr in MORPH_ATTRIBUTES + STAT_ATTRIBUTES}
-
-        # 找到属于该区域的神经元
-        region_neurons = self.info_df[self.info_df['region_id'] == region_id]
-        neuron_count = len(region_neurons)
-
-        if neuron_count == 0:
-            logger.debug(f"区域{region_id}没有匹配到神经元")
-            return {attr: 0 for attr in MORPH_ATTRIBUTES + STAT_ATTRIBUTES}
-
-        logger.info(f"区域{region_id}匹配到 {neuron_count} 个神经元")
-
-        # 计算基本统计数据
-        stats['number_of_neuron_morphologies'] = neuron_count
-        stats['number_of_axonal_morphologies'] = 0
-        stats['number_of_dendritic_morphologies'] = 0
-        stats['number_of_apical_dendritic_morphologies'] = 0
-
-        # 形态特征初始值
-        for attr in MORPH_ATTRIBUTES:
-            stats[attr] = 0.0
-
-        # 获取神经元ID集合
-        if 'ID' not in region_neurons.columns:
-            return stats
-
-        neuron_ids = set(region_neurons['ID'].dropna().astype(str).tolist())
-        if not neuron_ids:
-            return stats
-
-        # 定义列名映射 - 添加键值对确保所有MORPH_ATTRIBUTES都有映射
-        column_mapping = {
-            "Average Bifurcation Angle Remote": ["axonal_bifurcation_remote_angle",
-                                                 "dendritic_bifurcation_remote_angle"],
-            "Number of Bifurcations": ["axonal_branches", "dendritic_branches"],
-            "Total Length": ["axonal_length", "dendritic_length"],
-            "Max Branch Order": ["axonal_maximum_branch_order", "dendritic_maximum_branch_order"]
-        }
-
-        # 计算轴突特征
-        if self.axon_df is not None:
-            # 确保ID为字符串类型以便匹配
-            self.axon_df['ID_str'] = self.axon_df['ID'].astype(str)
-            axon_neurons = self.axon_df[self.axon_df['ID_str'].isin(neuron_ids)]
-
-            if not axon_neurons.empty:
-                axon_count = len(axon_neurons['ID_str'].unique())
-                stats['number_of_axonal_morphologies'] = axon_count
-
-                # 计算平均形态特征
-                for csv_col, feature_cols in column_mapping.items():
-                    if csv_col in axon_neurons.columns:
-                        values = axon_neurons[csv_col].dropna()
-                        if len(values) > 0:
-                            # 只使用轴突相关的特征列
-                            for feature_col in feature_cols:
-                                if feature_col.startswith('axonal_'):
-                                    stats[feature_col] = values.mean()
-
-        # 计算树突特征
-        if self.dendrite_df is not None:
-            # 确保ID为字符串类型以便匹配
-            self.dendrite_df['ID_str'] = self.dendrite_df['ID'].astype(str)
-            dendrite_neurons = self.dendrite_df[self.dendrite_df['ID_str'].isin(neuron_ids)]
-
-            if not dendrite_neurons.empty:
-                dendrite_count = len(dendrite_neurons['ID_str'].unique())
-                stats['number_of_dendritic_morphologies'] = dendrite_count
-
-                # 计算顶树突数量
-                if 'type' in dendrite_neurons.columns:
-                    apical_neurons = dendrite_neurons[
-                        dendrite_neurons['type'].str.contains('apical', case=False, na=False)]
-                    stats['number_of_apical_dendritic_morphologies'] = len(apical_neurons['ID_str'].unique())
-
-                # 计算平均形态特征
-                for csv_col, feature_cols in column_mapping.items():
-                    if csv_col in dendrite_neurons.columns:
-                        values = dendrite_neurons[csv_col].dropna()
-                        if len(values) > 0:
-                            # 只使用树突相关的特征列
-                            for feature_col in feature_cols:
-                                if feature_col.startswith('dendritic_'):
-                                    stats[feature_col] = values.mean()
-
-        # 添加调试信息
-        logger.info(f"区域{region_id}形态统计: 神经元={stats['number_of_neuron_morphologies']}, "
-                    f"轴突={stats['number_of_axonal_morphologies']}, "
-                    f"树突={stats['number_of_dendritic_morphologies']}")
-
-        # 记录非零形态特征
-        non_zero_features = {k: v for k, v in stats.items() if k in MORPH_ATTRIBUTES and v > 0}
-        if non_zero_features:
-            logger.info(f"区域{region_id}非零形态特征: {non_zero_features}")
-
-        return stats
-    def _calculate_region_statistics(self, region_id, region_data, merfish_cells):
-        """为Region节点计算统计属性"""
-        # 使用共享方法计算形态统计数据
-        stats = self._calculate_morphology_statistics(region_id)
-
-        # 计算转录组神经元数量
-        if merfish_cells is not None and not merfish_cells.empty and 'region_id' in merfish_cells.columns:
-            region_cells = merfish_cells[merfish_cells['region_id'] == region_id]
-            stats['number_of_transcriptomic_neurons'] = len(region_cells)
-
-        return stats
-
-    def generate_regionlayer_nodes(self, regionlayer_data: pd.DataFrame, merfish_cells: pd.DataFrame = None):
-        """生成包含完整形态学和统计属性的RegionLayer节点"""
-        logger.info("生成RegionLayer节点...")
-
-        # 存储region_data供_get_region_acronym使用
-        if 'region_data' not in vars(self):
-            self.region_data = regionlayer_data
-
-        regionlayers = []
-        for _, rl in regionlayer_data.iterrows():
-            # 获取RegionLayer ID
-            rl_id = rl.get('rl_id', '')
-
-            # 解析region_id和layer
-            parts = rl_id.split('_')
-            if len(parts) < 2:
-                logger.warning(f"跳过无效的rl_id: {rl_id}")
-                continue
-
-            region_id_str = parts[0]
-            layer = parts[1]
-
-            try:
-                region_id = int(region_id_str)
-            except (ValueError, TypeError):
-                logger.warning(f"跳过非数字region_id: {region_id_str}")
-                continue
-
-            # 创建RegionLayer字典
-            rl_dict = {
-                'rl_id:ID(RegionLayer)': rl_id,
-                'region_id:int': region_id,
-                'layer': layer,
-                'name': f"{rl.get('region_name', f'Region {region_id}')} {layer}",
-            }
-
-            # 添加形态学属性
-            for attr in MORPH_ATTRIBUTES:
-                if attr in rl:
-                    rl_dict[f'{attr}:float'] = float(rl[attr])
-                else:
-                    rl_dict[f'{attr}:float'] = 0.0
-
-            # 计算统计属性 - 使用共享的统计计算方法
-            stats = self._calculate_morphology_statistics(region_id, layer)
-
-            # 添加统计属性
-            for attr in STAT_ATTRIBUTES:
-                if attr in stats:
-                    rl_dict[f'{attr}:int'] = stats[attr]
-                else:
-                    rl_dict[f'{attr}:int'] = 0
-
-            # 添加MERFISH特有的属性
-            if merfish_cells is not None and not merfish_cells.empty:
-                # 计算该层区域中的转录组神经元数量
-                if 'region_id' in merfish_cells.columns:
-                    layer_cells = merfish_cells[(merfish_cells['region_id'] == region_id)]
-
-                    # 如果有层信息，进一步筛选
-                    if 'layer' in merfish_cells.columns:
-                        layer_cells = layer_cells[layer_cells['layer'] == layer]
-
-                    # 更新转录组神经元数量
-                    rl_dict['number_of_transcriptomic_neurons:int'] = len(layer_cells)
-
-            regionlayers.append(rl_dict)
-
-        # 保存到CSV
-        self._save_nodes(regionlayers, "regionlayers")
-        logger.info(f"保存了 {len(regionlayers)} 个RegionLayer节点")
+        # 打印前几条关系示例
+        if relationships:
+            logger.info(f"HAS_{level.upper()} 关系示例:")
+            for i, rel in enumerate(relationships[:5]):
+                logger.info(f"  区域 {rel[':START_ID(Region)']} -> {level} {rel[f':END_ID({level.capitalize()})']}:"
+                           f" 比例={rel['pct_cells:float']:.4f}, 排名={rel['rank:int']}")
 
     def generate_merfish_nodes_from_hierarchy(self, merfish_cells: pd.DataFrame):
         """从层级数据生成MERFISH节点，包含所有必要的元数据"""
@@ -1649,12 +1027,9 @@ class EnhancedKnowledgeGraphBuilder:
         # 计算每个类型的细胞数量
         if not merfish_cells.empty:
             class_counts = merfish_cells['class'].value_counts().to_dict() if 'class' in merfish_cells.columns else {}
-            subclass_counts = merfish_cells[
-                'subclass'].value_counts().to_dict() if 'subclass' in merfish_cells.columns else {}
-            supertype_counts = merfish_cells[
-                'supertype'].value_counts().to_dict() if 'supertype' in merfish_cells.columns else {}
-            cluster_counts = merfish_cells[
-                'cluster'].value_counts().to_dict() if 'cluster' in merfish_cells.columns else {}
+            subclass_counts = merfish_cells['subclass'].value_counts().to_dict() if 'subclass' in merfish_cells.columns else {}
+            supertype_counts = merfish_cells['supertype'].value_counts().to_dict() if 'supertype' in merfish_cells.columns else {}
+            cluster_counts = merfish_cells['cluster'].value_counts().to_dict() if 'cluster' in merfish_cells.columns else {}
         else:
             class_counts = subclass_counts = supertype_counts = cluster_counts = {}
 
@@ -1751,289 +1126,6 @@ class EnhancedKnowledgeGraphBuilder:
             df.to_csv(output_file, index=False)
             logger.info(f"保存了 {len(df)} 个Cluster节点")
 
-    def generate_has_layer_relationships(self, region_data: pd.DataFrame, regionlayer_data: pd.DataFrame):
-        """生成HAS_LAYER关系 - 处理非数字region_id"""
-        logger.info("生成HAS_LAYER关系...")
-
-        # 从regionlayer_data获取实际存在的region-layer组合
-        existing_combinations = set()
-        regionlayer_id_map = {}  # 存储rl_id到(region_id, layer)的映射
-
-        for _, rl in regionlayer_data.iterrows():
-            rl_id = rl.get('rl_id')
-            region_id_raw = rl.get('region_id')
-            layer = rl.get('layer')
-
-            if rl_id and region_id_raw is not None and layer:
-                # 处理非数字region_id
-                if isinstance(region_id_raw, str) and not region_id_raw.isdigit():
-                    # 使用映射的数字ID
-                    if hasattr(self, 'region_id_mapping') and region_id_raw in self.region_id_mapping:
-                        region_id_int = self.region_id_mapping[region_id_raw]
-                    else:
-                        # 如果没有映射，创建一个并记录
-                        if not hasattr(self, 'region_id_mapping'):
-                            self.region_id_mapping = {}
-                            self.next_region_id = -1000
-
-                        self.region_id_mapping[region_id_raw] = self.next_region_id
-                        region_id_int = self.next_region_id
-                        self.next_region_id -= 1
-                        logger.info(f"在关系中为非数字region_id '{region_id_raw}' 创建映射ID: {region_id_int}")
-                else:
-                    # 对于数字ID，直接转换
-                    try:
-                        region_id_int = int(region_id_raw)
-                    except (ValueError, TypeError):
-                        # 如果转换失败，跳过
-                        logger.warning(f"跳过无效的region_id: {region_id_raw}")
-                        continue
-
-                # 重建rl_id以确保一致性
-                consistent_rl_id = f"{region_id_int}_{layer}"
-                existing_combinations.add((region_id_int, layer))
-                regionlayer_id_map[consistent_rl_id] = (region_id_int, layer)
-
-        relationships = []
-        for region_id, layer in existing_combinations:
-            rl_id = f"{region_id}_{layer}"
-
-            rel = {
-                ':START_ID(Region)': region_id,
-                ':END_ID(RegionLayer)': rl_id,
-                ':TYPE': 'HAS_LAYER'
-            }
-            relationships.append(rel)
-
-        self._save_relationships_batch(relationships, "has_layer")
-        logger.info(f"保存了 {len(relationships)} 个HAS_LAYER关系")
-
-    def generate_has_relationships_optimized(self, merfish_cells: pd.DataFrame, level: str):
-        """优化的HAS_*关系生成，修复rank排序问题"""
-        logger.info(f"生成HAS_{level.upper()}关系...")
-
-        if level not in merfish_cells.columns:
-            logger.warning(f"没有{level}数据")
-            return
-
-        if 'region_id' not in merfish_cells.columns:
-            logger.warning("细胞缺少region_id")
-            return
-
-        # 添加层信息（如果不存在）
-        if 'layer' not in merfish_cells.columns and 'celltype' in merfish_cells.columns:
-            merfish_cells = merfish_cells.copy()
-            merfish_cells['layer'] = merfish_cells['celltype'].apply(extract_layer_from_celltype)
-            logger.info(f"从celltype提取了层信息")
-
-        # 获取ID映射
-        id_map = getattr(self, f"{level}_id_map", {})
-        if not id_map:
-            logger.warning(f"{level} ID映射为空")
-            return
-
-        # 筛选有效细胞
-        valid_cells = merfish_cells[(merfish_cells[level].notna()) & (merfish_cells['region_id'] > 0)]
-
-        # 获取已存在的RegionLayer节点
-        regionlayer_file = self.nodes_dir / "regionlayers.csv"
-        existing_regionlayers = set()
-        if regionlayer_file.exists():
-            try:
-                rl_df = pd.read_csv(regionlayer_file)
-                id_col = [col for col in rl_df.columns if 'rl_id' in col][0] if any(
-                    'rl_id' in col for col in rl_df.columns) else None
-                if id_col:
-                    existing_regionlayers = set(rl_df[id_col].values)
-            except Exception as e:
-                logger.error(f"读取RegionLayer节点失败: {e}")
-
-        # 为每个RegionLayer单独准备关系
-        all_relationships = []
-
-        # 遍历每个区域
-        for region_id in valid_cells['region_id'].unique():
-            # 检查是否为皮层区域
-            is_cortical = False
-            if hasattr(self, 'region_analyzer') and self.region_analyzer:
-                is_cortical = self.region_analyzer.is_cortical_region(region_id)
-
-            # 确定要处理的层
-            if is_cortical:
-                layers_to_process = LAYERS
-            else:
-                layers_to_process = ['ALL']
-
-            # 获取该区域的所有细胞
-            region_cells = valid_cells[valid_cells['region_id'] == region_id]
-
-            # 为每个层处理
-            for layer in layers_to_process:
-                rl_id = f"{int(region_id)}_{layer}"
-
-                # 检查RegionLayer节点是否存在
-                if rl_id not in existing_regionlayers:
-                    logger.warning(f"RegionLayer节点 {rl_id} 不存在，跳过")
-                    continue
-
-                # 筛选该层的细胞
-                if layer != 'ALL' and 'layer' in region_cells.columns:
-                    layer_cells = region_cells[region_cells['layer'] == layer]
-                    if len(layer_cells) == 0:
-                        logger.warning(f"区域{region_id}的{layer}层没有细胞，跳过")
-                        continue
-                else:
-                    layer_cells = region_cells
-
-                # 计算该层中每个细胞类型的分布
-                layer_total = len(layer_cells)
-                if layer_total == 0:
-                    continue
-
-                # 计算该层内的类型分布
-                type_counts = layer_cells[level].value_counts()
-
-                # 准备该层的所有类型数据
-                layer_type_data = []
-                for cell_type, count in type_counts.items():
-                    if cell_type in id_map:
-                        pct = count / layer_total
-                        if pct >= PCT_THRESHOLD:
-                            layer_type_data.append({
-                                'type': cell_type,
-                                'count': count,
-                                'pct': pct,
-                                'type_id': id_map[cell_type]
-                            })
-
-                # 按照比例排序，从高到低
-                layer_type_data.sort(key=lambda x: x['pct'], reverse=True)
-
-                # 生成连续的rank (1, 2, 3...)
-                relationships = []
-                for rank, data in enumerate(layer_type_data, 1):
-                    rel = {
-                        ':START_ID(RegionLayer)': rl_id,
-                        f':END_ID({level.capitalize()})': data['type_id'],
-                        'pct_cells:float': float(data['pct']),
-                        'rank:int': rank,
-                        ':TYPE': f'HAS_{level.upper()}'
-                    }
-                    relationships.append(rel)
-
-                # 将本层的关系添加到总结果
-                all_relationships.extend(relationships)
-
-                # 添加调试信息
-                if region_id in [1, 7, 15] and layer == 'ALL':  # 您提供的示例中的区域
-                    logger.info(f"区域{region_id}_{layer} {level}排名: " +
-                                ', '.join([f"{d['type']}:r{i + 1}" for i, d in enumerate(layer_type_data[:5])]))
-
-        # 保存所有关系
-        self._save_relationships_batch(all_relationships, f"has_{level}")
-        logger.info(f"保存了 {len(all_relationships)} 个HAS_{level.upper()}关系")
-
-    def generate_dominant_transcriptomic_relationships(self, merfish_cells: pd.DataFrame):
-        """为所有层级(Class, Subclass, Supertype, Cluster)生成Dominant_transcriptomic关系"""
-        logger.info("生成Dominant_transcriptomic关系...")
-
-        if merfish_cells.empty:
-            logger.warning("没有细胞数据，无法生成转录组关系")
-            return
-
-        # 验证必要的列
-        hierarchy_levels = ['class', 'subclass', 'supertype', 'cluster']
-        missing_cols = [col for col in hierarchy_levels if col not in merfish_cells.columns]
-        if missing_cols:
-            logger.warning(f"细胞数据缺少必要的列: {missing_cols}")
-            hierarchy_levels = [col for col in hierarchy_levels if col not in missing_cols]
-
-        if not hierarchy_levels:
-            logger.error("没有可用的层级列，无法继续")
-            return
-
-        if 'region_id' not in merfish_cells.columns:
-            logger.warning("细胞数据缺少region_id列")
-            return
-
-        # 为每个层级生成关系
-        for level in hierarchy_levels:
-            self._generate_dominant_transcriptomic_for_level(merfish_cells, level)
-
-    def _generate_dominant_transcriptomic_for_level(self, merfish_cells: pd.DataFrame, level: str):
-        """为特定层级生成Dominant_transcriptomic关系，每个区域只保留一个主导类型"""
-        logger.info(f"生成{level.capitalize()}级别的Dominant_transcriptomic关系...")
-
-        # 获取ID映射
-        id_map = getattr(self, f"{level}_id_map", {})
-        if not id_map:
-            logger.warning(f"{level} ID映射为空")
-            return
-
-        # 添加层信息（如果不存在）
-        if 'layer' not in merfish_cells.columns and 'celltype' in merfish_cells.columns:
-            merfish_cells = merfish_cells.copy()
-            merfish_cells['layer'] = merfish_cells['celltype'].apply(extract_layer_from_celltype)
-
-        # 筛选有效细胞
-        valid_cells = merfish_cells[(merfish_cells[level].notna()) & (merfish_cells['region_id'] > 0)]
-        if len(valid_cells) == 0:
-            logger.warning(f"没有同时有{level}和区域ID的细胞")
-            return
-
-        # 计算每个区域中各细胞类型的数量
-        relationships = []
-
-        # 为每个区域找出主导类型
-        for region_id in valid_cells['region_id'].unique():
-            # 该区域的所有细胞
-            region_cells = valid_cells[valid_cells['region_id'] == region_id]
-            total = len(region_cells)
-
-            if total == 0:
-                continue
-
-            # 计算各类型的比例
-            type_counts = region_cells[level].value_counts()
-            type_data = []
-
-            for cell_type, count in type_counts.items():
-                if cell_type in id_map:
-                    pct = count / total
-                    type_data.append({
-                        'type': cell_type,
-                        'count': count,
-                        'pct': pct,
-                        'type_id': id_map[cell_type]
-                    })
-
-            # 按比例排序
-            type_data.sort(key=lambda x: x['pct'], reverse=True)
-
-            # 只取第一个（最主要的）类型
-            if type_data:
-                dominant_type = type_data[0]
-                rel = {
-                    ':START_ID(Region)': int(region_id),
-                    f':END_ID({level.capitalize()})': dominant_type['type_id'],
-                    'pct:float': float(dominant_type['pct']),
-                    'rank:int': 1,  # 固定为1，因为每个区域只有一个主导类型
-                    ':TYPE': f'DOMINANT_TRANSCRIPTOMIC_{level.upper()}'
-                }
-                relationships.append(rel)
-
-                # 记录调试信息
-                if region_id in [1, 2, 7, 9, 10]:  # 您提供的示例中的区域
-                    logger.info(f"区域{region_id}的主导{level}: {dominant_type['type']} ({dominant_type['pct']:.2f})")
-
-        # 保存关系
-        if relationships:
-            output_file = self.relationships_dir / f"dominant_transcriptomic_{level}.csv"
-            df = pd.DataFrame(relationships)
-            df.to_csv(output_file, index=False)
-            logger.info(f"保存了 {len(relationships)} 个{level}级别的Dominant_transcriptomic关系")
-        else:
-            logger.warning(f"没有生成{level}级别的Dominant_transcriptomic关系")
     def generate_belongs_to_from_hierarchy(self):
         """从层级数据生成BELONGS_TO关系"""
         if not self.hierarchy_loader:
@@ -2079,219 +1171,101 @@ class EnhancedKnowledgeGraphBuilder:
             df.to_csv(output_file, index=False)
             logger.info(f"保存了 {len(df)} 个BELONGS_TO关系")
 
-    def generate_project_to_relationships(self, projection_data: pd.DataFrame):
-        """
-        从神经元级别的投射数据生成区域间PROJECT_TO关系
-        实现与测试脚本完全一致
-        """
-        if projection_data is None or projection_data.empty:
-            logger.warning("没有投影数据")
+    def generate_dominant_transcriptomic_relationships(self, merfish_cells: pd.DataFrame):
+        """为所有层级(Class, Subclass, Supertype, Cluster)生成Dominant_transcriptomic关系"""
+        logger.info("生成Dominant_transcriptomic关系...")
+
+        if merfish_cells.empty:
+            logger.warning("没有细胞数据，无法生成转录组关系")
             return
 
-        logger.info("生成PROJECT_TO关系...")
-        logger.info(f"投影数据形状: {projection_data.shape}")
+        # 验证必要的列
+        hierarchy_levels = ['class', 'subclass', 'supertype', 'cluster']
+        missing_cols = [col for col in hierarchy_levels if col not in merfish_cells.columns]
+        if missing_cols:
+            logger.warning(f"细胞数据缺少必要的列: {missing_cols}")
+            hierarchy_levels = [col for col in hierarchy_levels if col not in missing_cols]
 
-        # 1. 确保我们有info表数据
-        if not hasattr(self,
-                       'layer_calculator') or self.layer_calculator is None or self.layer_calculator.info_df is None:
-            logger.error("缺少info表数据，无法匹配源区域")
+        if not hierarchy_levels:
+            logger.error("没有可用的层级列，无法继续")
             return
 
-        info_df = self.layer_calculator.info_df
-        logger.info(f"info表形状: {info_df.shape}")
-
-        # 确保ID列在info表中
-        if 'ID' not in info_df.columns:
-            logger.error("info表中没有ID列，无法匹配神经元")
+        if 'region_id' not in merfish_cells.columns:
+            logger.warning("细胞数据缺少region_id列")
             return
 
-        # 确保有区域信息列
-        region_col = None
-        if 'region_id' in info_df.columns:
-            region_col = 'region_id'
-        elif 'base_region' in info_df.columns:
-            region_col = 'base_region'
-        elif 'celltype' in info_df.columns:
-            # 创建base_region列
-            info_df['base_region'] = info_df['celltype'].apply(extract_base_region_from_celltype)
-            region_col = 'base_region'
+        # 为每个层级生成关系
+        for level in hierarchy_levels:
+            self._generate_dominant_transcriptomic_for_level(merfish_cells, level)
 
-        if not region_col:
-            logger.error("info表中没有区域信息列，无法确定源区域")
+    def _generate_dominant_transcriptomic_for_level(self, merfish_cells: pd.DataFrame, level: str):
+        """为特定层级生成Dominant_transcriptomic关系，每个区域只保留一个主导类型"""
+        logger.info(f"生成{level.capitalize()}级别的Dominant_transcriptomic关系...")
+
+        # 获取ID映射
+        id_map = getattr(self, f"{level}_id_map", {})
+        if not id_map:
+            logger.warning(f"{level} ID映射为空")
             return
 
-        # 2. 获取区域ID映射
-        region_to_id = {}  # 区域名称到ID的映射
-        id_to_acronym = {}  # ID到区域名称的映射
+        # 筛选有效细胞
+        valid_cells = merfish_cells[(merfish_cells[level].notna()) & (merfish_cells['region_id'] > 0)]
+        if len(valid_cells) == 0:
+            logger.warning(f"没有同时有{level}和区域ID的细胞")
+            return
 
-        if hasattr(self, 'region_analyzer') and self.region_analyzer:
-            for region_id, info in self.region_analyzer.region_info.items():
-                acronym = info.get('acronym', '')
-                if acronym:
-                    region_to_id[acronym] = region_id
-                    id_to_acronym[region_id] = acronym
-
-        # 3. 解析列名中的目标区域名称
-        target_regions = []
-        for col in projection_data.columns:
-            if col.startswith('proj_axon_') and (col.endswith('_rela') or col.endswith('_abs')):
-                # 提取区域名称
-                region = col.replace('proj_axon_', '').replace('_rela', '').replace('_abs', '')
-                target_regions.append(region)
-
-        logger.info(f"从列名中提取到 {len(target_regions)} 个目标区域")
-
-        # 4. 将ID转换为字符串以便匹配
-        info_df['ID_str'] = info_df['ID'].astype(str)
-        proj_ids = [str(idx) for idx in projection_data.index]
-
-        # 打印样本以协助调试
-        logger.info(f"投射数据前5个ID: {proj_ids[:5]}")
-        logger.info(f"Info表前5个ID: {info_df['ID_str'].head(5).tolist()}")
-
-        # 5. 构建神经元ID到源区域的映射
-        neuron_source_map = {}  # neuron_id -> (source_id, source_acronym)
-
-        # 第1步: 直接匹配ID
-        match_count = 0
-        for neuron_id in proj_ids:
-            matches = info_df[info_df['ID_str'] == neuron_id]
-            if not matches.empty:
-                match_count += 1
-                source_info = matches.iloc[0][region_col]
-
-                if pd.notna(source_info):
-                    # 处理不同类型的区域列
-                    if region_col == 'region_id':
-                        source_id = source_info
-                        source_acronym = id_to_acronym.get(source_id, '')
-                    else:  # base_region
-                        source_acronym = source_info
-                        source_id = region_to_id.get(source_acronym)
-
-                    if source_id and source_acronym:
-                        neuron_source_map[neuron_id] = (source_id, source_acronym)
-
-        logger.info(f"直接ID匹配: {match_count}/{len(proj_ids)} 个神经元匹配")
-        logger.info(f"有效源区域映射: {len(neuron_source_map)}/{len(proj_ids)}")
-
-        # 第2步: 如果匹配率低，尝试从复合ID中提取
-        if len(neuron_source_map) < len(proj_ids) * 0.1:  # 匹配率低于10%
-            logger.info("尝试从复合ID中提取...")
-            for neuron_id in proj_ids:
-                if neuron_id in neuron_source_map:
-                    continue
-
-                if 'SEU-ALLEN' in neuron_id:
-                    parts = neuron_id.split('_')
-                    if len(parts) >= 3:
-                        try:
-                            extracted_id = parts[2]
-                            matches = info_df[info_df['ID_str'] == extracted_id]
-                            if not matches.empty:
-                                source_info = matches.iloc[0][region_col]
-                                if pd.notna(source_info):
-                                    if region_col == 'region_id':
-                                        source_id = source_info
-                                        source_acronym = id_to_acronym.get(source_id, '')
-                                    else:
-                                        source_acronym = source_info
-                                        source_id = region_to_id.get(source_acronym)
-
-                                    if source_id and source_acronym:
-                                        neuron_source_map[neuron_id] = (source_id, source_acronym)
-                        except:
-                            continue
-
-            logger.info(f"复合ID提取后: {len(neuron_source_map)}/{len(proj_ids)} 个有效映射")
-
-        # 6. 计算区域间投射
-        region_projections = {}  # (source_id, target_id) -> {'total': 值, 'count': 数量}
-
-        # 遍历每个有源区域的神经元
-        for neuron_id, (source_id, source_acronym) in neuron_source_map.items():
-            # 获取该神经元的索引
-            try:
-                if neuron_id in projection_data.index:
-                    row = projection_data.loc[neuron_id]
-                else:
-                    # 可能需要找到原始索引
-                    orig_id = None
-                    for idx in projection_data.index:
-                        if str(idx) == neuron_id:
-                            orig_id = idx
-                            break
-
-                    if orig_id is None:
-                        continue
-
-                    row = projection_data.loc[orig_id]
-
-                # 处理该神经元到每个目标区域的投射
-                for target_acronym in target_regions:
-                    # 获取目标区域ID
-                    target_id = region_to_id.get(target_acronym)
-                    if not target_id:
-                        continue
-
-                    # 获取投射强度
-                    col = f"proj_axon_{target_acronym}_abs"
-                    if col in projection_data.columns:
-                        proj_strength = row[col]
-
-                        # 确保是数值且大于0
-                        if pd.notna(proj_strength) and proj_strength > 0:
-                            key = (source_id, target_id)
-                            if key not in region_projections:
-                                region_projections[key] = {
-                                    'total': 0,
-                                    'count': 0,
-                                    'source_acronym': source_acronym,
-                                    'target_acronym': target_acronym
-                                }
-
-                            region_projections[key]['total'] += proj_strength
-                            region_projections[key]['count'] += 1
-            except Exception as e:
-                # 跳过有问题的数据
-                continue
-
-        # 7. 生成PROJECT_TO关系
+        # 计算每个区域中各细胞类型的数量
         relationships = []
 
-        for (source_id, target_id), stats in region_projections.items():
-            avg_strength = stats['total'] / stats['count'] if stats['count'] > 0 else 0
+        # 为每个区域找出主导类型
+        for region_id in valid_cells['region_id'].unique():
+            # 该区域的所有细胞
+            region_cells = valid_cells[valid_cells['region_id'] == region_id]
+            total = len(region_cells)
 
-            rel = {
-                ':START_ID(Region)': source_id,
-                ':END_ID(Region)': target_id,
-                'weight:float': float(avg_strength),
-                'total:float': float(stats['total']),
-                'neuron_count:int': int(stats['count']),
-                'source_acronym': stats['source_acronym'],
-                'target_acronym': stats['target_acronym'],
-                ':TYPE': 'PROJECT_TO'
-            }
+            if total == 0:
+                continue
 
-            relationships.append(rel)
+            # 计算各类型的比例
+            type_counts = region_cells[level].value_counts()
+            type_data = []
 
-        # 8. 保存关系
+            for cell_type, count in type_counts.items():
+                if cell_type in id_map:
+                    pct = count / total
+                    type_data.append({
+                        'type': cell_type,
+                        'count': count,
+                        'pct': pct,
+                        'type_id': id_map[cell_type]
+                    })
+
+            # 按比例排序
+            type_data.sort(key=lambda x: x['pct'], reverse=True)
+
+            # 只取第一个（最主要的）类型
+            if type_data:
+                dominant_type = type_data[0]
+                rel = {
+                    ':START_ID(Region)': int(region_id),
+                    f':END_ID({level.capitalize()})': dominant_type['type_id'],
+                    'pct:float': float(dominant_type['pct']),
+                    'rank:int': 1,  # 固定为1，因为每个区域只有一个主导类型
+                                        ':TYPE': f'DOMINANT_TRANSCRIPTOMIC_{level.upper()}'
+                }
+                relationships.append(rel)
+
+        # 保存关系
         if relationships:
+            output_file = self.relationships_dir / f"dominant_transcriptomic_{level}.csv"
             df = pd.DataFrame(relationships)
-            output_file = self.relationships_dir / "project_to.csv"
             df.to_csv(output_file, index=False)
-            logger.info(f"保存了 {len(df)} 个PROJECT_TO关系到 {output_file}")
-
-            # 打印前几条记录
-            logger.info("投射关系示例:")
-            for i, row in df.head(5).iterrows():
-                logger.info(
-                    f"  {row['source_acronym']} -> {row['target_acronym']}: {row['weight:float']:.4f} (神经元数: {row['neuron_count:int']})")
+            logger.info(f"保存了 {len(relationships)} 个{level}级别的Dominant_transcriptomic关系")
         else:
-            logger.warning("没有生成任何PROJECT_TO关系")
+            logger.warning(f"没有生成{level}级别的Dominant_transcriptomic关系")
 
     def generate_import_script(self):
-        """生成Neo4j导入脚本"""
+        """生成Neo4j导入脚本 - 统一区域节点版本"""
         script = """#!/bin/bash
 # Neo4j批量导入脚本
 NEO4J_HOME=/path/to/neo4j
@@ -2303,7 +1277,6 @@ rm -rf $NEO4J_HOME/data/databases/$DATABASE_NAME
 $NEO4J_HOME/bin/neo4j-admin import \\
    --database=$DATABASE_NAME \\
    --nodes=Region=nodes/regions.csv \\
-   --nodes=RegionLayer=nodes/regionlayers.csv \\
    --nodes=Class=nodes/class.csv \\
    --nodes=Subclass=nodes/subclass.csv \\
    --nodes=Supertype=nodes/supertype.csv \\
@@ -2323,15 +1296,14 @@ echo "导入完成！"
         os.chmod(script_file, 0o755)
         logger.info(f"生成了Neo4j导入脚本: {script_file}")
 
-    def generate_statistics_report(self, region_data, regionlayer_data, merfish_cells):
-        """生成统计报告"""
+    def generate_statistics_report(self, region_data, merfish_cells):
+        """生成统计报告 - 统一区域节点版本"""
         report = []
         report.append("=" * 60)
-        report.append("NeuroXiv 2.0 知识图谱统计报告")
+        report.append("NeuroXiv 2.0 知识图谱统计报告 (统一区域节点版本)")
         report.append("=" * 60)
         report.append(f"节点统计:")
         report.append(f"  - Region节点: {len(region_data)}")
-        report.append(f"  - RegionLayer节点: {len(regionlayer_data)}")
 
         if self.hierarchy_loader:
             report.append(f"  - Class节点: {len(self.hierarchy_loader.class_data)}")
@@ -2378,12 +1350,12 @@ echo "导入完成！"
 def main(data_dir: str = "../data",
          output_dir: str = "./knowledge_graph",
          hierarchy_json: str = None):
-    """主函数 - 使用统一区域节点的修改版"""
+    """主函数 - 使用统一区域节点的新版本"""
 
     setup_logger()
 
     logger.info("=" * 60)
-    logger.info("NeuroXiv 2.0 知识图谱构建 - 修改版（统一区域节点）")
+    logger.info("NeuroXiv 2.0 知识图谱构建 - 统一区域节点版本")
     logger.info("=" * 60)
 
     # 初始化
@@ -2401,7 +1373,7 @@ def main(data_dir: str = "../data",
     projection_data = processed_data.get('projection_df', pd.DataFrame())
 
     # 创建builder实例
-    builder = EnhancedKnowledgeGraphBuilder(output_path)
+    builder = KnowledgeGraphBuilder(output_path)
 
     # 加载树结构用于区域分析
     tree_data = processed_data.get('tree', [])
@@ -2422,9 +1394,9 @@ def main(data_dir: str = "../data",
     # Phase 3: 加载形态数据
     logger.info("Phase 3: 加载形态数据")
 
-    layer_calculator = LayerSpecificMorphologyCalculator(data_path, builder.region_analyzer)
-    if layer_calculator.load_morphology_with_layers():
-        builder.layer_calculator = layer_calculator
+    morphology_loader = MorphologyDataLoader(data_path, builder.region_analyzer)
+    if morphology_loader.load_morphology_data():
+        builder.morphology_loader = morphology_loader
     else:
         logger.warning("无法加载形态学数据")
 
@@ -2460,7 +1432,7 @@ def main(data_dir: str = "../data",
 
     # 后处理
     builder.generate_import_script()
-    builder.generate_statistics_report(builder.region_data, pd.DataFrame(), merfish_cells)
+    builder.generate_statistics_report(builder.region_data, merfish_cells)
 
     logger.info("=" * 60)
     logger.info("知识图谱构建完成！")
@@ -2474,7 +1446,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='NeuroXiv 2.0 知识图谱构建')
     parser.add_argument('--data_dir', type=str, default='/home/wlj/NeuroXiv2/data',
                         help='数据目录路径')
-    parser.add_argument('--output_dir', type=str, default='./knowledge_graphV2',
+    parser.add_argument('--output_dir', type=str, default='./knowledge_graph_v4',
                         help='输出目录路径')
     parser.add_argument('--hierarchy_json', type=str, default='/home/wlj/NeuroXiv2/data/tran-data-type-tree.json',
                         help='MERFISH层级JSON文件路径')

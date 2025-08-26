@@ -1,5 +1,5 @@
 """
-NeuroXiv 2.0 知识图谱构建器 - 统一区域节点版本
+NeuroXiv 2.0 知识图谱构建器 - 统一区域节点版本（聚合脑区）
 整合MERFISH层级JSON和形态计算
 
 作者: wangmajortom
@@ -9,7 +9,6 @@ import csv
 import json
 import sys
 import warnings
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Set
 
@@ -30,12 +29,7 @@ from data_loader_enhanced import (
 
 # 性能参数
 CHUNK_SIZE = 100000
-N_WORKERS = 100
-BATCH_SIZE = 10000
 PCT_THRESHOLD = 0.01
-
-# 层定义
-LAYERS = ['L1', 'L2/3', 'L4', 'L5', 'L6a', 'L6b']
 
 # 形态学属性列表
 MORPH_ATTRIBUTES = [
@@ -51,13 +45,6 @@ STAT_ATTRIBUTES = [
     'number_of_transcriptomic_neurons'
 ]
 
-# 合并到完整形态特征列表
-FULL_MORPH_FEATURES = MORPH_ATTRIBUTES + [
-    'Area', 'Volume', 'Width', 'Height', 'Depth', 'Slimness', 'Flatness',
-    'Average Contraction', 'Max Euclidean Distance', 'Max Path Distance',
-    'Average Euclidean Distance', 'Average Path Distance', '2D Density', '3D Density'
-]
-
 # ==================== 工具函数 ====================
 
 def setup_logger(log_file: str = "kg_builder.log"):
@@ -70,63 +57,6 @@ def setup_logger(log_file: str = "kg_builder.log"):
 def ensure_dir(path: Path):
     """确保目录存在"""
     path.mkdir(parents=True, exist_ok=True)
-
-
-def extract_layer_from_celltype(celltype: str) -> str:
-    """从celltype字符串提取层信息"""
-    if pd.isna(celltype):
-        return 'Unknown'
-
-    celltype = str(celltype)
-
-    # 直接匹配层模式
-    layer_patterns = {
-        'L1': ['L1', '1'],
-        'L2/3': ['L2/3', 'L2', 'L3', '2/3', '2', '3'],
-        'L4': ['L4', '4'],
-        'L5': ['L5', 'L5a', 'L5b', '5'],
-        'L6a': ['L6a', '6a'],
-        'L6b': ['L6b', '6b']
-    }
-
-    for layer, patterns in layer_patterns.items():
-        for pattern in patterns:
-            # 检查是否以层模式结尾
-            if celltype.endswith(pattern):
-                return layer
-            # 或者包含层模式（用于处理如"SSp-m4"这样的格式）
-            if pattern in celltype and pattern != '1':  # 避免'1'匹配到其他数字
-                return layer
-
-    return 'Unknown'
-
-
-def extract_base_region_from_celltype(celltype: str) -> str:
-    """从celltype提取基础区域名（去除层信息）"""
-    if pd.isna(celltype):
-        return celltype
-
-    celltype = str(celltype)
-
-    # 特殊区域列表 - 这些区域名称中的数字不应被移除
-    special_regions = ['CA1', 'CA2', 'CA3', 'LGd1', 'LGd2', 'LGd3', 'LGd4', 'LGd5', 'LGd6']
-
-    # 检查是否为特殊区域
-    for special in special_regions:
-        if celltype.startswith(special):
-            return special
-
-    # 移除层后缀
-    layer_suffixes = ['1', '2/3', '2', '3', '4', '5', '5a', '5b', '6', '6a', '6b']
-    for suffix in sorted(layer_suffixes, key=len, reverse=True):  # 从长到短匹配
-        if celltype.endswith(suffix):
-            base = celltype[:-len(suffix)]
-            # 移除可能的连接符
-            if base.endswith('-') or base.endswith('_'):
-                base = base[:-1]
-            return base
-
-    return celltype
 
 
 # ==================== MERFISH层级数据加载器 ====================
@@ -254,7 +184,7 @@ class MERFISHHierarchyLoader:
 
 
 class RegionAnalyzer:
-    """区域分析器，用于识别皮层区域和标准CCF区域"""
+    """区域分析器，用于识别区域层次结构和聚合关系"""
 
     def __init__(self, tree_data: List[Dict]):
         """
@@ -265,120 +195,98 @@ class RegionAnalyzer:
         """
         self.tree_data = tree_data
         self.region_info = {}
-        self.cortical_regions = set()
-        self.standard_regions = set()  # CCF标准区域（不含层信息）
+        self.id_to_acronym = {}
+        self.acronym_to_id = {}
+        self.parent_child_map = {}  # 父区域ID -> 子区域ID列表
+        self.child_parent_map = {}  # 子区域ID -> 父区域ID
+        self.region_hierarchy_map = {}  # 区域ID -> 层级路径
+        self.target_regions = set()  # 322个投射目标区域
+        self.region_to_target = {}  # 子区域ID -> 目标聚合区域ID
         self._build_region_hierarchy()
 
     def _build_region_hierarchy(self):
         """构建区域层级信息"""
-        # 构建区域信息字典
+        # 构建区域信息字典和映射
         for node in self.tree_data:
             region_id = node.get('id')
             if region_id:
+                acronym = node.get('acronym', '')
                 self.region_info[region_id] = {
-                    'acronym': node.get('acronym', ''),
+                    'acronym': acronym,
                     'name': node.get('name', ''),
                     'parent_id': node.get('parent_id'),
-                    'depth': node.get('depth', 0)
+                    'depth': node.get('depth', 0),
+                    'structure_id_path': node.get('structure_id_path', [])
                 }
+                self.id_to_acronym[region_id] = acronym
+                self.acronym_to_id[acronym] = region_id
 
-                # 标准CCF区域（所有在树中定义的区域）
-                self.standard_regions.add(region_id)
+                # 记录层级路径
+                if 'structure_id_path' in node:
+                    self.region_hierarchy_map[region_id] = node['structure_id_path']
 
-        # 识别皮层区域
-        self._identify_cortical_regions()
+                # 构建父子关系映射
+                if 'structure_id_path' in node and len(node['structure_id_path']) > 1:
+                    child_id = region_id
+                    parent_id = node['structure_id_path'][-2]  # 取倒数第二个为父区域
 
-    def _identify_cortical_regions(self):
-        """识别皮层区域"""
-        # 皮层相关的关键词和缩写
-        cortical_keywords = [
-            'cortex', 'Cortex', 'CORTEX',
-            'cortical', 'Cortical',
-            'isocortex', 'Isocortex',
-            'neocortex', 'Neocortex'
-        ]
+                    self.child_parent_map[child_id] = parent_id
 
-        cortical_acronyms = [
-            'SSp', 'SSs', 'MOp', 'MOs',  # 体感和运动皮层
-            'VIS', 'AUD', 'TEa', 'ECT',  # 视觉、听觉、颞叶皮层
-            'RSP', 'ACA', 'PL', 'ILA',  # 后部、前扣带、边缘皮层
-            'ORB', 'AI', 'GU', 'VISC',  # 眶额、岛叶、味觉、内脏皮层
-            'FRP', 'PRL',  # 额极皮层
-            'ENT', 'PERI', 'POST',  # 内嗅、周围、后皮层
-            'PTLp', 'VISpor'  # 顶叶后部皮层
-        ]
-
-        # 查找所有皮层区域
-        for region_id, info in self.region_info.items():
-            acronym = info['acronym']
-            name = info['name']
-
-            # 检查是否是皮层区域
-            is_cortical = False
-
-            # 检查名称中是否包含皮层关键词
-            for keyword in cortical_keywords:
-                if keyword in name:
-                    is_cortical = True
-                    break
-
-            # 检查缩写是否匹配皮层区域
-            if not is_cortical:
-                for cortical_prefix in cortical_acronyms:
-                    if acronym.startswith(cortical_prefix):
-                        is_cortical = True
-                        break
-
-            # 检查父区域是否是皮层（递归检查）
-            if not is_cortical and info['parent_id']:
-                is_cortical = self._has_cortical_ancestor(info['parent_id'])
-
-            if is_cortical:
-                self.cortical_regions.add(region_id)
+                    if parent_id not in self.parent_child_map:
+                        self.parent_child_map[parent_id] = []
+                    self.parent_child_map[parent_id].append(child_id)
 
     def get_region_by_acronym(self, acronym: str) -> int:
         """通过acronym获取区域ID"""
-        for region_id, info in self.region_info.items():
-            if info.get('acronym') == acronym:
-                return region_id
-        return None
+        return self.acronym_to_id.get(acronym)
 
-    def _has_cortical_ancestor(self, region_id: int, visited: Set[int] = None) -> bool:
-        """检查是否有皮层祖先"""
-        if visited is None:
-            visited = set()
-
-        if region_id in visited:
-            return False
-
-        visited.add(region_id)
-
-        if region_id in self.cortical_regions:
-            return True
-
-        info = self.region_info.get(region_id)
-        if info and info['parent_id']:
-            return self._has_cortical_ancestor(info['parent_id'], visited)
-
-        return False
-
-    def is_cortical_region(self, region_id: int) -> bool:
-        """判断是否是皮层区域"""
-        return region_id in self.cortical_regions
-
-    def is_standard_region(self, region_id: int) -> bool:
-        """判断是否是标准CCF区域"""
-        return region_id in self.standard_regions
+    def get_region_acronym(self, region_id: int) -> str:
+        """通过region_id获取区域acronym"""
+        return self.id_to_acronym.get(region_id, f"Region_{region_id}")
 
     def get_region_info(self, region_id: int) -> Dict:
         """获取区域信息"""
         return self.region_info.get(region_id, {})
 
+    def get_parent_region(self, region_id: int) -> int:
+        """获取父区域ID"""
+        return self.child_parent_map.get(region_id)
+
+    def get_child_regions(self, region_id: int) -> List[int]:
+        """获取子区域ID列表"""
+        return self.parent_child_map.get(region_id, [])
+
+    def set_target_regions(self, target_regions: Set[int]):
+        """设置目标区域集合（322个投射区域）"""
+        self.target_regions = target_regions
+        self._build_aggregation_mapping()
+
+    def _build_aggregation_mapping(self):
+        """构建聚合映射关系"""
+        # 为每个区域找到对应的目标聚合区域
+        for region_id in self.region_info:
+            # 检查当前区域是否是目标区域
+            if region_id in self.target_regions:
+                self.region_to_target[region_id] = region_id
+                continue
+
+            # 沿着结构路径向上查找目标区域
+            if region_id in self.region_hierarchy_map:
+                path = self.region_hierarchy_map[region_id]
+                for ancestor_id in reversed(path):  # 从子到父遍历
+                    if ancestor_id in self.target_regions:
+                        self.region_to_target[region_id] = ancestor_id
+                        break
+
+        # 统计映射结果
+        logger.info(f"构建了 {len(self.region_to_target)} 个区域的聚合映射关系")
+        logger.info(f"目标区域数量: {len(self.target_regions)}")
+
 
 # ==================== 形态数据加载器 ====================
 
 class MorphologyDataLoader:
-    """形态学数据加载器 - 按脑区计算"""
+    """形态学数据加载器 - 按聚合脑区计算"""
 
     def __init__(self, data_dir: Path, region_analyzer: RegionAnalyzer = None):
         self.data_dir = Path(data_dir)
@@ -386,9 +294,10 @@ class MorphologyDataLoader:
         self.axon_df = None
         self.dendrite_df = None
         self.region_analyzer = region_analyzer
+        self.projection_data = None
 
     def load_morphology_data(self) -> bool:
-        """加载形态数据"""
+        """加载形态数据 - 不处理celltype"""
         # 加载info.csv
         info_file = self.data_dir / "info.csv"
         if not info_file.exists():
@@ -405,24 +314,30 @@ class MorphologyDataLoader:
             filtered_count = orig_len - len(self.info_df)
             logger.info(f"从info表中过滤掉了 {filtered_count} 条包含CCF-thin或local的行")
 
-        # 提取基础区域和层信息
-        if 'celltype' in self.info_df.columns:
-            # 提取基础区域（不含层信息）
-            self.info_df['base_region'] = self.info_df['celltype']
-            # 提取层信息作为元数据
-            self.info_df['layer'] = self.info_df['celltype'].apply(extract_layer_from_celltype)
+        # 直接使用celltype作为脑区识别符
+        if 'celltype' in self.info_df.columns and self.region_analyzer:
+            # 将celltype直接映射到region_id
+            self.info_df['region_id'] = self.info_df['celltype'].apply(
+                lambda x: self.region_analyzer.get_region_by_acronym(x) if pd.notna(x) else None
+            )
 
-            # 将base_region映射到region_id
-            if self.region_analyzer:
-                self.info_df['region_id'] = self.info_df['base_region'].apply(
-                    lambda x: self.region_analyzer.get_region_by_acronym(x) if pd.notna(x) else None
+            # 聚合到目标区域
+            if hasattr(self.region_analyzer, 'region_to_target') and self.region_analyzer.region_to_target:
+                self.info_df['target_region_id'] = self.info_df['region_id'].apply(
+                    lambda x: self.region_analyzer.region_to_target.get(x, x) if pd.notna(x) else None
                 )
-                valid_region_count = self.info_df['region_id'].notna().sum()
-                logger.info(f"从base_region映射到region_id: {valid_region_count}/{len(self.info_df)}个有效映射")
+                # 统计聚合前后的区域数量
+                orig_regions = len(self.info_df['region_id'].dropna().unique())
+                target_regions = len(self.info_df['target_region_id'].dropna().unique())
+                logger.info(f"聚合前区域数: {orig_regions}, 聚合后区域数: {target_regions}")
+
+                # 使用target_region_id替换region_id
+                self.info_df['region_id'] = self.info_df['target_region_id']
+
+            valid_region_count = self.info_df['region_id'].notna().sum()
+            logger.info(f"从celltype映射到region_id: {valid_region_count}/{len(self.info_df)}个有效映射")
         else:
-            logger.warning("info.csv缺少celltype列")
-            self.info_df['layer'] = 'Unknown'
-            self.info_df['base_region'] = 'Unknown'
+            logger.warning("info.csv缺少celltype列或region_analyzer未初始化")
 
         # 加载轴突形态数据 - 过滤掉CCF-thin和local数据
         axon_file = self.data_dir / "axonfull_morpho.csv"
@@ -450,6 +365,34 @@ class MorphologyDataLoader:
 
         return True
 
+    def set_projection_data(self, projection_data: pd.DataFrame):
+        """设置投射数据，用于提取目标区域"""
+        self.projection_data = projection_data
+
+        # 从投射数据中提取目标区域
+        if self.projection_data is not None and self.region_analyzer:
+            target_regions = set()
+            for col in self.projection_data.columns:
+                if col.startswith('proj_axon_') and col.endswith('_abs'):
+                    region = col.replace('proj_axon_', '').replace('_abs', '')
+                    region_id = self.region_analyzer.get_region_by_acronym(region)
+                    if region_id:
+                        target_regions.add(region_id)
+
+            # 设置目标区域集合
+            self.region_analyzer.set_target_regions(target_regions)
+            logger.info(f"从投射数据中提取了 {len(target_regions)} 个目标区域")
+
+            # 重新聚合info数据
+            if 'region_id' in self.info_df.columns:
+                self.info_df['target_region_id'] = self.info_df['region_id'].apply(
+                    lambda x: self.region_analyzer.region_to_target.get(x, x) if pd.notna(x) else None
+                )
+                # 使用target_region_id替换region_id
+                self.info_df['region_id'] = self.info_df['target_region_id']
+                valid_region_count = self.info_df['region_id'].notna().sum()
+                logger.info(f"重新映射后有效区域数: {valid_region_count}")
+
     def calculate_region_morphology(self, region_id: int) -> Dict:
         """计算特定区域的形态学特征"""
         stats = {}
@@ -459,7 +402,7 @@ class MorphologyDataLoader:
             logger.warning(f"缺少必要的形态数据，无法计算区域{region_id}的统计信息")
             return {attr: 0 for attr in MORPH_ATTRIBUTES + STAT_ATTRIBUTES}
 
-        # 找到属于该区域的神经元
+        # 找到属于该区域的神经元（直接使用聚合后的region_id）
         region_neurons = self.info_df[self.info_df['region_id'] == region_id]
         neuron_count = len(region_neurons)
 
@@ -540,23 +483,13 @@ class MorphologyDataLoader:
                                 if feature_col.startswith('dendritic_'):
                                     stats[feature_col] = values.mean()
 
-        # 添加调试信息
-        logger.info(f"区域{region_id}形态统计: 神经元={stats['number_of_neuron_morphologies']}, "
-                    f"轴突={stats['number_of_axonal_morphologies']}, "
-                    f"树突={stats['number_of_dendritic_morphologies']}")
-
-        # 记录非零形态特征
-        non_zero_features = {k: v for k, v in stats.items() if k in MORPH_ATTRIBUTES and v > 0}
-        if non_zero_features:
-            logger.info(f"区域{region_id}非零形态特征: {non_zero_features}")
-
         return stats
 
 
 # ==================== 知识图谱构建器 ====================
 
 class KnowledgeGraphBuilder:
-    """知识图谱构建器 - 统一区域节点版本"""
+    """知识图谱构建器 - 统一区域节点版本（聚合脑区）"""
 
     def __init__(self, output_dir: Path):
         self.morphology_loader = None
@@ -598,63 +531,39 @@ class KnowledgeGraphBuilder:
 
     def generate_unified_region_nodes(self, region_data: pd.DataFrame, merfish_cells: pd.DataFrame = None):
         """
-        生成统一的Region节点，使用最细粒度的脑区
+        生成统一的Region节点，使用聚合后的脑区
 
-        从MERFISH数据和info表中获取最细粒度的脑区，取并集作为Region节点
-        不再区分Region和RegionLayer
+        从MERFISH数据和info表中获取最细粒度的脑区，聚合到目标区域
+        过滤掉既没有形态学数据也没有MERFISH数据的区域
         """
-        logger.info("生成统一的Region节点（最细粒度脑区）...")
+        logger.info("生成统一的Region节点（聚合脑区）...")
 
-        # 1. 获取MERFISH数据中的区域（如果有）
+        # 1. 获取已聚合的MERFISH数据中的区域（如果有）
         merfish_regions = set()
         if merfish_cells is not None and not merfish_cells.empty and 'region_id' in merfish_cells.columns:
-            merfish_regions = set(merfish_cells['region_id'].dropna().unique())
-            logger.info(f"从MERFISH数据中提取了 {len(merfish_regions)} 个区域ID")
+            # 对MERFISH数据进行聚合
+            merfish_cells_copy = merfish_cells.copy()
+            merfish_cells_copy['target_region_id'] = merfish_cells_copy['region_id'].apply(
+                lambda x: self.region_analyzer.region_to_target.get(x, x) if pd.notna(x) else None
+            )
+            # 过滤掉没有映射到目标区域的记录
+            merfish_cells_copy = merfish_cells_copy[merfish_cells_copy['target_region_id'].notna()]
+            # 使用target_region_id替代原来的region_id
+            merfish_cells_copy['region_id'] = merfish_cells_copy['target_region_id']
 
-        # 2. 从info表中提取区域
+            merfish_regions = set(merfish_cells_copy['region_id'].dropna().unique())
+            logger.info(f"从聚合后的MERFISH数据中提取了 {len(merfish_regions)} 个区域ID")
+
+            # 保存修改后的MERFISH数据供后续使用
+            self.aggregated_merfish_cells = merfish_cells_copy
+
+        # 2. 从info表中提取区域（使用已聚合的区域）
         info_regions = set()
-        layer_mapping = {}  # 存储区域ID到layer的映射
-
         if hasattr(self, 'morphology_loader') and self.morphology_loader and self.morphology_loader.info_df is not None:
             info_df = self.morphology_loader.info_df
-
-            # 2.1 如果info表有region_id列，直接使用
             if 'region_id' in info_df.columns:
                 info_regions = set(info_df['region_id'].dropna().unique())
-
-                # 提取layer信息
-                if 'layer' in info_df.columns:
-                    for region_id in info_regions:
-                        # 获取该区域的所有细胞
-                        cells = info_df[info_df['region_id'] == region_id]
-                        # 找出最常见的layer
-                        if not cells.empty:
-                            layer_counts = cells['layer'].value_counts()
-                            if not layer_counts.empty:
-                                dominant_layer = layer_counts.idxmax()
-                                layer_mapping[region_id] = dominant_layer
-
-            # 2.2 如果info表只有celltype列，需要转换为region_id
-            elif 'celltype' in info_df.columns and hasattr(self, 'region_analyzer') and self.region_analyzer:
-                # 从celltype提取基础区域
-                info_df['base_region'] = info_df['celltype']
-
-                # 将base_region转换为region_id
-                for region_name in info_df['base_region'].dropna().unique():
-                    region_id = self.region_analyzer.get_region_by_acronym(region_name)
-                    if region_id:
-                        info_regions.add(region_id)
-
-                        # 提取layer信息
-                        if 'layer' in info_df.columns:
-                            cells = info_df[info_df['base_region'] == region_name]
-                            if not cells.empty:
-                                layer_counts = cells['layer'].value_counts()
-                                if not layer_counts.empty:
-                                    dominant_layer = layer_counts.idxmax()
-                                    layer_mapping[region_id] = dominant_layer
-
-            logger.info(f"从info表中提取了 {len(info_regions)} 个区域ID")
+                logger.info(f"从形态数据中提取了 {len(info_regions)} 个区域ID")
 
         # 3. 合并区域列表
         all_region_ids = merfish_regions.union(info_regions)
@@ -662,7 +571,6 @@ class KnowledgeGraphBuilder:
 
         # 4. 生成Region节点
         regions = []
-
         for region_id in all_region_ids:
             if pd.isna(region_id):
                 continue
@@ -679,7 +587,7 @@ class KnowledgeGraphBuilder:
                 region_info = self.region_analyzer.get_region_info(region_id_int)
 
             # 获取acronym
-            acronym = region_info.get('acronym', '') or f"Region_{region_id_int}"
+            acronym = region_info.get('acronym', '') or self.region_analyzer.get_region_acronym(region_id_int)
 
             # 创建区域字典
             region_dict = {
@@ -689,11 +597,15 @@ class KnowledgeGraphBuilder:
                 'acronym': str(acronym)
             }
 
-            # 添加layer信息（如果有）
-            if region_id_int in layer_mapping:
-                region_dict['layer'] = layer_mapping[region_id_int]
-            else:
-                region_dict['layer'] = 'Unknown'
+            # 添加原始celltype值（如果有）
+            if hasattr(self, 'morphology_loader') and self.morphology_loader and self.morphology_loader.info_df is not None:
+                info_df = self.morphology_loader.info_df
+                if 'region_id' in info_df.columns and 'celltype' in info_df.columns:
+                    region_cells = info_df[info_df['region_id'] == region_id_int]
+                    if not region_cells.empty:
+                        celltypes = region_cells['celltype'].unique()
+                        if len(celltypes) > 0:
+                            region_dict['original_celltypes'] = ';'.join(str(ct) for ct in celltypes if pd.notna(ct))
 
             # 添加parent_id
             if 'parent_id' in region_info:
@@ -722,16 +634,34 @@ class KnowledgeGraphBuilder:
         logger.info(f"生成了 {len(regions_df)} 个Region节点基本信息")
 
         # 更新形态学特征和统计数据
-        updated_regions = self._update_region_features(regions_df, merfish_cells)
+        updated_regions = self._update_region_features(regions_df, self.aggregated_merfish_cells if hasattr(self, 'aggregated_merfish_cells') else merfish_cells)
+
+        # 6. 过滤既没有形态学数据也没有MERFISH数据的节点
+        filtered_regions = []
+        for region in updated_regions:
+            region_id = region['region_id:ID(Region)']
+
+            # 检查是否有形态学数据
+            has_morphology = any(region.get(f'{attr}:float', 0) > 0 for attr in MORPH_ATTRIBUTES)
+            has_morphology = has_morphology or any(region.get(f'{attr}:int', 0) > 0 for attr in STAT_ATTRIBUTES if attr != 'number_of_transcriptomic_neurons')
+
+            # 检查是否有MERFISH数据
+            has_merfish = region.get('number_of_transcriptomic_neurons:int', 0) > 0
+
+            # 仅保留有形态学数据或MERFISH数据的节点
+            if has_morphology or has_merfish:
+                filtered_regions.append(region)
+
+        logger.info(f"过滤后保留了 {len(filtered_regions)}/{len(updated_regions)} 个有数据的Region节点")
 
         # 保存到CSV
-        self._save_nodes(updated_regions, "regions")
-        logger.info(f"保存了 {len(updated_regions)} 个统一的Region节点")
+        self._save_nodes(filtered_regions, "regions")
+        logger.info(f"保存了 {len(filtered_regions)} 个统一的Region节点")
 
         # 保存region_data供其他方法使用
-        self.region_data = pd.DataFrame(updated_regions)
+        self.region_data = pd.DataFrame(filtered_regions)
 
-        return updated_regions
+        return filtered_regions
 
     def _update_region_features(self, regions_df: pd.DataFrame, merfish_cells: pd.DataFrame = None):
         """更新区域的形态学特征和统计数据"""
@@ -775,6 +705,7 @@ class KnowledgeGraphBuilder:
     def generate_project_to_relationships(self, projection_data: pd.DataFrame):
         """
         从神经元级别的投射数据生成区域间PROJECT_TO关系
+        保留脑区自身到自身的投射
         采用新的计算逻辑：A脑区到B脑区的投射强度 = A脑区中到B脑区有投射的神经元的投射abs值之和/这批神经元数量
         """
         if projection_data is None or projection_data.empty:
@@ -831,7 +762,8 @@ class KnowledgeGraphBuilder:
         # 将投射数据索引转换为规范化ID进行匹配
         proj_normalized_ids = {}
         for idx in projection_data.index:
-            proj_normalized_ids[normalize_id(idx)] = idx
+            norm_id = normalize_id(idx)
+            proj_normalized_ids[norm_id] = idx
 
         # 构建神经元ID到源区域的映射
         neuron_source_map = {}  # neuron_id -> (source_id, source_acronym)
@@ -848,11 +780,12 @@ class KnowledgeGraphBuilder:
                         source_acronym = id_to_acronym.get(source_id, '')
                         if source_acronym:
                             neuron_source_map[orig_idx] = (source_id, source_acronym)
-                elif 'base_region' in info_rows.columns:
-                    source_acronym = info_rows.iloc[0]['base_region']
-                    if pd.notna(source_acronym):
-                        source_id = region_to_id.get(source_acronym)
+                elif 'celltype' in info_rows.columns:
+                    celltype = info_rows.iloc[0]['celltype']
+                    if pd.notna(celltype):
+                        source_id = self.region_analyzer.get_region_by_acronym(celltype)
                         if source_id:
+                            source_acronym = celltype
                             neuron_source_map[orig_idx] = (source_id, source_acronym)
 
         logger.info(f"规范化ID匹配: {len(neuron_source_map)}/{len(projection_data)} 个神经元匹配")
@@ -867,9 +800,9 @@ class KnowledgeGraphBuilder:
 
             # 处理该神经元到各目标区域的投射
             for target_acronym in target_regions:
-                # 跳过同源投射
-                if source_acronym == target_acronym:
-                    continue
+                # 不再跳过同源投射，保留脑区自身到自身的投射
+                # if source_acronym == target_acronym:
+                #     continue
 
                 # 获取目标区域ID
                 target_id = region_to_id.get(target_acronym)
@@ -887,13 +820,28 @@ class KnowledgeGraphBuilder:
 
                     # 只处理有效的投射值（大于0）
                     if pd.notna(proj_value) and proj_value > 0:
-                        conn_key = (source_id, target_id)
+                        # 使用聚合后的区域ID
+                        if hasattr(self.region_analyzer, 'region_to_target'):
+                            source_target_id = self.region_analyzer.region_to_target.get(source_id, source_id)
+                            target_target_id = self.region_analyzer.region_to_target.get(target_id, target_id)
+
+                            # 使用聚合后的区域作为键
+                            conn_key = (source_target_id, target_target_id)
+
+                            # 获取聚合后的acronym
+                            source_target_acronym = id_to_acronym.get(source_target_id, source_acronym)
+                            target_target_acronym = id_to_acronym.get(target_target_id, target_acronym)
+                        else:
+                            conn_key = (source_id, target_id)
+                            source_target_acronym = source_acronym
+                            target_target_acronym = target_acronym
+
                         if conn_key not in region_connections:
                             region_connections[conn_key] = {
                                 'total': 0,
                                 'count': 0,
-                                'source_acronym': source_acronym,
-                                'target_acronym': target_acronym
+                                'source_acronym': source_target_acronym,
+                                'target_acronym': target_target_acronym
                             }
 
                         region_connections[conn_key]['total'] += float(proj_value)
@@ -940,7 +888,8 @@ class KnowledgeGraphBuilder:
 
     def generate_has_relationships_unified(self, merfish_cells: pd.DataFrame, level: str):
         """
-        为统一的Region节点生成HAS关系
+        为统一的Region节点生成HAS关系，使用聚合后的数据
+        - 确保每个区域内的rank值是连续的且从1开始
         """
         logger.info(f"生成HAS_{level.upper()}关系...")
 
@@ -966,35 +915,47 @@ class KnowledgeGraphBuilder:
             logger.warning(f"{level} ID映射为空")
             return
 
+        # 使用已聚合的MERFISH数据
+        if hasattr(self, 'aggregated_merfish_cells'):
+            merfish_cells_copy = self.aggregated_merfish_cells
+        else:
+            # 聚合MERFISH数据
+            merfish_cells_copy = merfish_cells.copy()
+            if hasattr(self.region_analyzer, 'region_to_target'):
+                merfish_cells_copy['target_region_id'] = merfish_cells_copy['region_id'].apply(
+                    lambda x: self.region_analyzer.region_to_target.get(x, x) if pd.notna(x) else None
+                )
+                # 过滤掉没有映射到目标区域的记录
+                merfish_cells_copy = merfish_cells_copy[merfish_cells_copy['target_region_id'].notna()]
+                # 使用target_region_id替代原来的region_id
+                merfish_cells_copy['region_id'] = merfish_cells_copy['target_region_id']
+
         # 筛选有效细胞
-        valid_cells = merfish_cells[(merfish_cells[level].notna()) & (merfish_cells['region_id'] > 0)]
+        valid_cells = merfish_cells_copy[(merfish_cells_copy[level].notna()) & (merfish_cells_copy['region_id'] > 0)]
 
         # 按区域和类型分组计数
         counts_df = valid_cells.groupby(['region_id', level]).size().reset_index(name='count')
 
         # 添加比例列
-        region_totals = valid_cells.groupby('region_id')['region_id'].count().reset_index(name='total')
+        region_totals = valid_cells.groupby('region_id').size().reset_index(name='total')
         counts_df = pd.merge(counts_df, region_totals, on='region_id')
         counts_df['pct'] = counts_df['count'] / counts_df['total']
 
-        # 过滤低于阈值的行
+        # 先过滤低于阈值的行，以便正确计算排名
         counts_df = counts_df[counts_df['pct'] >= PCT_THRESHOLD]
 
-        # 为每个区域计算rank
+        # 对每个区域内的数据重新排序和分配rank
         relationships = []
 
-        for region_id in counts_df['region_id'].unique():
-            # 获取该区域的所有细胞类型
-            region_df = counts_df[counts_df['region_id'] == region_id].copy()
-
+        # 按区域处理数据
+        for region_id, group in counts_df.groupby('region_id'):
             # 按比例降序排序
-            region_df = region_df.sort_values('pct', ascending=False)
+            group_sorted = group.sort_values('pct', ascending=False)
 
-            # 明确分配rank (1-based)
-            region_df['rank'] = range(1, len(region_df) + 1)
+            # 创建连续的rank值（1-based）
+            rank = 1
 
-            # 创建关系
-            for _, row in region_df.iterrows():
+            for _, row in group_sorted.iterrows():
                 cell_type = row[level]
 
                 if cell_type in id_map:
@@ -1002,21 +963,36 @@ class KnowledgeGraphBuilder:
                         ':START_ID(Region)': int(region_id),
                         f':END_ID({level.capitalize()})': id_map[cell_type],
                         'pct_cells:float': float(row['pct']),
-                        'rank:int': int(row['rank']),
+                        'rank:int': rank,  # 使用连续的rank值
                         ':TYPE': f'HAS_{level.upper()}'
                     }
                     relationships.append(rel)
+
+                    # 增加rank值，确保连续
+                    rank += 1
 
         # 保存关系
         self._save_relationships_batch(relationships, f"has_{level}")
         logger.info(f"保存了 {len(relationships)} 个HAS_{level.upper()}关系")
 
-        # 打印前几条关系示例
+        # 验证rank计算
         if relationships:
+            # 按区域分组验证
+            for region_id, rels in pd.DataFrame(relationships).groupby(':START_ID(Region)'):
+                rank_values = sorted(rels['rank:int'].values)
+                expected_ranks = list(range(1, len(rels) + 1))
+
+                if rank_values != expected_ranks:
+                    logger.warning(f"区域 {region_id} 的rank值不连续: {rank_values} 应为 {expected_ranks}")
+                else:
+                    logger.info(f"区域 {region_id} 的rank值正确: {rank_values}")
+
+            # 打印示例
             logger.info(f"HAS_{level.upper()} 关系示例:")
-            for i, rel in enumerate(relationships[:5]):
-                logger.info(f"  区域 {rel[':START_ID(Region)']} -> {level} {rel[f':END_ID({level.capitalize()})']}:"
-                           f" 比例={rel['pct_cells:float']:.4f}, 排名={rel['rank:int']}")
+            sample_data = pd.DataFrame(relationships).sort_values([':START_ID(Region)', 'rank:int']).head(10)
+            for _, rel in sample_data.iterrows():
+                logger.info(f"  区域 {rel[':START_ID(Region)']} -> {level} {rel[f':END_ID({level.capitalize()})']}: "
+                            f"比例={rel['pct_cells:float']:.4f}, 排名={rel['rank:int']}")
 
     def generate_merfish_nodes_from_hierarchy(self, merfish_cells: pd.DataFrame):
         """从层级数据生成MERFISH节点，包含所有必要的元数据"""
@@ -1024,12 +1000,19 @@ class KnowledgeGraphBuilder:
             logger.error("未设置层级加载器")
             return
 
+        # 使用聚合后的MERFISH数据
+        if hasattr(self, 'aggregated_merfish_cells'):
+            merfish_cells = self.aggregated_merfish_cells
+
         # 计算每个类型的细胞数量
         if not merfish_cells.empty:
             class_counts = merfish_cells['class'].value_counts().to_dict() if 'class' in merfish_cells.columns else {}
-            subclass_counts = merfish_cells['subclass'].value_counts().to_dict() if 'subclass' in merfish_cells.columns else {}
-            supertype_counts = merfish_cells['supertype'].value_counts().to_dict() if 'supertype' in merfish_cells.columns else {}
-            cluster_counts = merfish_cells['cluster'].value_counts().to_dict() if 'cluster' in merfish_cells.columns else {}
+            subclass_counts = merfish_cells[
+                'subclass'].value_counts().to_dict() if 'subclass' in merfish_cells.columns else {}
+            supertype_counts = merfish_cells[
+                'supertype'].value_counts().to_dict() if 'supertype' in merfish_cells.columns else {}
+            cluster_counts = merfish_cells[
+                'cluster'].value_counts().to_dict() if 'cluster' in merfish_cells.columns else {}
         else:
             class_counts = subclass_counts = supertype_counts = cluster_counts = {}
 
@@ -1171,123 +1154,30 @@ class KnowledgeGraphBuilder:
             df.to_csv(output_file, index=False)
             logger.info(f"保存了 {len(df)} 个BELONGS_TO关系")
 
-    def generate_dominant_transcriptomic_relationships(self, merfish_cells: pd.DataFrame):
-        """为所有层级(Class, Subclass, Supertype, Cluster)生成Dominant_transcriptomic关系"""
-        logger.info("生成Dominant_transcriptomic关系...")
-
-        if merfish_cells.empty:
-            logger.warning("没有细胞数据，无法生成转录组关系")
-            return
-
-        # 验证必要的列
-        hierarchy_levels = ['class', 'subclass', 'supertype', 'cluster']
-        missing_cols = [col for col in hierarchy_levels if col not in merfish_cells.columns]
-        if missing_cols:
-            logger.warning(f"细胞数据缺少必要的列: {missing_cols}")
-            hierarchy_levels = [col for col in hierarchy_levels if col not in missing_cols]
-
-        if not hierarchy_levels:
-            logger.error("没有可用的层级列，无法继续")
-            return
-
-        if 'region_id' not in merfish_cells.columns:
-            logger.warning("细胞数据缺少region_id列")
-            return
-
-        # 为每个层级生成关系
-        for level in hierarchy_levels:
-            self._generate_dominant_transcriptomic_for_level(merfish_cells, level)
-
-    def _generate_dominant_transcriptomic_for_level(self, merfish_cells: pd.DataFrame, level: str):
-        """为特定层级生成Dominant_transcriptomic关系，每个区域只保留一个主导类型"""
-        logger.info(f"生成{level.capitalize()}级别的Dominant_transcriptomic关系...")
-
-        # 获取ID映射
-        id_map = getattr(self, f"{level}_id_map", {})
-        if not id_map:
-            logger.warning(f"{level} ID映射为空")
-            return
-
-        # 筛选有效细胞
-        valid_cells = merfish_cells[(merfish_cells[level].notna()) & (merfish_cells['region_id'] > 0)]
-        if len(valid_cells) == 0:
-            logger.warning(f"没有同时有{level}和区域ID的细胞")
-            return
-
-        # 计算每个区域中各细胞类型的数量
-        relationships = []
-
-        # 为每个区域找出主导类型
-        for region_id in valid_cells['region_id'].unique():
-            # 该区域的所有细胞
-            region_cells = valid_cells[valid_cells['region_id'] == region_id]
-            total = len(region_cells)
-
-            if total == 0:
-                continue
-
-            # 计算各类型的比例
-            type_counts = region_cells[level].value_counts()
-            type_data = []
-
-            for cell_type, count in type_counts.items():
-                if cell_type in id_map:
-                    pct = count / total
-                    type_data.append({
-                        'type': cell_type,
-                        'count': count,
-                        'pct': pct,
-                        'type_id': id_map[cell_type]
-                    })
-
-            # 按比例排序
-            type_data.sort(key=lambda x: x['pct'], reverse=True)
-
-            # 只取第一个（最主要的）类型
-            if type_data:
-                dominant_type = type_data[0]
-                rel = {
-                    ':START_ID(Region)': int(region_id),
-                    f':END_ID({level.capitalize()})': dominant_type['type_id'],
-                    'pct:float': float(dominant_type['pct']),
-                    'rank:int': 1,  # 固定为1，因为每个区域只有一个主导类型
-                                        ':TYPE': f'DOMINANT_TRANSCRIPTOMIC_{level.upper()}'
-                }
-                relationships.append(rel)
-
-        # 保存关系
-        if relationships:
-            output_file = self.relationships_dir / f"dominant_transcriptomic_{level}.csv"
-            df = pd.DataFrame(relationships)
-            df.to_csv(output_file, index=False)
-            logger.info(f"保存了 {len(relationships)} 个{level}级别的Dominant_transcriptomic关系")
-        else:
-            logger.warning(f"没有生成{level}级别的Dominant_transcriptomic关系")
-
     def generate_import_script(self):
-        """生成Neo4j导入脚本 - 统一区域节点版本"""
+        """生成Neo4j导入脚本 - 聚合脑区版本"""
         script = """#!/bin/bash
-# Neo4j批量导入脚本
-NEO4J_HOME=/path/to/neo4j
-DATABASE_NAME=neuroxiv
+    # Neo4j批量导入脚本
+    NEO4J_HOME=/path/to/neo4j
+    DATABASE_NAME=neuroxiv
 
-$NEO4J_HOME/bin/neo4j stop
-rm -rf $NEO4J_HOME/data/databases/$DATABASE_NAME
+    $NEO4J_HOME/bin/neo4j stop
+    rm -rf $NEO4J_HOME/data/databases/$DATABASE_NAME
 
-$NEO4J_HOME/bin/neo4j-admin import \\
-   --database=$DATABASE_NAME \\
-   --nodes=Region=nodes/regions.csv \\
-   --nodes=Class=nodes/class.csv \\
-   --nodes=Subclass=nodes/subclass.csv \\
-   --nodes=Supertype=nodes/supertype.csv \\
-   --nodes=Cluster=nodes/cluster.csv \\
-   --relationships=relationships/*.csv \\
-   --skip-bad-relationships=true \\
-   --skip-duplicate-nodes=true
+    $NEO4J_HOME/bin/neo4j-admin import \\
+       --database=$DATABASE_NAME \\
+       --nodes=Region=nodes/regions.csv \\
+       --nodes=Class=nodes/class.csv \\
+       --nodes=Subclass=nodes/subclass.csv \\
+       --nodes=Supertype=nodes/supertype.csv \\
+       --nodes=Cluster=nodes/cluster.csv \\
+       --relationships=relationships/*.csv \\
+       --skip-bad-relationships=true \\
+       --skip-duplicate-nodes=true
 
-$NEO4J_HOME/bin/neo4j start
-echo "导入完成！"
-"""
+    $NEO4J_HOME/bin/neo4j start
+    echo "导入完成！"
+    """
         script_file = self.output_dir / "import_to_neo4j.sh"
         with open(script_file, 'w') as f:
             f.write(script)
@@ -1297,10 +1187,10 @@ echo "导入完成！"
         logger.info(f"生成了Neo4j导入脚本: {script_file}")
 
     def generate_statistics_report(self, region_data, merfish_cells):
-        """生成统计报告 - 统一区域节点版本"""
+        """生成统计报告 - 聚合脑区版本"""
         report = []
         report.append("=" * 60)
-        report.append("NeuroXiv 2.0 知识图谱统计报告 (统一区域节点版本)")
+        report.append("NeuroXiv 2.0 知识图谱统计报告 (聚合脑区版本)")
         report.append("=" * 60)
         report.append(f"节点统计:")
         report.append(f"  - Region节点: {len(region_data)}")
@@ -1312,7 +1202,11 @@ echo "导入完成！"
             report.append(f"  - Cluster节点: {len(self.hierarchy_loader.cluster_data)}")
 
         report.append(f"\n数据统计:")
-        report.append(f"  - 总细胞数: {len(merfish_cells)}")
+        if hasattr(self, 'aggregated_merfish_cells'):
+            report.append(f"  - 总细胞数: {len(self.aggregated_merfish_cells)}")
+        else:
+            report.append(f"  - 总细胞数: {len(merfish_cells)}")
+
         report.append(f"生成时间: {pd.Timestamp.now()}")
         report.append("=" * 60)
 
@@ -1344,18 +1238,17 @@ echo "导入完成！"
         df.to_csv(output_file, index=False)
         logger.debug(f"保存了 {len(df)} 个关系到 {output_file}")
 
-
-# ==================== 主函数 ====================
+    # ==================== 主函数 ====================
 
 def main(data_dir: str = "../data",
          output_dir: str = "./knowledge_graph",
          hierarchy_json: str = None):
-    """主函数 - 使用统一区域节点的新版本"""
+    """主函数 - 使用聚合脑区的新版本"""
 
     setup_logger()
 
     logger.info("=" * 60)
-    logger.info("NeuroXiv 2.0 知识图谱构建 - 统一区域节点版本")
+    logger.info("NeuroXiv 2.0 知识图谱构建 - 聚合脑区版本")
     logger.info("=" * 60)
 
     # 初始化
@@ -1380,22 +1273,26 @@ def main(data_dir: str = "../data",
     if tree_data:
         logger.info("初始化区域分析器...")
         builder.region_analyzer = RegionAnalyzer(tree_data)
-        logger.info(f"识别出 {len(builder.region_analyzer.cortical_regions)} 个皮层区域")
-        logger.info(f"识别出 {len(builder.region_analyzer.standard_regions)} 个标准CCF区域")
+        logger.info(f"从树数据中加载了 {len(builder.region_analyzer.region_info)} 个区域信息")
 
     # Phase 2: 加载层级数据
     logger.info("Phase 2: 加载MERFISH层级数据")
 
-    hierarchy_loader = MERFISHHierarchyLoader(Path(hierarchy_json) if hierarchy_json else data_path / "hierarchy.json")
+    hierarchy_loader = MERFISHHierarchyLoader(
+        Path(hierarchy_json) if hierarchy_json else data_path / "hierarchy.json")
     if not hierarchy_loader.load_hierarchy():
         logger.error("无法加载层级数据")
         return
 
     # Phase 3: 加载形态数据
-    logger.info("Phase 3: 加载形态数据")
+    logger.info("Phase 3: 加载形态数据和投射数据")
 
     morphology_loader = MorphologyDataLoader(data_path, builder.region_analyzer)
     if morphology_loader.load_morphology_data():
+        # 设置投射数据，用于提取目标区域
+        if projection_data is not None and not projection_data.empty:
+            morphology_loader.set_projection_data(projection_data)
+
         builder.morphology_loader = morphology_loader
     else:
         logger.warning("无法加载形态学数据")
@@ -1427,9 +1324,6 @@ def main(data_dir: str = "../data",
     # 生成投射关系
     builder.generate_project_to_relationships(projection_data)
 
-    # 生成主导转录组关系
-    builder.generate_dominant_transcriptomic_relationships(merfish_cells)
-
     # 后处理
     builder.generate_import_script()
     builder.generate_statistics_report(builder.region_data, merfish_cells)
@@ -1439,14 +1333,13 @@ def main(data_dir: str = "../data",
     logger.info(f"输出目录: {output_path}")
     logger.info("=" * 60)
 
-
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='NeuroXiv 2.0 知识图谱构建')
     parser.add_argument('--data_dir', type=str, default='/home/wlj/NeuroXiv2/data',
                         help='数据目录路径')
-    parser.add_argument('--output_dir', type=str, default='./knowledge_graph_v4',
+    parser.add_argument('--output_dir', type=str, default='./knowledge_graph_v5',
                         help='输出目录路径')
     parser.add_argument('--hierarchy_json', type=str, default='/home/wlj/NeuroXiv2/data/tran-data-type-tree.json',
                         help='MERFISH层级JSON文件路径')

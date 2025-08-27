@@ -164,42 +164,77 @@ class ChainOfThoughtEngine:
         self.max_thinking_steps = 10
 
         # Cypher查询示例，帮助LLM生成正确的查询
+        # Cypher查询示例，帮助LLM生成正确的查询
         self.example_queries = """
-Example Cypher queries for this knowledge graph:
+        Example Cypher queries for this knowledge graph:
 
-1. Find regions with longest axons:
-MATCH (r:Region)
-WHERE r.axonal_length IS NOT NULL
-RETURN r.acronym, r.axonal_length
-ORDER BY r.axonal_length DESC
-LIMIT 10
+        1. Find regions with longest axons (USING CONTAINS AND NULL CHECKING):
+        MATCH (r:Region)
+        WHERE r.axonal_length IS NOT NULL
+        RETURN r.acronym, r.axonal_length
+        ORDER BY r.axonal_length DESC
+        LIMIT 10
 
-2. Get cell type composition of a region:
-MATCH (r:Region {acronym: 'MOp'})-[h:HAS_CLUSTER]->(c:Cluster)
-RETURN c.name, h.pct_cells, h.rank
-ORDER BY h.rank
+        2. Get cell type composition of a region (USING OPTIONAL MATCH):
+        MATCH (r:Region)
+        WHERE r.acronym CONTAINS 'MOp' 
+        OPTIONAL MATCH (r)-[h:HAS_SUBCLASS]->(c:Subclass)
+        RETURN r.acronym, c.name, h.pct_cells, h.rank
+        ORDER BY h.rank
 
-3. Find projection targets of a region:
-MATCH (r:Region {acronym: 'MOp'})-[p:PROJECT_TO]->(target:Region)
-RETURN target.acronym, p.weight, p.neuron_count
-ORDER BY p.weight DESC
+        3. Find projection targets of a region (PROPER UNION EXAMPLE):
+        MATCH (r:Region)-[p:PROJECT_TO]->(target:Region)
+        WHERE r.acronym = 'MOp'
+        RETURN target.acronym AS region, p.weight AS value, 'projection weight' AS metric
+        ORDER BY p.weight DESC
+        LIMIT 5
+        UNION
+        MATCH (r:Region)-[p:PROJECT_TO]->(target:Region)
+        WHERE r.acronym = 'MOp'
+        RETURN target.acronym AS region, p.neuron_count AS value, 'neuron count' AS metric
+        ORDER BY p.neuron_count DESC
+        LIMIT 5
 
-4. Compare morphology between regions:
-MATCH (r1:Region {acronym: 'MOp'})
-MATCH (r2:Region {acronym: 'SSp'})
-RETURN r1.acronym, r1.axonal_length, r2.acronym, r2.axonal_length
+        4. Compare morphology between regions (STARTING BROAD THEN FILTERING):
+        MATCH (r:Region)
+        WHERE r.acronym IN ['MOp', 'SSp']
+        RETURN r.acronym, r.axonal_length, r.dendritic_length
 
-5. Find regions dominated by inhibitory neurons:
-MATCH (r:Region)-[h:HAS_CLUSTER]->(c:Cluster)
-WHERE c.dominant_neurotransmitter_type = 'GABA' AND h.rank = 1
-RETURN r.acronym, c.name, h.pct_cells
+        5. Find regions dominated by inhibitory neurons (CONTAINS FOR FUZZY MATCHING):
+        MATCH (r:Region)-[h:HAS_SUBCLASS]->(c:Subclass)
+        WHERE toLower(c.dominant_neurotransmitter_type) CONTAINS 'gaba' AND h.rank = 1
+        RETURN r.acronym, c.name, h.pct_cells
 
-IMPORTANT: 
-- Never use parameters like :param in queries
-- Use WHERE clauses for filtering
-- Region matching uses region_id or acronym
-- Cell type matching uses tran_id or name
-"""
+        IMPORTANT TIPS: 
+        - Use CONTAINS for string matching instead of exact equals
+        - Always check if properties exist before filtering on them
+        - Start with broader queries and then narrow down results
+        """
+        # 定义一致的指标体系
+        self.metric_definitions = {
+            "morphological_complexity": {
+                "primary": "axonal_length + dendritic_length",
+                "secondary": "axonal_branches + dendritic_branches",
+                "tertiary": "max(axonal_maximum_branch_order, dendritic_maximum_branch_order)"
+            },
+            "functional_importance": {
+                "primary": "sum(PROJECT_TO.weight)",
+                "secondary": "count(distinct target:Region)",
+                "tertiary": "percentage of excitatory neurons"
+            }
+        }
+
+        # 添加Cypher最佳实践
+        self.cypher_best_practices = """
+        CYPHER BEST PRACTICES:
+        1. String matching: Use CONTAINS instead of = (WHERE r.name CONTAINS 'CA3')
+        2. Missing relationships: Use OPTIONAL MATCH for relations that might not exist
+        3. UNION queries: Ensure both parts have EXACTLY the same column names
+        4. Property existence: Check if properties exist (WHERE prop IS NOT NULL) before filtering
+        5. Always use params in brackets: ['val1', 'val2'] not {param_name}
+        6. Handle aggregation properly: Use WITH clauses for aggregated values
+        7. Start broad then narrow: Begin with simple queries before adding complex filters
+        """
 
     def think(self, question: str) -> ReasoningChain:
         """
@@ -258,52 +293,73 @@ IMPORTANT:
         """
         LLM生成下一个思考步骤
         """
+        metric_definitions = """
+        CONSISTENT METRIC DEFINITIONS:
+        1. Morphological Complexity:
+           - Primary: Combined axonal_length + dendritic_length
+           - Secondary: Combined axonal_branches + dendritic_branches
+           - Tertiary: Maximum branch order (axonal/dendritic)
+
+        2. Functional Importance:
+           - Primary: Sum of outgoing projection weights (sum of PROJECT_TO weights)
+           - Secondary: Number of target regions receiving projections
+           - Tertiary: Dominance of excitatory vs inhibitory neuron types
+
+        3. Mismatch Definition:
+           - Regions with high morphological complexity but low functional importance
+           - OR regions with low morphological complexity but high functional importance
+        """
+
         prompt = f"""
-You are a neuroscience research assistant analyzing a brain region knowledge graph.
+        You are a neuroscience research assistant analyzing a brain region knowledge graph.
 
-Current question: {question}
-Initial question: {context['initial_question']}
+        Current question: {question}
+        Initial question: {context['initial_question']}
 
-The knowledge graph contains:
-- 337 aggregated brain regions with morphological data (axon/dendrite lengths and branches)
-- Cell type composition data (via HAS_SUBCLASS relationships)  
-- Projection data between regions (via PROJECT_TO relationships)
+        {metric_definitions}
 
-IMPORTANT: All morphological data are AVERAGES at the region level, not individual neurons.
+        The knowledge graph contains:
+        - 337 aggregated brain regions with morphological data (axon/dendrite lengths and branches)
+        - Cell type composition data (via HAS_SUBCLASS relationships)  
+        - Projection data between regions (via PROJECT_TO relationships)
 
-Schema:
-{json.dumps(context['kg_schema'], indent=2)}
+        IMPORTANT: All morphological data are AVERAGES at the region level, not individual neurons.
 
-Example queries:
-{context['example_queries']}
+        Schema:
+        {json.dumps(context['kg_schema'], indent=2)}
 
-Previous thoughts:
-{self._format_previous_thoughts(context.get('previous_thoughts', []))}
+        Example queries:
+        {context['example_queries']}
 
-Please generate the next reasoning step:
-1. What information is needed to answer the current question?
-2. Your reasoning process
-3. If you need to query the knowledge graph, generate a Cypher query
-4. Explain your reasoning logic
+        Previous thoughts:
+        {self._format_previous_thoughts(context.get('previous_thoughts', []))}
 
-CRITICAL: 
-- Do NOT use :param syntax in queries
-- Use WHERE clauses for filtering
-- Match regions by region_id or acronym
-- All queries should be complete and executable
+        CYPHER QUERY GUIDELINES:
+        1. Use CONTAINS for flexible string matching: WHERE r.name CONTAINS 'CA3' 
+        2. Use OPTIONAL MATCH to handle missing relationships
+        3. For UNION queries, ensure both sides have EXACTLY the same column names
+        4. NEVER include multiple queries separated by semicolons
+        5. Use CONSISTENT METRICS as defined above
 
-Return JSON format:
-{{
-    "reasoning": "Your reasoning process",
-    "kg_query": "Complete executable Cypher query (if needed), otherwise null",
-    "query_purpose": "What this query will tell us"
-}}
-"""
+        Please generate the next reasoning step:
+        1. What information is needed to answer the current question?
+        2. Your reasoning process
+        3. If you need to query the knowledge graph, generate a Cypher query
+        4. Explain your reasoning logic
+
+        Return JSON format:
+        {{
+            "reasoning": "Your reasoning process",
+            "kg_query": "Complete executable Cypher query (if needed), otherwise null",
+            "query_purpose": "What this query will tell us"
+        }}
+        """
 
         response = self.client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a neuroscience expert skilled in logical reasoning and Cypher query generation."},
+                {"role": "system",
+                 "content": "You are a neuroscience expert skilled in logical reasoning and Cypher query generation."},
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"},
@@ -313,12 +369,15 @@ Return JSON format:
 
         # Clean up the query if present
         if result.get('kg_query'):
-            # Remove any parameter declarations
             query = result['kg_query']
-            # Remove :param lines
+            # Remove any parameter declarations
             lines = query.split('\n')
             cleaned_lines = [line for line in lines if not line.strip().startswith(':param')]
-            result['kg_query'] = '\n'.join(cleaned_lines).strip()
+            # Remove any trailing semicolons
+            query = '\n'.join(cleaned_lines).strip()
+            if query.endswith(';'):
+                query = query[:-1]
+            result['kg_query'] = query
 
         return Thought(
             step=len(context.get('previous_thoughts', [])) + 1,
@@ -329,38 +388,112 @@ Return JSON format:
             insight=""
         )
 
+    def _clean_query(self, query: str) -> str:
+        """清理并验证Cypher查询"""
+        if not query:
+            return None
+
+        # 移除参数声明和尾部分号
+        lines = query.split('\n')
+        cleaned_lines = [line for line in lines if not line.strip().startswith(':param')]
+        query = '\n'.join(cleaned_lines).strip()
+        if query.endswith(';'):
+            query = query[:-1]
+
+        # 检查UNION语法，确保列名一致
+        if ' UNION ' in query.upper():
+            parts = query.upper().split(' UNION ')
+            if len(parts) >= 2:
+                # 提取第一部分的RETURN列
+                import re
+                return_pattern = r'RETURN\s+(.*?)(?:ORDER BY|LIMIT|$)'
+                first_return = re.search(return_pattern, parts[0], re.IGNORECASE)
+
+                if first_return:
+                    columns = [c.strip().split(' AS ')[-1] for c in first_return.group(1).split(',')]
+
+                    # 将修正建议添加到查询注释中
+                    query = "// 注意: UNION查询需要相同的列名: " + ", ".join(columns) + "\n" + query
+
+        return query
+
+    def _clean_parameters(self, query: str) -> str:
+        """处理查询中的参数问题"""
+        if not query:
+            return query
+
+        # 查找 {parameter_name} 形式的参数并替换为适当的语法
+        import re
+        param_pattern = r'IN\s+{([^}]+)}'
+
+        def replace_param(match):
+            param_name = match.group(1)
+            # 替换为固定值或列表语法
+            return f"IN ['placeholder']  /* 替换 {{{param_name}}} 为实际值列表 */"
+
+        fixed_query = re.sub(param_pattern, replace_param, query)
+        return fixed_query
     def _execute_kg_query(self, query: str) -> List[Dict]:
         """执行知识图谱查询"""
         try:
+            # 清理并验证查询
+            query = self._clean_query(query)
+            query = self._clean_parameters(query)
+            if not query:
+                return []
+
             logger.info(f"执行查询: {query[:100]}...")
             result = self.kg.execute_cypher(query)
             logger.info(f"返回 {len(result)} 条结果")
+
+            # 如果查询失败并包含UNION，尝试分开执行
+            if len(result) == 0 and ' UNION ' in query.upper():
+                logger.info("UNION查询失败，尝试分开执行部分...")
+                parts = query.split(' UNION ', 1)
+                first_part = parts[0].strip()
+
+                result = self.kg.execute_cypher(first_part)
+                logger.info(f"第一部分查询返回 {len(result)} 条结果")
+
             return result
         except Exception as e:
             logger.error(f"查询执行失败: {e}")
             return []
 
     def _extract_insight(self, thought: Thought, context: Dict) -> str:
-        """
-        从查询结果中提取洞察
-        """
+        """从查询结果中提取洞察 - 增加空结果处理"""
         if not thought.kg_result:
-            return thought.reasoning
+            # 分析为什么结果为空，提供诊断信息
+            empty_result_analysis = self._analyze_empty_result(thought.kg_query)
 
+            return f"""
+    No results returned from query. Possible reasons:
+    {empty_result_analysis}
+
+    Original reasoning: {thought.reasoning}
+
+    Suggested next steps:
+    1. Try broader matching with CONTAINS instead of exact equality
+    2. Check if properties exist with IS NOT NULL clauses before filtering
+    3. Use OPTIONAL MATCH for relationships that might not exist
+    4. Start with simpler queries to explore data availability
+    """
+
+        # 原有的正常结果处理...
         prompt = f"""
-Based on the following reasoning and data, extract key insights:
+    Based on the following reasoning and data, extract key insights:
 
-Reasoning: {thought.reasoning}
-Query results: {json.dumps(thought.kg_result[:20], indent=2, default=str)}  # Limit data
+    Reasoning: {thought.reasoning}
+    Query results: {json.dumps(thought.kg_result[:20], indent=2, default=str)}  # Limit data
 
-Please extract:
-1. Key findings from the data
-2. Whether it supports or refutes the hypothesis
-3. Unexpected discoveries
-4. Statistical significance (if applicable)
+    Please extract:
+    1. Key findings from the data
+    2. Whether it supports or refutes the hypothesis
+    3. Unexpected discoveries
+    4. Statistical significance (if applicable)
 
-Return a concise insight description.
-"""
+    Return a concise insight description.
+    """
 
         response = self.client.chat.completions.create(
             model="gpt-4o",
@@ -372,10 +505,40 @@ Return a concise insight description.
 
         return response.choices[0].message.content
 
+    def _analyze_empty_result(self, query: str) -> str:
+        """分析空结果的可能原因"""
+        reasons = []
+
+        if not query:
+            return "No query was provided."
+
+        # 检查可能的原因
+        if '=' in query and 'CONTAINS' not in query:
+            reasons.append("- Using exact equality (=) instead of CONTAINS for string matching")
+
+        if 'MATCH' in query and 'OPTIONAL MATCH' not in query:
+            reasons.append("- Using MATCH instead of OPTIONAL MATCH for potentially missing relationships")
+
+        if 'UNION' in query:
+            reasons.append("- UNION query may have syntax issues with column names not matching")
+
+        if 'WHERE' in query and ('IS NOT NULL' not in query):
+            reasons.append("- Not checking if properties exist with IS NOT NULL")
+
+        if len(reasons) == 0:
+            reasons.append("- Data may simply not exist that matches these specific criteria")
+            reasons.append("- Try exploring with broader, simpler queries first")
+
+        return "\n".join(reasons)
+
     def _generate_next_question(self, thought: Thought, context: Dict) -> Optional[str]:
         """
         基于当前思考生成下一个问题
         """
+        if thought.kg_query and not thought.kg_result:
+            # 尝试生成更宽松的查询作为下一步
+            return f"How can I modify my approach to find data related to {thought.question}? Let me try a broader query strategy."
+
         prompt = f"""
 Based on the current reasoning chain, decide the next step:
 
@@ -417,35 +580,6 @@ Return JSON:
             return result['next_question']
         return None
 
-    def _synthesize_answer(self, thoughts: List[Thought], original_question: str) -> str:
-        """综合所有思考步骤，生成最终答案"""
-        prompt = f"""
-Please synthesize the following reasoning chain to answer the original question:
-
-Original question: {original_question}
-
-Reasoning process:
-{self._format_thought_chain(thoughts)}
-
-Please generate:
-1. Direct answer to the original question
-2. Key supporting evidence
-3. Confidence assessment
-4. Limitations or areas needing further verification
-
-Provide an accurate, complete, and logical answer.
-"""
-
-        response = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are an expert in neuroscience, skilled in comprehensive analysis."},
-                {"role": "user", "content": prompt}
-            ],
-        )
-
-        return response.choices[0].message.content
-
     def _identify_discoveries(self, thoughts: List[Thought]) -> List[str]:
         """识别推理过程中的新发现"""
         discoveries = []
@@ -474,36 +608,68 @@ Provide an accurate, complete, and logical answer.
 
         return min(confidence, 0.95)
 
+    # Modify these methods in the ChainOfThoughtEngine class to prevent truncation
+
     def _format_previous_thoughts(self, thoughts: List[Thought]) -> str:
-        """格式化之前的思考"""
+        """格式化之前的思考 - 不截断"""
         if not thoughts:
             return "None"
 
         formatted = []
-        for t in thoughts[-3:]:
-            formatted.append(f"Step {t.step}: {t.insight[:100] if t.insight else 'Processing...'}")
+        for t in thoughts[-3:]:  # 仍然保留最近3个，但不截断内容
+            formatted.append(f"Step {t.step}: {t.insight if t.insight else 'Processing...'}")
 
         return "\n".join(formatted)
 
     def _format_insights(self, thoughts: List[Thought]) -> str:
-        """格式化洞察"""
+        """格式化洞察 - 不截断"""
         insights = [t.insight for t in thoughts if t.insight]
         return "\n".join(insights[-5:])
 
     def _format_thought_chain(self, thoughts: List[Thought]) -> str:
-        """格式化完整思考链"""
+        """格式化完整思考链 - 不截断"""
         formatted = []
         for t in thoughts:
             formatted.append(f"""
-Step {t.step}:
-  Question: {t.question}
-  Reasoning: {t.reasoning[:200]}
-  Query: {t.kg_query[:100] if t.kg_query else 'None'}
-  Results: {len(t.kg_result) if t.kg_result else 0} records
-  Insight: {t.insight[:200]}
-""")
+    Step {t.step}:
+      Question: {t.question}
+      Reasoning: {t.reasoning}
+      Query: {t.kg_query if t.kg_query else 'None'}
+      Results: {len(t.kg_result) if t.kg_result else 0} records
+      Insight: {t.insight}
+    """)
         return "\n".join(formatted)
 
+    def _synthesize_answer(self, thoughts: List[Thought], original_question: str) -> str:
+        """综合所有思考步骤，生成最终答案 - 确保完整性"""
+        prompt = f"""
+    Please synthesize the following reasoning chain to answer the original question:
+
+    Original question: {original_question}
+
+    Reasoning process:
+    {self._format_thought_chain(thoughts)}
+
+    Please generate:
+    1. Direct answer to the original question
+    2. Key supporting evidence
+    3. Confidence assessment
+    4. Limitations or areas needing further verification
+
+    Provide a complete answer - do not truncate or cut off mid-sentence.
+    If the answer is long, structure it with clear headings and bullet points.
+    """
+
+        response = self.client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are an expert in neuroscience, skilled in comprehensive analysis."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=16000,  # 增加token上限确保完整回答
+        )
+
+        return response.choices[0].message.content
 # ==================== 主Agent ====================
 
 class CoTKGAgent:
@@ -594,24 +760,27 @@ def main():
         neo4j_uri="bolt://10.133.56.119:7687",  # 根据实际情况修改
         neo4j_user="neo4j",
         neo4j_password="neuroxiv",  # 使用实际密码
-        openai_api_key="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"
+        openai_api_key="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"
     )
 
     try:
         print("=" * 60)
         print("Example 1: molecule Analysis")
         # result = agent.answer("Which areas violate the typical excitation-inhibition balance?")
-        result = agent.answer("Which regions have a mismatch between morphological complexity and functional importance?")
+        result = agent.answer("Analyze the projection pattern of the brain region with the highest proportion of Car3 transcriptome subclass neurons")
+        # result = agent.answer("Which regions have a mismatch between morphological complexity and functional importance?")
 
         print(f"\nQuestion: {result['question']}")
         print(f"\nReasoning steps ({result['num_steps']} steps):")
         for step in result['reasoning_steps']:
             print(f"  Step {step['step']}: Generated {step['num_results']} results")
             if step['insight']:
-                print(f"    Insight: {step['insight'][:100]}...")
+                print(f"    Insight: {step['insight']}...")
 
         print(f"\nFinal Answer:")
-        print(result['answer'][:500])
+        print(result['answer'])
+
+
         # # 示例1: 形态学问题
         # print("=" * 60)
         # print("Example 1: Morphology Analysis")

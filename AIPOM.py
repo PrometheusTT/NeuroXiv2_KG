@@ -266,7 +266,7 @@ Initial question: {context['initial_question']}
 
 The knowledge graph contains:
 - 337 aggregated brain regions with morphological data (axon/dendrite lengths and branches)
-- Cell type composition data (via HAS_CLUSTER relationships)  
+- Cell type composition data (via HAS_SUBCLASS relationships)  
 - Projection data between regions (via PROJECT_TO relationships)
 
 IMPORTANT: All morphological data are AVERAGES at the region level, not individual neurons.
@@ -301,7 +301,7 @@ Return JSON format:
 """
 
         response = self.client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are a neuroscience expert skilled in logical reasoning and Cypher query generation."},
                 {"role": "user", "content": prompt}
@@ -363,7 +363,7 @@ Return a concise insight description.
 """
 
         response = self.client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are a data analysis expert in neuroscience."},
                 {"role": "user", "content": prompt}
@@ -403,7 +403,7 @@ Return JSON:
 """
 
         response = self.client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are a logical reasoning expert."},
                 {"role": "user", "content": prompt}
@@ -437,7 +437,7 @@ Provide an accurate, complete, and logical answer.
 """
 
         response = self.client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are an expert in neuroscience, skilled in comprehensive analysis."},
                 {"role": "user", "content": prompt}
@@ -594,14 +594,14 @@ def main():
         neo4j_uri="bolt://10.133.56.119:7687",  # 根据实际情况修改
         neo4j_user="neo4j",
         neo4j_password="neuroxiv",  # 使用实际密码
-        openai_api_key="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"  # 使用实际API key
+        openai_api_key="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"
     )
 
     try:
-        # 示例1: 形态学问题
         print("=" * 60)
-        print("Example 1: Morphology Analysis")
-        result = agent.answer("Which brain regions have the longest axons and what might this indicate about their function?")
+        print("Example 1: molecule Analysis")
+        # result = agent.answer("Which areas violate the typical excitation-inhibition balance?")
+        result = agent.answer("Which regions have a mismatch between morphological complexity and functional importance?")
 
         print(f"\nQuestion: {result['question']}")
         print(f"\nReasoning steps ({result['num_steps']} steps):")
@@ -612,26 +612,40 @@ def main():
 
         print(f"\nFinal Answer:")
         print(result['answer'][:500])
-
-        # 示例2: 细胞类型分析
-        print("\n" + "=" * 60)
-        print("Example 2: Cell Type Composition")
-        result2 = agent.answer("Which regions are dominated by inhibitory (GABAergic) neurons?")
-
-        print(f"\nQuestion: {result2['question']}")
-        print(f"Number of reasoning steps: {result2['num_steps']}")
-        print(f"Confidence: {result2['confidence']:.2f}")
-
-        # 示例3: 连接性分析
-        print("\n" + "=" * 60)
-        print("Example 3: Connectivity Analysis")
-        result3 = agent.answer("What are the main projection targets of the motor cortex (MOp)?")
-
-        print(f"\nQuestion: {result3['question']}")
-        if result3['discoveries']:
-            print(f"\nDiscoveries:")
-            for discovery in result3['discoveries']:
-                print(f"  - {discovery}")
+        # # 示例1: 形态学问题
+        # print("=" * 60)
+        # print("Example 1: Morphology Analysis")
+        # result = agent.answer("Which brain regions have the longest axons and what might this indicate about their function?")
+        #
+        # print(f"\nQuestion: {result['question']}")
+        # print(f"\nReasoning steps ({result['num_steps']} steps):")
+        # for step in result['reasoning_steps']:
+        #     print(f"  Step {step['step']}: Generated {step['num_results']} results")
+        #     if step['insight']:
+        #         print(f"    Insight: {step['insight'][:100]}...")
+        #
+        # print(f"\nFinal Answer:")
+        # print(result['answer'][:500])
+        #
+        # # 示例2: 细胞类型分析
+        # print("\n" + "=" * 60)
+        # print("Example 2: Cell Type Composition")
+        # result2 = agent.answer("Which regions are dominated by inhibitory (GABAergic) neurons?")
+        #
+        # print(f"\nQuestion: {result2['question']}")
+        # print(f"Number of reasoning steps: {result2['num_steps']}")
+        # print(f"Confidence: {result2['confidence']:.2f}")
+        #
+        # # 示例3: 连接性分析
+        # print("\n" + "=" * 60)
+        # print("Example 3: Connectivity Analysis")
+        # result3 = agent.answer("What are the main projection targets of the motor cortex (MOp)?")
+        #
+        # print(f"\nQuestion: {result3['question']}")
+        # if result3['discoveries']:
+        #     print(f"\nDiscoveries:")
+        #     for discovery in result3['discoveries']:
+        #         print(f"  - {discovery}")
 
     except Exception as e:
         logger.error(f"Error during analysis: {e}")

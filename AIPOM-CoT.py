@@ -13,11 +13,11 @@ from dataclasses import dataclass
 from neo4j import GraphDatabase
 import openai
 import numpy as np
+from openai import OpenAI
 from scipy import stats
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 
 # ==================== 核心数据结构 ====================
 
@@ -33,7 +33,6 @@ class Thought:
     next_question: Optional[str] = None
     confidence: float = 0.0
 
-
 @dataclass
 class ReasoningChain:
     """完整的推理链"""
@@ -42,7 +41,6 @@ class ReasoningChain:
     final_answer: str
     discoveries: List[str]
     confidence: float
-
 
 # ==================== 原子知识图谱接口 ====================
 
@@ -70,8 +68,8 @@ class KGInterface:
             'nodes': {
                 'Region': {
                     'properties': ['region_id', 'name', 'acronym', 'axonal_length',
-                                   'dendritic_length', 'axonal_branches', 'dendritic_branches',
-                                   'number_of_neuron_morphologies', 'number_of_transcriptomic_neurons'],
+                                 'dendritic_length', 'axonal_branches', 'dendritic_branches',
+                                 'number_of_neuron_morphologies', 'number_of_transcriptomic_neurons'],
                     'description': '337个聚合的脑区'
                 },
                 'Cluster': {
@@ -105,7 +103,6 @@ class KGInterface:
     def close(self):
         self.driver.close()
 
-
 # ==================== Chain-of-Thought 推理引擎 ====================
 
 class ChainOfThoughtEngine:
@@ -114,6 +111,7 @@ class ChainOfThoughtEngine:
     """
 
     def __init__(self, kg: KGInterface, openai_api_key: str):
+        self.client = OpenAI(api_key=openai_api_key)
         self.kg = kg
         openai.api_key = openai_api_key
         self.kg_schema = kg.get_schema()
@@ -199,14 +197,14 @@ class ChainOfThoughtEngine:
     "query_purpose": "查询目的"
 }}
 """
-
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
+        # client = OpenAI(api_key='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')
+        response = self.client.chat.completions.create(
+            model="gpt-5",
             messages=[
                 {"role": "system", "content": "你是神经科学专家，擅长逻辑推理和数据分析"},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1
+            response_format={"type": "json_object"},
         )
 
         result = json.loads(response.choices[0].message.content)
@@ -252,14 +250,14 @@ class ChainOfThoughtEngine:
 
 返回简洁的洞察描述。
 """
-
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
+        # client = OpenAI(api_key='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')
+        response = self.client.chat.completions.create(
+            model="gpt-5",
             messages=[
                 {"role": "system", "content": "你是数据分析专家"},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1
+            
         )
 
         return response.choices[0].message.content
@@ -293,14 +291,14 @@ class ChainOfThoughtEngine:
     "reason": "决定的理由"
 }}
 """
-
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
+        # client = OpenAI(api_key='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')
+        response = self.client.chat.completions.create(
+            model="gpt-5",
             messages=[
                 {"role": "system", "content": "你是逻辑推理专家"},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.2
+            response_format={"type": "json_object"},
         )
 
         result = json.loads(response.choices[0].message.content)
@@ -329,14 +327,14 @@ class ChainOfThoughtEngine:
 
 要求答案准确、完整、有逻辑性。
 """
-
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
+        # client = OpenAI(api_key='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')
+        response = self.client.chat.completions.create(
+            model="gpt-5",
             messages=[
-                {"role": "system", "content": "你是神经科学专家，擅长综合分析"},
+                {"role": "system", "content": "You are an expert in neuroscience, skilled in comprehensive analysis."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1
+            
         )
 
         return response.choices[0].message.content
@@ -363,14 +361,13 @@ class ChainOfThoughtEngine:
 
 请返回最重要的3-5个发现，每个用一句话概括。
 """
-
-            response = openai.ChatCompletion.create(
-                model="gpt-4",
+            # client = OpenAI(api_key='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')
+            response = self.client.chat.completions.create(
+                model="gpt-5",
                 messages=[
-                    {"role": "system", "content": "你是科学发现评估专家"},
+                    {"role": "system", "content": "You are an expert in the evaluation of scientific discoveries."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1
             )
 
             refined = response.choices[0].message.content.split('\n')
@@ -423,7 +420,6 @@ Step {t.step}:
   洞察: {t.insight[:200]}
 """)
         return "\n".join(formatted)
-
 
 # ==================== 主Agent ====================
 
@@ -509,7 +505,6 @@ class CoTKGAgent:
         """关闭连接"""
         self.kg.close()
 
-
 # ==================== 使用示例 ====================
 
 def main():
@@ -517,10 +512,10 @@ def main():
 
     # 初始化Agent
     agent = CoTKGAgent(
-        neo4j_uri="bolt://localhost:7687",
+        neo4j_uri="bolt://10.133.56.119:7687",
         neo4j_user="neo4j",
-        neo4j_password="password",
-        openai_api_key="your-api-key"
+        neo4j_password="neuroxiv",
+        openai_api_key="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"
     )
 
     try:
@@ -565,7 +560,6 @@ def main():
     finally:
         agent.close()
         print("\n分析完成")
-
 
 if __name__ == "__main__":
     main()

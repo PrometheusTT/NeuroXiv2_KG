@@ -760,7 +760,7 @@ def main():
         neo4j_uri="bolt://10.133.56.119:7687",  # 根据实际情况修改
         neo4j_user="neo4j",
         neo4j_password="neuroxiv",  # 使用实际密码
-        openai_api_key="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"
+        openai_api_key=""
     )
 
     try:

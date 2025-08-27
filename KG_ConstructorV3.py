@@ -214,7 +214,6 @@ class RegionAnalyzer:
                 self.region_info[region_id] = {
                     'acronym': acronym,
                     'name': node.get('name', ''),
-                    'parent_id': node.get('parent_id'),
                     'depth': node.get('depth', 0),
                     'structure_id_path': node.get('structure_id_path', [])
                 }
@@ -228,13 +227,8 @@ class RegionAnalyzer:
                 # 构建父子关系映射
                 if 'structure_id_path' in node and len(node['structure_id_path']) > 1:
                     child_id = region_id
-                    parent_id = node['structure_id_path'][-2]  # 取倒数第二个为父区域
 
-                    self.child_parent_map[child_id] = parent_id
 
-                    if parent_id not in self.parent_child_map:
-                        self.parent_child_map[parent_id] = []
-                    self.parent_child_map[parent_id].append(child_id)
 
     def get_region_by_acronym(self, acronym: str) -> int:
         """通过acronym获取区域ID"""
@@ -1339,7 +1333,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='NeuroXiv 2.0 知识图谱构建')
     parser.add_argument('--data_dir', type=str, default='/home/wlj/NeuroXiv2/data',
                         help='数据目录路径')
-    parser.add_argument('--output_dir', type=str, default='./knowledge_graph_v5',
+    parser.add_argument('--output_dir', type=str, default='./knowledge_graph_v6',
                         help='输出目录路径')
     parser.add_argument('--hierarchy_json', type=str, default='/home/wlj/NeuroXiv2/data/tran-data-type-tree.json',
                         help='MERFISH层级JSON文件路径')

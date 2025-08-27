@@ -767,26 +767,31 @@ class CoTKGAgent:
         logger.info(f"Received question: {question}")
 
         # Check for specialized analyses
-        if 'Car3' in question:
-            logger.info("Using specialized Car3 analysis")
-            specialized_results = self.analyzer.analyze_car3_regions()
-
-            # Enhance with CoT reasoning if token budget allows
-            if self.cot_engine.total_tokens < 20000:
-                reasoning_chain = self.cot_engine.think(question)
-                return self._combine_results(question, reasoning_chain, specialized_results)
-            else:
-                return self._format_specialized_results(question, specialized_results)
-
-        elif 'outlier' in question.lower() or 'unusual' in question.lower():
-            logger.info("Using morphological outlier analysis")
-            specialized_results = self.analyzer.find_morphological_outliers()
-            return self._format_specialized_results(question, specialized_results)
-
-        else:
-            # Default to CoT reasoning
-            reasoning_chain = self.cot_engine.think(question)
-            return self._format_reasoning_results(question, reasoning_chain)
+        # if 'Car3' in question:
+        #     logger.info("Using specialized Car3 analysis")
+        #     specialized_results = self.analyzer.analyze_car3_regions()
+        #
+        #     # Enhance with CoT reasoning if token budget allows
+        #     if self.cot_engine.total_tokens < 20000:
+        #         reasoning_chain = self.cot_engine.think(question)
+        #         print('reasoning_chain', reasoning_chain)
+        #         return self._combine_results(question, reasoning_chain, specialized_results)
+        #     else:
+        #         return self._format_specialized_results(question, specialized_results)
+        #
+        # elif 'outlier' in question.lower() or 'unusual' in question.lower():
+        #     logger.info("Using morphological outlier analysis")
+        #     specialized_results = self.analyzer.find_morphological_outliers()
+        #     return self._format_specialized_results(question, specialized_results)
+        #
+        # else:
+        #     # Default to CoT reasoning
+        #     reasoning_chain = self.cot_engine.think(question)
+        #     print('reasoning_chain',reasoning_chain)
+        #     return self._format_reasoning_results(question, reasoning_chain)
+        reasoning_chain = self.cot_engine.think(question)
+        print('reasoning_chain',reasoning_chain)
+        return self._format_reasoning_results(question, reasoning_chain)
 
     def _combine_results(self, question: str, reasoning_chain: ReasoningChain,
                          specialized_results: Dict) -> Dict:
@@ -1010,7 +1015,7 @@ def main():
         'neo4j_uri': "bolt://10.133.56.119:7687",  # Update with actual
         'neo4j_user': "neo4j",
         'neo4j_password': "neuroxiv",  # Update with actual
-        'openai_api_key': ""  # Update with actual
+        'openai_api_key': ""
     }
 
     # Initialize agent
@@ -1020,13 +1025,12 @@ def main():
         # Example 1: Car3 Analysis (Specialized + CoT)
         print("=" * 60)
         print("Example 1: Car3 Transcriptome Analysis")
-        # result1 = agent.answer(
-        #     "Analyze the projection pattern of the brain region with "
-        #     "the highest proportion of Car3 transcriptome subclass neurons"
-        # )
         result1 = agent.answer(
-            "find some region pairs with enough data and their morphological features are similar but molecular features are very different"
+            "Analyze the morphology and projection pattern of the brain region with the highest proportion of Car3 transcriptome subclass neurons"
         )
+        # result1 = agent.answer(
+        #     "region pairs with similar morphological features but different molecular features"
+        # )
         print("=" * 60)
         print(format_results_for_display(result1))
 

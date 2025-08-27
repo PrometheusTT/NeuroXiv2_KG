@@ -1333,7 +1333,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='NeuroXiv 2.0 知识图谱构建')
     parser.add_argument('--data_dir', type=str, default='/home/wlj/NeuroXiv2/data',
                         help='数据目录路径')
-    parser.add_argument('--output_dir', type=str, default='./knowledge_graph_v6',
+    parser.add_argument('--output_dir', type=str, default='./knowledge_graph_v5',
                         help='输出目录路径')
     parser.add_argument('--hierarchy_json', type=str, default='/home/wlj/NeuroXiv2/data/tran-data-type-tree.json',
                         help='MERFISH层级JSON文件路径')

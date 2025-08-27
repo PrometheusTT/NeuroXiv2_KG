@@ -1,9 +1,9 @@
 """
-CoT-KG Agent: Chain-of-Thought驱动的知识图谱推理系统
-核心理念：LLM负责推理，KG提供事实，两者协同发现新知识
+CoT-KG Agent: 修正版 - 基于实际知识图谱结构
+正确生成Cypher查询
 
 Author: NeuroXiv Team
-Date: 2025-08-26
+Date: 2025-12-19
 """
 
 import json
@@ -11,14 +11,12 @@ import logging
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from neo4j import GraphDatabase
-import openai
-import numpy as np
 from openai import OpenAI
+import numpy as np
 from scipy import stats
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 
 # ==================== 核心数据结构 ====================
 
@@ -34,7 +32,6 @@ class Thought:
     next_question: Optional[str] = None
     confidence: float = 0.0
 
-
 @dataclass
 class ReasoningChain:
     """完整的推理链"""
@@ -43,7 +40,6 @@ class ReasoningChain:
     final_answer: str
     discoveries: List[str]
     confidence: float
-
 
 # ==================== 原子知识图谱接口 ====================
 
@@ -62,50 +58,97 @@ class KGInterface:
         LLM会生成适当的查询
         """
         with self.driver.session() as session:
-            result = session.run(query, **params)
-            return [record.data() for record in result]
+            try:
+                result = session.run(query, **params)
+                return [record.data() for record in result]
+            except Exception as e:
+                logger.error(f"Cypher查询执行失败: {e}")
+                logger.error(f"查询: {query}")
+                return []
 
     def get_schema(self) -> Dict:
-        """获取图谱schema供LLM参考"""
+        """获取图谱schema供LLM参考 - 基于实际的数据结构"""
         schema = {
             'nodes': {
                 'Region': {
-                    'properties': ['region_id', 'name', 'acronym', 'axonal_length',
-                                   'dendritic_length', 'axonal_branches', 'dendritic_branches',
-                                   'number_of_neuron_morphologies', 'number_of_transcriptomic_neurons'],
-                    'description': '337个聚合的脑区'
+                    'properties': [
+                        'region_id (INT - unique identifier)',
+                        'name (STRING)',
+                        'acronym (STRING)',
+                        'axonal_length (FLOAT - μm)',
+                        'dendritic_length (FLOAT - μm)',
+                        'axonal_branches (FLOAT)',
+                        'dendritic_branches (FLOAT)',
+                        'axonal_bifurcation_remote_angle (FLOAT)',
+                        'dendritic_bifurcation_remote_angle (FLOAT)',
+                        'axonal_maximum_branch_order (FLOAT)',
+                        'dendritic_maximum_branch_order (FLOAT)',
+                        'number_of_neuron_morphologies (INT)',
+                        'number_of_transcriptomic_neurons (INT)'
+                    ],
+                    'description': '337 aggregated brain regions with morphological averages'
                 },
                 'Cluster': {
-                    'properties': ['tran_id', 'name', 'markers', 'dominant_neurotransmitter_type'],
-                    'description': '细胞类型簇'
+                    'properties': [
+                        'tran_id (INT - unique identifier)',
+                        'name (STRING)',
+                        'markers (STRING - comma separated gene list)',
+                        'dominant_neurotransmitter_type (STRING - e.g., GABA, Glutamate)'
+                    ],
+                    'description': 'Cell type clusters'
                 },
                 'Subclass': {
                     'properties': ['tran_id', 'name', 'markers', 'dominant_neurotransmitter_type'],
-                    'description': '细胞亚类'
+                    'description': 'Cell subclasses'
                 },
                 'Supertype': {
                     'properties': ['tran_id', 'name', 'markers'],
-                    'description': '细胞超类型'
+                    'description': 'Cell supertypes'
                 },
                 'Class': {
                     'properties': ['tran_id', 'name'],
-                    'description': '细胞大类'
+                    'description': 'Cell classes'
                 }
             },
             'relationships': {
-                'PROJECT_TO': '(Region)-[PROJECT_TO {weight, neuron_count}]->(Region)',
-                'HAS_CLUSTER': '(Region)-[HAS_CLUSTER {pct_cells, rank}]->(Cluster)',
-                'HAS_SUBCLASS': '(Region)-[HAS_SUBCLASS {pct_cells, rank}]->(Subclass)',
-                'HAS_SUPERTYPE': '(Region)-[HAS_SUPERTYPE {pct_cells, rank}]->(Supertype)',
-                'HAS_CLASS': '(Region)-[HAS_CLASS {pct_cells, rank}]->(Class)',
-                'BELONGS_TO': 'Cluster->Supertype->Subclass->Class层级关系'
-            }
+                'PROJECT_TO': {
+                    'pattern': '(Region)-[PROJECT_TO]->(Region)',
+                    'properties': ['weight (FLOAT)', 'neuron_count (INT)', 'source_acronym', 'target_acronym'],
+                    'description': 'Projection between regions'
+                },
+                'HAS_CLUSTER': {
+                    'pattern': '(Region)-[HAS_CLUSTER]->(Cluster)',
+                    'properties': ['pct_cells (FLOAT - percentage)', 'rank (INT - 1 is highest)'],
+                    'description': 'Cell type composition of region'
+                },
+                'HAS_SUBCLASS': {
+                    'pattern': '(Region)-[HAS_SUBCLASS]->(Subclass)',
+                    'properties': ['pct_cells', 'rank']
+                },
+                'HAS_SUPERTYPE': {
+                    'pattern': '(Region)-[HAS_SUPERTYPE]->(Supertype)',
+                    'properties': ['pct_cells', 'rank']
+                },
+                'HAS_CLASS': {
+                    'pattern': '(Region)-[HAS_CLASS]->(Class)',
+                    'properties': ['pct_cells', 'rank']
+                },
+                'BELONGS_TO': {
+                    'pattern': 'Cluster->Supertype->Subclass->Class hierarchy',
+                    'description': 'Cell type hierarchy'
+                }
+            },
+            'important_notes': [
+                'Region nodes contain AGGREGATED morphological data (means), not individual neurons',
+                'No single neuron data - only statistical aggregates at region level',
+                'Cell type percentages are at region level via HAS_* relationships',
+                'Use region_id for matching Region nodes, tran_id for cell type nodes'
+            ]
         }
         return schema
 
     def close(self):
         self.driver.close()
-
 
 # ==================== Chain-of-Thought 推理引擎 ====================
 
@@ -115,11 +158,48 @@ class ChainOfThoughtEngine:
     """
 
     def __init__(self, kg: KGInterface, openai_api_key: str):
-        openai.api_key = openai_api_key
         self.client = OpenAI(api_key=openai_api_key)
         self.kg = kg
         self.kg_schema = kg.get_schema()
         self.max_thinking_steps = 10
+
+        # Cypher查询示例，帮助LLM生成正确的查询
+        self.example_queries = """
+Example Cypher queries for this knowledge graph:
+
+1. Find regions with longest axons:
+MATCH (r:Region)
+WHERE r.axonal_length IS NOT NULL
+RETURN r.acronym, r.axonal_length
+ORDER BY r.axonal_length DESC
+LIMIT 10
+
+2. Get cell type composition of a region:
+MATCH (r:Region {acronym: 'MOp'})-[h:HAS_CLUSTER]->(c:Cluster)
+RETURN c.name, h.pct_cells, h.rank
+ORDER BY h.rank
+
+3. Find projection targets of a region:
+MATCH (r:Region {acronym: 'MOp'})-[p:PROJECT_TO]->(target:Region)
+RETURN target.acronym, p.weight, p.neuron_count
+ORDER BY p.weight DESC
+
+4. Compare morphology between regions:
+MATCH (r1:Region {acronym: 'MOp'})
+MATCH (r2:Region {acronym: 'SSp'})
+RETURN r1.acronym, r1.axonal_length, r2.acronym, r2.axonal_length
+
+5. Find regions dominated by inhibitory neurons:
+MATCH (r:Region)-[h:HAS_CLUSTER]->(c:Cluster)
+WHERE c.dominant_neurotransmitter_type = 'GABA' AND h.rank = 1
+RETURN r.acronym, c.name, h.pct_cells
+
+IMPORTANT: 
+- Never use parameters like :param in queries
+- Use WHERE clauses for filtering
+- Region matching uses region_id or acronym
+- Cell type matching uses tran_id or name
+"""
 
     def think(self, question: str) -> ReasoningChain:
         """
@@ -131,6 +211,7 @@ class ChainOfThoughtEngine:
         context = {
             'initial_question': question,
             'kg_schema': self.kg_schema,
+            'example_queries': self.example_queries,
             'previous_thoughts': []
         }
 
@@ -178,40 +259,66 @@ class ChainOfThoughtEngine:
         LLM生成下一个思考步骤
         """
         prompt = f"""
-你是一个神经科学研究助手，正在分析脑区知识图谱。
+You are a neuroscience research assistant analyzing a brain region knowledge graph.
 
-当前问题: {question}
-初始问题: {context['initial_question']}
+Current question: {question}
+Initial question: {context['initial_question']}
 
-知识图谱包含337个聚合脑区，具有形态学数据(轴突/树突长度和分支)、转录组数据(细胞类型组成)和连接数据(投射关系)。
+The knowledge graph contains:
+- 337 aggregated brain regions with morphological data (axon/dendrite lengths and branches)
+- Cell type composition data (via HAS_CLUSTER relationships)  
+- Projection data between regions (via PROJECT_TO relationships)
 
-之前的思考:
+IMPORTANT: All morphological data are AVERAGES at the region level, not individual neurons.
+
+Schema:
+{json.dumps(context['kg_schema'], indent=2)}
+
+Example queries:
+{context['example_queries']}
+
+Previous thoughts:
 {self._format_previous_thoughts(context.get('previous_thoughts', []))}
 
-请进行下一步推理:
-1. 分析当前问题需要什么信息
-2. 生成推理过程
-3. 如果需要查询知识图谱，生成Cypher查询
-4. 解释你的推理逻辑
+Please generate the next reasoning step:
+1. What information is needed to answer the current question?
+2. Your reasoning process
+3. If you need to query the knowledge graph, generate a Cypher query
+4. Explain your reasoning logic
 
-返回JSON格式:
+CRITICAL: 
+- Do NOT use :param syntax in queries
+- Use WHERE clauses for filtering
+- Match regions by region_id or acronym
+- All queries should be complete and executable
+
+Return JSON format:
 {{
-    "reasoning": "你的推理过程",
-    "kg_query": "Cypher查询(如果需要)，否则为null",
-    "query_purpose": "查询目的"
+    "reasoning": "Your reasoning process",
+    "kg_query": "Complete executable Cypher query (if needed), otherwise null",
+    "query_purpose": "What this query will tell us"
 }}
 """
-        # client = OpenAI(api_key='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')
+
         response = self.client.chat.completions.create(
             model="gpt-5",
             messages=[
-                {"role": "system", "content": "你是神经科学专家，擅长逻辑推理和数据分析"},
+                {"role": "system", "content": "You are a neuroscience expert skilled in logical reasoning and Cypher query generation."},
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"},
         )
 
         result = json.loads(response.choices[0].message.content)
+
+        # Clean up the query if present
+        if result.get('kg_query'):
+            # Remove any parameter declarations
+            query = result['kg_query']
+            # Remove :param lines
+            lines = query.split('\n')
+            cleaned_lines = [line for line in lines if not line.strip().startswith(':param')]
+            result['kg_query'] = '\n'.join(cleaned_lines).strip()
 
         return Thought(
             step=len(context.get('previous_thoughts', [])) + 1,
@@ -241,27 +348,26 @@ class ChainOfThoughtEngine:
             return thought.reasoning
 
         prompt = f"""
-基于以下推理和数据，提取关键洞察：
+Based on the following reasoning and data, extract key insights:
 
-推理: {thought.reasoning}
-查询结果: {json.dumps(thought.kg_result[:10], indent=2, default=str)}  # 限制数据量
+Reasoning: {thought.reasoning}
+Query results: {json.dumps(thought.kg_result[:20], indent=2, default=str)}  # Limit data
 
-请提取：
-1. 数据显示的关键发现
-2. 是否支持或反驳了假设
-3. 意外的发现
-4. 统计上的显著性（如果适用）
+Please extract:
+1. Key findings from the data
+2. Whether it supports or refutes the hypothesis
+3. Unexpected discoveries
+4. Statistical significance (if applicable)
 
-返回简洁的洞察描述。
+Return a concise insight description.
 """
-        # client = OpenAI(api_key='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')
+
         response = self.client.chat.completions.create(
             model="gpt-5",
             messages=[
-                {"role": "system", "content": "你是数据分析专家"},
+                {"role": "system", "content": "You are a data analysis expert in neuroscience."},
                 {"role": "user", "content": prompt}
             ],
-
         )
 
         return response.choices[0].message.content
@@ -271,35 +377,35 @@ class ChainOfThoughtEngine:
         基于当前思考生成下一个问题
         """
         prompt = f"""
-基于当前的推理链，决定下一步：
+Based on the current reasoning chain, decide the next step:
 
-初始问题: {context['initial_question']}
-当前洞察: {thought.insight}
-已完成步骤数: {thought.step}
+Initial question: {context['initial_question']}
+Current insight: {thought.insight}
+Steps completed: {thought.step}
 
-之前的发现:
+Previous findings:
 {self._format_insights(context.get('previous_thoughts', []))}
 
-请决定:
-1. 是否已经充分回答了初始问题？
-2. 是否发现了需要深入探索的新线索？
-3. 是否需要验证某个假设？
+Please decide:
+1. Have we sufficiently answered the initial question?
+2. Are there new leads to explore?
+3. Do we need to verify a hypothesis?
 
-如果需要继续探索，返回下一个具体问题。
-如果已经完成，返回null。
+If exploration should continue, return the next specific question.
+If complete, return null.
 
-返回JSON:
+Return JSON:
 {{
     "continue": true/false,
-    "next_question": "下一个问题" 或 null,
-    "reason": "决定的理由"
+    "next_question": "next question" or null,
+    "reason": "reasoning for decision"
 }}
 """
-        # client = OpenAI(api_key='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')
+
         response = self.client.chat.completions.create(
             model="gpt-5",
             messages=[
-                {"role": "system", "content": "你是逻辑推理专家"},
+                {"role": "system", "content": "You are a logical reasoning expert."},
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"},
@@ -307,91 +413,62 @@ class ChainOfThoughtEngine:
 
         result = json.loads(response.choices[0].message.content)
 
-        if result['continue'] and result.get('next_question'):
+        if result.get('continue') and result.get('next_question'):
             return result['next_question']
         return None
 
     def _synthesize_answer(self, thoughts: List[Thought], original_question: str) -> str:
-        """
-        综合所有思考步骤，生成最终答案
-        """
+        """综合所有思考步骤，生成最终答案"""
         prompt = f"""
-请综合以下推理链，回答原始问题：
+Please synthesize the following reasoning chain to answer the original question:
 
-原始问题: {original_question}
+Original question: {original_question}
 
-推理过程:
+Reasoning process:
 {self._format_thought_chain(thoughts)}
 
-请生成：
-1. 直接回答原始问题
-2. 支持答案的关键证据
-3. 推理的可信度评估
-4. 潜在的局限性或需要进一步验证的方面
+Please generate:
+1. Direct answer to the original question
+2. Key supporting evidence
+3. Confidence assessment
+4. Limitations or areas needing further verification
 
-要求答案准确、完整、有逻辑性。
+Provide an accurate, complete, and logical answer.
 """
-        # client = OpenAI(api_key='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')
+
         response = self.client.chat.completions.create(
             model="gpt-5",
             messages=[
                 {"role": "system", "content": "You are an expert in neuroscience, skilled in comprehensive analysis."},
                 {"role": "user", "content": prompt}
             ],
-
         )
 
         return response.choices[0].message.content
 
     def _identify_discoveries(self, thoughts: List[Thought]) -> List[str]:
-        """
-        识别推理过程中的新发现
-        """
+        """识别推理过程中的新发现"""
         discoveries = []
 
         for thought in thoughts:
             if thought.insight:
                 # 简单规则：包含特定关键词的洞察可能是发现
-                keywords = ['意外', '发现', '异常', '显著', '相关', '不同于', '特殊']
-                if any(keyword in thought.insight for keyword in keywords):
+                keywords = ['unexpected', 'discovered', 'unusual', 'significant',
+                           'correlation', 'different from', 'special', 'surprisingly']
+                if any(keyword in thought.insight.lower() for keyword in keywords):
                     discoveries.append(thought.insight)
 
-        # 使用LLM进一步提炼
-        if discoveries:
-            prompt = f"""
-从以下洞察中，识别真正有价值的科学发现：
-
-{json.dumps(discoveries, ensure_ascii=False, indent=2)}
-
-请返回最重要的3-5个发现，每个用一句话概括。
-"""
-            # client = OpenAI(api_key='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')
-            response = self.client.chat.completions.create(
-                model="gpt-5",
-                messages=[
-                    {"role": "system", "content": "You are an expert in the evaluation of scientific discoveries."},
-                    {"role": "user", "content": prompt}
-                ],
-            )
-
-            refined = response.choices[0].message.content.split('\n')
-            discoveries = [d.strip() for d in refined if d.strip()]
-
-        return discoveries
+        return discoveries[:5]  # Return top 5 discoveries
 
     def _calculate_confidence(self, thoughts: List[Thought]) -> float:
         """计算推理链的置信度"""
         if not thoughts:
             return 0.0
 
-        # 简单策略：基于步骤数和数据支持
         base_confidence = 0.5
-
-        # 有数据支持的步骤增加置信度
         data_supported = sum(1 for t in thoughts if t.kg_result)
         confidence = base_confidence + (data_supported / len(thoughts)) * 0.3
 
-        # 步骤过多降低置信度
         if len(thoughts) > 7:
             confidence *= 0.9
 
@@ -400,18 +477,18 @@ class ChainOfThoughtEngine:
     def _format_previous_thoughts(self, thoughts: List[Thought]) -> str:
         """格式化之前的思考"""
         if not thoughts:
-            return "无"
+            return "None"
 
         formatted = []
-        for t in thoughts[-3:]:  # 只显示最近3个
-            formatted.append(f"Step {t.step}: {t.insight[:100]}")
+        for t in thoughts[-3:]:
+            formatted.append(f"Step {t.step}: {t.insight[:100] if t.insight else 'Processing...'}")
 
         return "\n".join(formatted)
 
     def _format_insights(self, thoughts: List[Thought]) -> str:
         """格式化洞察"""
         insights = [t.insight for t in thoughts if t.insight]
-        return "\n".join(insights[-5:])  # 最近5个洞察
+        return "\n".join(insights[-5:])
 
     def _format_thought_chain(self, thoughts: List[Thought]) -> str:
         """格式化完整思考链"""
@@ -419,12 +496,13 @@ class ChainOfThoughtEngine:
         for t in thoughts:
             formatted.append(f"""
 Step {t.step}:
-  问题: {t.question}
-  推理: {t.reasoning[:200]}
-  洞察: {t.insight[:200]}
+  Question: {t.question}
+  Reasoning: {t.reasoning[:200]}
+  Query: {t.kg_query[:100] if t.kg_query else 'None'}
+  Results: {len(t.kg_result) if t.kg_result else 0} records
+  Insight: {t.insight[:200]}
 """)
         return "\n".join(formatted)
-
 
 # ==================== 主Agent ====================
 
@@ -457,6 +535,7 @@ class CoTKGAgent:
                     'question': t.question,
                     'reasoning': t.reasoning,
                     'query': t.kg_query,
+                    'num_results': len(t.kg_result) if t.kg_result else 0,
                     'insight': t.insight
                 }
                 for t in reasoning_chain.thoughts
@@ -469,21 +548,17 @@ class CoTKGAgent:
         return result
 
     def explore(self, topic: str = None) -> Dict:
-        """
-        自主探索模式 - 发现新知识
-        """
+        """自主探索模式 - 发现新知识"""
         if topic:
-            question = f"探索{topic}相关的有趣模式和关联"
+            question = f"Explore interesting patterns and associations related to {topic}"
         else:
-            question = "在脑区数据中寻找意外的模式或关联"
+            question = "Find unexpected patterns or associations in the brain region data"
 
         return self.answer(question)
 
     def validate_hypothesis(self, hypothesis: str) -> Dict:
-        """
-        验证假说
-        """
-        question = f"验证以下假说：{hypothesis}"
+        """验证假说"""
+        question = f"Validate the following hypothesis: {hypothesis}"
         result = self.answer(question)
 
         # 添加假说验证的特殊处理
@@ -494,22 +569,20 @@ class CoTKGAgent:
 
     def _assess_validation(self, result: Dict) -> str:
         """评估假说验证结果"""
-        # 简单规则评估
         answer = result.get('answer', '').lower()
 
-        if '支持' in answer or '确认' in answer or '正确' in answer:
-            return "支持假说"
-        elif '反驳' in answer or '不支持' in answer or '错误' in answer:
-            return "反驳假说"
-        elif '部分' in answer or '一定程度' in answer:
-            return "部分支持"
+        if 'support' in answer or 'confirm' in answer or 'correct' in answer or 'true' in answer:
+            return "Hypothesis Supported"
+        elif 'refute' in answer or 'not support' in answer or 'incorrect' in answer or 'false' in answer:
+            return "Hypothesis Refuted"
+        elif 'partial' in answer or 'some' in answer or 'mixed' in answer:
+            return "Partially Supported"
         else:
-            return "证据不足"
+            return "Insufficient Evidence"
 
     def close(self):
         """关闭连接"""
         self.kg.close()
-
 
 # ==================== 使用示例 ====================
 
@@ -518,55 +591,56 @@ def main():
 
     # 初始化Agent
     agent = CoTKGAgent(
-        neo4j_uri="bolt://10.133.56.119:7687",
+        neo4j_uri="bolt://10.133.56.119:7687",  # 根据实际情况修改
         neo4j_user="neo4j",
-        neo4j_password="neuroxiv",
-        openai_api_key="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"
+        neo4j_password="neuroxiv",  # 使用实际密码
+        openai_api_key="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"  # 使用实际API key
     )
 
     try:
-        # 示例1: 开放性问题
+        # 示例1: 形态学问题
         print("=" * 60)
-        print("示例1: 开放性问题")
-        result = agent.answer("为什么某些脑区的轴突特别长？这与它们的功能有什么关系？")
+        print("Example 1: Morphology Analysis")
+        result = agent.answer("Which brain regions have the longest axons and what might this indicate about their function?")
 
-        print(f"\n问题: {result['question']}")
-        print(f"\n推理步骤 ({result['num_steps']}步):")
+        print(f"\nQuestion: {result['question']}")
+        print(f"\nReasoning steps ({result['num_steps']} steps):")
         for step in result['reasoning_steps']:
-            print(f"  Step {step['step']}: {step['insight'][:100]}...")
+            print(f"  Step {step['step']}: Generated {step['num_results']} results")
+            if step['insight']:
+                print(f"    Insight: {step['insight'][:100]}...")
 
-        print(f"\n最终答案:")
+        print(f"\nFinal Answer:")
         print(result['answer'][:500])
 
-        if result['discoveries']:
-            print(f"\n新发现:")
-            for discovery in result['discoveries']:
+        # 示例2: 细胞类型分析
+        print("\n" + "=" * 60)
+        print("Example 2: Cell Type Composition")
+        result2 = agent.answer("Which regions are dominated by inhibitory (GABAergic) neurons?")
+
+        print(f"\nQuestion: {result2['question']}")
+        print(f"Number of reasoning steps: {result2['num_steps']}")
+        print(f"Confidence: {result2['confidence']:.2f}")
+
+        # 示例3: 连接性分析
+        print("\n" + "=" * 60)
+        print("Example 3: Connectivity Analysis")
+        result3 = agent.answer("What are the main projection targets of the motor cortex (MOp)?")
+
+        print(f"\nQuestion: {result3['question']}")
+        if result3['discoveries']:
+            print(f"\nDiscoveries:")
+            for discovery in result3['discoveries']:
                 print(f"  - {discovery}")
 
-        print(f"\n置信度: {result['confidence']:.2f}")
-
-        # 示例2: 探索模式
-        print("\n" + "=" * 60)
-        print("示例2: 自主探索")
-        explore_result = agent.explore("形态学和细胞类型的关系")
-
-        print(f"探索主题: 形态学和细胞类型的关系")
-        print(f"发现了 {len(explore_result['discoveries'])} 个有趣的模式")
-
-        # 示例3: 验证假说
-        print("\n" + "=" * 60)
-        print("示例3: 假说验证")
-        hypothesis = "长轴突的脑区倾向于有更多的谷氨酸能神经元"
-        validation = agent.validate_hypothesis(hypothesis)
-
-        print(f"假说: {hypothesis}")
-        print(f"验证结果: {validation['validation_result']}")
-        print(f"关键证据: {validation['answer'][:300]}...")
+    except Exception as e:
+        logger.error(f"Error during analysis: {e}")
+        import traceback
+        traceback.print_exc()
 
     finally:
         agent.close()
         print("\n分析完成")
-
 
 if __name__ == "__main__":
     main()

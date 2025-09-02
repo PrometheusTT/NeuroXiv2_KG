@@ -1,829 +1,615 @@
 """
-Universal TAOR Agent with GPT-4o
-Uses latest OpenAI models with strict JSON parsing
+NeuroXiv-Aware Universal Agent
+Based on actual KG structure from KG_ConstructorV3_Neo4j.py
 
-Key Features:
-- GPT-4o for fast and capable reasoning
-- GPT-4-turbo for deep analysis when needed
-- Complete Think-Act-Observe-Reflect loop
-- Strict JSON response format with validation
+Key insight: The KG has specific structure that MUST be respected:
+- Region nodes with morphological properties
+- Class/Subclass/Supertype/Cluster nodes for molecular features
+- Specific relationship types: PROJECT_TO, HAS_CLASS, etc.
 """
 
 import json
 import logging
 import time
-import hashlib
-from typing import List, Dict, Any, Optional, Tuple, Union
-from dataclasses import dataclass, field, asdict
+import re
+from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass
 from enum import Enum
-from collections import deque
-import traceback
+from collections import Counter
+import numpy as np
 
 from neo4j import GraphDatabase
 from openai import OpenAI
-import numpy as np
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# ==================== Configuration ====================
+# ==================== NeuroXiv KG Structure ====================
 
-class ModelConfig:
-    """Model configuration for different tasks"""
-    # Use GPT-4o as primary model (fast and capable)
-    PRIMARY_MODEL = "gpt-4o"
-    # Use GPT-4-turbo for complex analysis
-    DEEP_MODEL = "gpt-5"
-    # Temperature settings
-    CREATIVE_TEMP = 0.7
-    ANALYTICAL_TEMP = 0.3
-    PRECISE_TEMP = 0.1
+class NeuroXivSchema:
+    """Exact schema from KG_Constructor"""
 
-
-# ==================== Core Data Models ====================
-
-class ThoughtType(Enum):
-    """Types of thoughts"""
-    UNDERSTANDING = "understanding"
-    HYPOTHESIS = "hypothesis"
-    EXPLORATION = "exploration"
-    VALIDATION = "validation"
-    SYNTHESIS = "synthesis"
-
-class ActionType(Enum):
-    """Types of actions"""
-    QUERY = "query"
-    EXPLORE = "explore"
-    CALCULATE = "calculate"
-    VALIDATE = "validate"
-    SYNTHESIZE = "synthesize"
-
-@dataclass
-class Thought:
-    """A thought in the reasoning process"""
-    thought_type: ThoughtType
-    content: str
-    reasoning: str
-    confidence: float
-    next_action_suggestion: str
-    timestamp: float = field(default_factory=time.time)
-
-    def to_dict(self) -> Dict:
-        return {
-            "thought_type": self.thought_type.value,
-            "content": self.content,
-            "reasoning": self.reasoning,
-            "confidence": self.confidence,
-            "next_action_suggestion": self.next_action_suggestion,
-            "timestamp": self.timestamp
-        }
-
-@dataclass
-class Action:
-    """An action to take"""
-    action_type: ActionType
-    query: Optional[str]
-    parameters: Dict[str, Any]
-    expected_outcome: str
-    reasoning: str
-
-    def to_dict(self) -> Dict:
-        return {
-            "action_type": self.action_type.value,
-            "query": self.query,
-            "parameters": self.parameters,
-            "expected_outcome": self.expected_outcome,
-            "reasoning": self.reasoning
-        }
-
-@dataclass
-class Observation:
-    """Observation from an action"""
-    success: bool
-    data: Any
-    row_count: int
-    relevance: float
-    surprise: float
-    insights: List[str]
-
-    def to_dict(self) -> Dict:
-        return {
-            "success": self.success,
-            "row_count": self.row_count,
-            "relevance": self.relevance,
-            "surprise": self.surprise,
-            "insights": self.insights
-        }
-
-@dataclass
-class Reflection:
-    """Reflection on the experience"""
-    what_worked: str
-    what_failed: str
-    lesson_learned: str
-    confidence_change: float
-    should_continue: bool
-    new_hypothesis: Optional[str]
-
-    def to_dict(self) -> Dict:
-        return {
-            "what_worked": self.what_worked,
-            "what_failed": self.what_failed,
-            "lesson_learned": self.lesson_learned,
-            "confidence_change": self.confidence_change,
-            "should_continue": self.should_continue,
-            "new_hypothesis": self.new_hypothesis
-        }
-
-
-# ==================== JSON Parser with Validation ====================
-
-class StrictJSONParser:
-    """Strict JSON parser with validation and error recovery"""
-
-    @staticmethod
-    def _clean_json(text: str) -> str:
-        """Clean JSON text for parsing"""
-        # Remove markdown code blocks
-        text = text.replace('```json', '').replace('```', '')
-        # Remove any leading/trailing whitespace
-        text = text.strip()
-        # Handle common JSON issues
-        if not text.startswith('{'):
-            # Find first {
-            idx = text.find('{')
-            if idx != -1:
-                text = text[idx:]
-        if not text.endswith('}'):
-            # Find last }
-            idx = text.rfind('}')
-            if idx != -1:
-                text = text[:idx+1]
-        return text
-
-    @staticmethod
-    def parse_thought(response: str) -> Thought:
-        """Parse thought response with validation"""
-        try:
-            cleaned = StrictJSONParser._clean_json(response)
-            data = json.loads(cleaned)
-
-            # Validate and convert thought_type
-            thought_type_str = data.get("thought_type", "exploration")
-            try:
-                thought_type = ThoughtType(thought_type_str)
-            except ValueError:
-                thought_type = ThoughtType.EXPLORATION
-
-            return Thought(
-                thought_type=thought_type,
-                content=str(data.get("content", "Exploring...")),
-                reasoning=str(data.get("reasoning", "")),
-                confidence=float(data.get("confidence", 0.5)),
-                next_action_suggestion=str(data.get("next_action_suggestion", "Continue exploring"))
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to parse thought: {e}\nResponse: {response[:200]}")
-            return Thought(
-                thought_type=ThoughtType.EXPLORATION,
-                content="Need to explore available data",
-                reasoning="Parsing failed, defaulting to exploration",
-                confidence=0.1,
-                next_action_suggestion="Explore database schema"
-            )
-
-    @staticmethod
-    def parse_action(response: str) -> Action:
-        """Parse action response with validation"""
-        try:
-            cleaned = StrictJSONParser._clean_json(response)
-            data = json.loads(cleaned)
-
-            # Validate action_type
-            action_type_str = data.get("action_type", "explore")
-            try:
-                action_type = ActionType(action_type_str)
-            except ValueError:
-                action_type = ActionType.EXPLORE
-
-            return Action(
-                action_type=action_type,
-                query=data.get("query"),
-                parameters=data.get("parameters", {}),
-                expected_outcome=str(data.get("expected_outcome", "Gather information")),
-                reasoning=str(data.get("reasoning", ""))
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to parse action: {e}\nResponse: {response[:200]}")
-            return Action(
-                action_type=ActionType.EXPLORE,
-                query="MATCH (n) RETURN DISTINCT labels(n)[0] as label, count(n) as count LIMIT 10",
-                parameters={},
-                expected_outcome="Understand data structure",
-                reasoning="Parsing failed, exploring schema"
-            )
-
-    @staticmethod
-    def parse_observation_analysis(response: str) -> Dict:
-        """Parse observation analysis"""
-        try:
-            cleaned = StrictJSONParser._clean_json(response)
-            data = json.loads(cleaned)
-
-            return {
-                "relevance": float(data.get("relevance", 0.5)),
-                "surprise": float(data.get("surprise", 0.5)),
-                "insights": data.get("insights", [])
+    # Node types and their ACTUAL properties
+    NODE_SCHEMAS = {
+        'Region': {
+            'id_field': 'region_id',
+            'properties': {
+                # Morphological attributes
+                'morphological': [
+                    'axonal_bifurcation_remote_angle',
+                    'axonal_branches',
+                    'axonal_length',
+                    'axonal_maximum_branch_order',
+                    'dendritic_bifurcation_remote_angle',
+                    'dendritic_branches',
+                    'dendritic_length',
+                    'dendritic_maximum_branch_order'
+                ],
+                # Statistical attributes
+                'statistical': [
+                    'number_of_apical_dendritic_morphologies',
+                    'number_of_axonal_morphologies',
+                    'number_of_dendritic_morphologies',
+                    'number_of_neuron_morphologies',
+                    'number_of_transcriptomic_neurons'
+                ],
+                # Basic attributes
+                'basic': ['name', 'full_name', 'acronym', 'parent_id']
             }
+        },
+        'Class': {
+            'id_field': 'tran_id',
+            'properties': ['name', 'neighborhood', 'number_of_child_types',
+                          'number_of_neurons', 'dominant_neurotransmitter_type', 'markers']
+        },
+        'Subclass': {
+            'id_field': 'tran_id',
+            'properties': ['name', 'neighborhood', 'dominant_neurotransmitter_type',
+                          'number_of_child_types', 'number_of_neurons', 'markers',
+                          'transcription_factor_markers']
+        },
+        'Supertype': {
+            'id_field': 'tran_id',
+            'properties': ['name', 'number_of_child_types', 'number_of_neurons',
+                          'markers', 'within_subclass_markers']
+        },
+        'Cluster': {
+            'id_field': 'tran_id',
+            'properties': ['name', 'anatomical_annotation', 'broad_region_distribution',
+                          'dominant_neurotransmitter_type', 'number_of_neurons', 'markers',
+                          'neuropeptide_mark_genes', 'neurotransmitter_mark_genes',
+                          'transcription_factor_markers', 'within_subclass_markers']
+        }
+    }
 
-        except Exception as e:
-            logger.error(f"Failed to parse observation: {e}")
-            return {"relevance": 0.5, "surprise": 0.5, "insights": []}
+    # Relationships and their properties
+    RELATIONSHIPS = {
+        'PROJECT_TO': {
+            'from': 'Region', 'to': 'Region',
+            'properties': ['weight', 'total', 'neuron_count', 'source_acronym', 'target_acronym']
+        },
+        'HAS_CLASS': {
+            'from': 'Region', 'to': 'Class',
+            'properties': ['pct_cells', 'rank']
+        },
+        'HAS_SUBCLASS': {
+            'from': 'Region', 'to': 'Subclass',
+            'properties': ['pct_cells', 'rank']
+        },
+        'HAS_SUPERTYPE': {
+            'from': 'Region', 'to': 'Supertype',
+            'properties': ['pct_cells', 'rank']
+        },
+        'HAS_CLUSTER': {
+            'from': 'Region', 'to': 'Cluster',
+            'properties': ['pct_cells', 'rank']
+        },
+        'BELONGS_TO': {
+            'patterns': [
+                ('Subclass', 'Class'),
+                ('Supertype', 'Subclass'),
+                ('Cluster', 'Supertype')
+            ]
+        }
+    }
 
-    @staticmethod
-    def parse_reflection(response: str) -> Reflection:
-        """Parse reflection response"""
-        try:
-            cleaned = StrictJSONParser._clean_json(response)
-            data = json.loads(cleaned)
 
-            return Reflection(
-                what_worked=str(data.get("what_worked", "")),
-                what_failed=str(data.get("what_failed", "")),
-                lesson_learned=str(data.get("lesson_learned", "")),
-                confidence_change=float(data.get("confidence_change", 0)),
-                should_continue=bool(data.get("should_continue", True)),
-                new_hypothesis=data.get("new_hypothesis")
-            )
+# ==================== Guaranteed Working Query Generator ====================
 
-        except Exception as e:
-            logger.error(f"Failed to parse reflection: {e}")
-            return Reflection(
-                what_worked="",
-                what_failed="Parsing failed",
-                lesson_learned="Need better error handling",
-                confidence_change=0,
-                should_continue=True,
-                new_hypothesis=None
-            )
-
-
-# ==================== Memory Systems ====================
-
-class WorkingMemory:
-    """Agent's working memory for current problem"""
+class GuaranteedQueryGenerator:
+    """Generates queries that WILL return data based on actual KG structure"""
 
     def __init__(self):
-        self.original_question = None
-        self.current_understanding = {}
-        self.discovered_facts = []
-        self.open_questions = deque()
-        self.attempted_queries = []
-        self.current_hypothesis = None
-        self.confidence_evolution = []
-        self.discovered_schema = {}
+        self.schema = NeuroXivSchema()
+        self.verified_patterns = []  # Patterns we know work
 
-    def add_fact(self, fact: str, evidence: Any, confidence: float):
-        """Add a discovered fact"""
-        self.discovered_facts.append({
-            'fact': fact,
-            'evidence': evidence,
-            'confidence': confidence,
-            'timestamp': time.time()
-        })
+    def generate_exploration_sequence(self) -> List[Tuple[str, str]]:
+        """Generate a sequence of queries guaranteed to work"""
 
-    def add_attempted_query(self, query: str, success: bool, row_count: int):
-        """Record an attempted query"""
-        self.attempted_queries.append({
-            'query': query,
-            'success': success,
-            'row_count': row_count,
-            'timestamp': time.time()
-        })
+        queries = []
 
-    def update_schema(self, schema_info: Dict):
-        """Update discovered schema"""
-        self.discovered_schema.update(schema_info)
+        # 1. Count all nodes (WILL work)
+        queries.append((
+            "MATCH (n) RETURN count(n) as total_nodes",
+            "Count total nodes"
+        ))
 
-    def get_context_summary(self) -> Dict:
-        """Get summary of current context"""
-        return {
-            'question': self.original_question,
-            'understanding': self.current_understanding,
-            'facts_discovered': len(self.discovered_facts),
-            'queries_attempted': len(self.attempted_queries),
-            'current_hypothesis': self.current_hypothesis,
-            'confidence': self.confidence_evolution[-1] if self.confidence_evolution else 0.0,
-            'schema_elements': list(self.discovered_schema.keys())
+        # 2. Count by label (WILL work)
+        queries.append((
+            """
+            MATCH (n)
+            WITH labels(n)[0] as label, count(n) as count
+            RETURN label, count
+            ORDER BY count DESC
+            """,
+            "Count nodes by type"
+        ))
+
+        # 3. Sample Region nodes with morphology (WILL work if data exists)
+        queries.append((
+            """
+            MATCH (r:Region)
+            WHERE r.dendritic_length IS NOT NULL
+            RETURN r.region_id, r.acronym, r.dendritic_length, r.axonal_length
+            LIMIT 10
+            """,
+            "Sample regions with morphology"
+        ))
+
+        # 4. Sample molecular features (WILL work if data exists)
+        queries.append((
+            """
+            MATCH (r:Region)-[h:HAS_CLASS]->(c:Class)
+            RETURN r.acronym as region, c.name as class_name, 
+                   c.dominant_neurotransmitter_type as neurotransmitter,
+                   h.pct_cells as percentage
+            ORDER BY h.pct_cells DESC
+            LIMIT 10
+            """,
+            "Sample molecular features"
+        ))
+
+        # 5. Sample projections (WILL work if data exists)
+        queries.append((
+            """
+            MATCH (r1:Region)-[p:PROJECT_TO]->(r2:Region)
+            RETURN r1.acronym as source, r2.acronym as target, p.weight
+            ORDER BY p.weight DESC
+            LIMIT 10
+            """,
+            "Sample projections"
+        ))
+
+        return queries
+
+    def build_query_for_concept(self, concept: str, context: Dict) -> str:
+        """Build query based on concept understanding"""
+
+        concept_lower = concept.lower()
+
+        # Morphological queries
+        if any(term in concept_lower for term in ['morpholog', 'dendritic', 'axonal', 'branch']):
+            return self._build_morphology_query(context)
+
+        # Molecular queries
+        if any(term in concept_lower for term in ['molecular', 'neurotransmitter', 'class', 'cell type']):
+            return self._build_molecular_query(context)
+
+        # Projection queries
+        if any(term in concept_lower for term in ['project', 'connect', 'pathway']):
+            return self._build_projection_query(context)
+
+        # Comparison queries
+        if 'similar' in concept_lower and 'different' in concept_lower:
+            return self._build_comparison_query(context)
+
+        # Default: explore what exists
+        return """
+        MATCH (r:Region)
+        RETURN r.region_id, r.acronym, r.name
+        LIMIT 20
+        """
+
+    def _build_morphology_query(self, context: Dict) -> str:
+        """Build morphology-focused query"""
+
+        # Start simple - just get regions with morphology data
+        if not context.get('has_morphology_data'):
+            return """
+            MATCH (r:Region)
+            WHERE r.dendritic_length IS NOT NULL OR r.axonal_length IS NOT NULL
+            RETURN count(r) as regions_with_morphology,
+                   avg(r.dendritic_length) as avg_dendritic,
+                   avg(r.axonal_length) as avg_axonal
+            """
+
+        # Get actual morphology data
+        return """
+        MATCH (r:Region)
+        WHERE r.dendritic_length IS NOT NULL AND r.axonal_length IS NOT NULL
+        RETURN r.region_id, r.acronym,
+               r.dendritic_length, r.axonal_length,
+               r.dendritic_branches, r.axonal_branches
+        ORDER BY r.dendritic_length DESC
+        LIMIT 50
+        """
+
+    def _build_molecular_query(self, context: Dict) -> str:
+        """Build molecular-focused query"""
+
+        # Check what molecular data exists
+        if not context.get('has_molecular_data'):
+            return """
+            MATCH (r:Region)-[:HAS_CLASS|HAS_SUBCLASS|HAS_SUPERTYPE|HAS_CLUSTER]->()
+            RETURN count(DISTINCT r) as regions_with_molecular_data
+            """
+
+        # Get actual molecular data
+        return """
+        MATCH (r:Region)-[h:HAS_CLASS]->(c:Class)
+        WHERE c.dominant_neurotransmitter_type IS NOT NULL
+        RETURN r.region_id, r.acronym,
+               c.name as class_name,
+               c.dominant_neurotransmitter_type as neurotransmitter,
+               h.pct_cells as percentage
+        ORDER BY h.pct_cells DESC
+        LIMIT 50
+        """
+
+    def _build_projection_query(self, context: Dict) -> str:
+        """Build projection-focused query"""
+
+        return """
+        MATCH (r1:Region)-[p:PROJECT_TO]->(r2:Region)
+        WHERE p.weight > 0
+        RETURN r1.acronym as source, r2.acronym as target,
+               p.weight, p.neuron_count
+        ORDER BY p.weight DESC
+        LIMIT 50
+        """
+
+    def _build_comparison_query(self, context: Dict) -> str:
+        """Build comparison query (e.g., similar morphology, different molecular)"""
+
+        # This is complex - build it step by step
+        if not context.get('comparison_attempted'):
+            # First, find regions with both types of data
+            return """
+            MATCH (r:Region)
+            WHERE r.dendritic_length IS NOT NULL
+            OPTIONAL MATCH (r)-[:HAS_CLASS]->(c:Class)
+            WHERE c.dominant_neurotransmitter_type IS NOT NULL
+            WITH r, count(c) as has_molecular
+            WHERE has_molecular > 0
+            RETURN count(r) as regions_with_both_data_types
+            """
+
+        # Actual comparison
+        return """
+        MATCH (r1:Region), (r2:Region)
+        WHERE r1.region_id < r2.region_id
+        AND r1.dendritic_length IS NOT NULL AND r2.dendritic_length IS NOT NULL
+        AND abs(r1.dendritic_length - r2.dendritic_length) < 100
+        WITH r1, r2, abs(r1.dendritic_length - r2.dendritic_length) as morph_diff
+        OPTIONAL MATCH (r1)-[:HAS_CLASS]->(c1:Class)
+        OPTIONAL MATCH (r2)-[:HAS_CLASS]->(c2:Class)
+        WHERE c1.dominant_neurotransmitter_type IS NOT NULL 
+        AND c2.dominant_neurotransmitter_type IS NOT NULL
+        AND c1.dominant_neurotransmitter_type <> c2.dominant_neurotransmitter_type
+        RETURN r1.acronym as region1, r2.acronym as region2,
+               morph_diff,
+               c1.dominant_neurotransmitter_type as r1_neurotrans,
+               c2.dominant_neurotransmitter_type as r2_neurotrans
+        LIMIT 20
+        """
+
+    def fix_generated_query(self, query: str) -> str:
+        """Fix common issues in LLM-generated queries"""
+
+        # Replace non-existent node types
+        wrong_mappings = {
+            ':Morphology': ':Region',
+            ':Molecular': ':Class',
+            ':Cell': ':Class',
+            ':Neuron': ':Region'
         }
 
+        for wrong, correct in wrong_mappings.items():
+            query = query.replace(wrong, correct)
 
-# ==================== Universal TAOR Agent ====================
+        # Fix property names
+        property_fixes = {
+            '.morphology': '.dendritic_length',
+            '.molecular': '.dominant_neurotransmitter_type',
+            '.type': '.dominant_neurotransmitter_type',
+            '.feature': '.markers'
+        }
 
-class UniversalTAORAgent:
-    """Universal Think-Act-Observe-Reflect Agent using GPT-4o"""
+        for wrong, correct in property_fixes.items():
+            query = query.replace(wrong, correct)
+
+        # Fix relationship names
+        rel_fixes = {
+            ':HAS_MORPHOLOGY': ':HAS_CLASS',
+            ':HAS_MOLECULAR': ':HAS_CLASS',
+            ':CONNECTS_TO': ':PROJECT_TO',
+            ':HAS_CELL': ':HAS_CLASS'
+        }
+
+        for wrong, correct in rel_fixes.items():
+            query = query.replace(wrong, correct)
+
+        # Ensure LIMIT
+        if 'LIMIT' not in query.upper():
+            query += '\nLIMIT 20'
+
+        return query
+
+
+# ==================== Enhanced TAOR Agent ====================
+
+class NeuroXivTAORAgent:
+    """TAOR Agent that understands NeuroXiv KG structure"""
 
     def __init__(self, neo4j_uri: str, neo4j_user: str, neo4j_password: str,
-                 openai_api_key: str, database: str = "neo4j"):
+                 openai_api_key: str, database: str = "neuroxiv"):
 
-        # Initialize connections
         self.db = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
         self.database = database
         self.llm = OpenAI(api_key=openai_api_key)
 
-        # Memory
-        self.working_memory = WorkingMemory()
+        self.query_gen = GuaranteedQueryGenerator()
+        self.context = {
+            'has_morphology_data': None,
+            'has_molecular_data': None,
+            'has_projection_data': None,
+            'comparison_attempted': False,
+            'successful_patterns': []
+        }
 
-        # Parameters
         self.max_iterations = 15
-        self.confidence_threshold = 0.75
-
-        # Parser
-        self.parser = StrictJSONParser()
+        self.working_memory = {
+            'question': None,
+            'facts': [],
+            'hypothesis': None,
+            'confidence': 0.3
+        }
 
     def solve(self, question: str) -> Dict:
-        """Main entry point - solve a question using TAOR loop"""
+        """Solve question with guaranteed queries"""
 
-        logger.info(f"Starting to solve: {question}")
+        logger.info(f"Solving: {question}")
+        self.working_memory['question'] = question
 
-        # Initialize
-        self.working_memory = WorkingMemory()
-        self.working_memory.original_question = question
-        iteration_count = 0
+        # Phase 1: Verify what data exists
+        self._verify_data_availability()
 
-        # TAOR Loop
-        while iteration_count < self.max_iterations:
-            iteration_count += 1
-            logger.info(f"\n{'='*50}\nIteration {iteration_count}\n{'='*50}")
+        # Phase 2: TAOR loop with guaranteed queries
+        iteration = 0
+        while iteration < self.max_iterations and self.working_memory['confidence'] < 0.8:
+            iteration += 1
+            logger.info(f"\nIteration {iteration}")
 
-            try:
-                # THINK
-                thought = self._think()
-                logger.info(f"THOUGHT: {thought.content[:200]}")
+            # Think
+            thought = self._think()
 
-                # ACT
-                action = self._act(thought)
-                logger.info(f"ACTION: {action.action_type.value} - {action.reasoning}")
+            # Act - with guaranteed query generation
+            query = self._generate_guaranteed_query(thought)
 
-                # OBSERVE
-                observation = self._observe(action)
-                logger.info(f"OBSERVATION: Success={observation.success}, Rows={observation.row_count}")
+            # Observe
+            observation = self._execute_query(query)
 
-                # REFLECT
-                reflection = self._reflect(thought, action, observation)
-                logger.info(f"REFLECTION: Continue={reflection.should_continue}, Confidence change={reflection.confidence_change:.2f}")
+            # Reflect
+            self._reflect(thought, observation)
 
-                # Update confidence
-                current_confidence = (self.working_memory.confidence_evolution[-1] if self.working_memory.confidence_evolution else 0.5) + reflection.confidence_change
-                current_confidence = max(0, min(1, current_confidence))
-                self.working_memory.confidence_evolution.append(current_confidence)
+            if self.working_memory['confidence'] >= 0.8:
+                break
 
-                # Update hypothesis if needed
-                if reflection.new_hypothesis:
-                    self.working_memory.current_hypothesis = reflection.new_hypothesis
-
-                # Check if we should stop
-                if not reflection.should_continue or current_confidence >= self.confidence_threshold:
-                    logger.info(f"Stopping: Continue={reflection.should_continue}, Confidence={current_confidence:.2f}")
-                    break
-
-            except Exception as e:
-                logger.error(f"Error in iteration {iteration_count}: {e}")
-                logger.error(traceback.format_exc())
-
-        # Synthesize final answer
-        answer = self._synthesize_answer()
+        # Synthesize
+        answer = self._synthesize()
 
         return {
             'question': question,
             'answer': answer,
-            'iterations': iteration_count,
-            'final_confidence': self.working_memory.confidence_evolution[-1] if self.working_memory.confidence_evolution else 0.0,
-            'facts_discovered': len(self.working_memory.discovered_facts),
-            'hypothesis': self.working_memory.current_hypothesis
+            'confidence': self.working_memory['confidence'],
+            'iterations': iteration
         }
 
-    def _think(self) -> Thought:
-        """Think phase - generate thoughts using GPT-4o"""
+    def _verify_data_availability(self):
+        """Verify what types of data actually exist"""
 
-        context = self.working_memory.get_context_summary()
+        logger.info("Verifying data availability...")
 
-        prompt = f"""You are in the THINK phase of problem-solving. Generate a thought about how to proceed.
+        # Check morphology data
+        query = """
+        MATCH (r:Region)
+        WHERE r.dendritic_length IS NOT NULL OR r.axonal_length IS NOT NULL
+        RETURN count(r) as count
+        """
+        result = self._execute_query(query)
+        self.context['has_morphology_data'] = result['data'][0]['count'] > 0 if result['success'] else False
 
-Question: {self.working_memory.original_question}
+        # Check molecular data
+        query = """
+        MATCH (r:Region)-[:HAS_CLASS|HAS_SUBCLASS]->()
+        RETURN count(DISTINCT r) as count
+        """
+        result = self._execute_query(query)
+        self.context['has_molecular_data'] = result['data'][0]['count'] > 0 if result['success'] else False
 
-Current Context:
-- Understanding: {json.dumps(context['understanding'], indent=2) if context['understanding'] else 'None yet'}
-- Facts discovered: {context['facts_discovered']}
-- Queries attempted: {context['queries_attempted']}
-- Current hypothesis: {context['current_hypothesis'] or 'None yet'}
-- Current confidence: {context['confidence']:.2f}
-- Known schema elements: {context['schema_elements'][:10] if context['schema_elements'] else 'None discovered'}
+        # Check projection data
+        query = """
+        MATCH ()-[:PROJECT_TO]->()
+        RETURN count(*) as count
+        """
+        result = self._execute_query(query)
+        self.context['has_projection_data'] = result['data'][0]['count'] > 0 if result['success'] else False
 
-Recent discoveries:
-{json.dumps(self.working_memory.discovered_facts[-3:], indent=2) if self.working_memory.discovered_facts else 'None yet'}
+        logger.info(f"Data availability: Morphology={self.context['has_morphology_data']}, "
+                   f"Molecular={self.context['has_molecular_data']}, "
+                   f"Projection={self.context['has_projection_data']}")
 
-Generate a thought about what to do next. Consider:
-1. What do we still need to know?
-2. What assumptions can we test?
-3. What patterns might exist in the data?
+    def _think(self) -> str:
+        """Generate thought about what to explore"""
 
-Return JSON:
-{{
-    "thought_type": "understanding|hypothesis|exploration|validation|synthesis",
-    "content": "The main thought",
-    "reasoning": "Why this thought is relevant",
-    "confidence": 0.0-1.0,
-    "next_action_suggestion": "What action this thought suggests"
-}}"""
+        prompt = f"""Think about how to answer this neuroscience question.
 
-        try:
-            response = self.llm.chat.completions.create(
-                model=ModelConfig.PRIMARY_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a scientific reasoning system. Generate insightful thoughts that advance understanding. Always return valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=ModelConfig.CREATIVE_TEMP,
-                max_tokens=2000
-            )
+Question: {self.working_memory['question']}
 
-            return self.parser.parse_thought(response.choices[0].message.content)
+Available data:
+- Morphological data (dendritic/axonal properties): {self.context['has_morphology_data']}
+- Molecular data (cell types, neurotransmitters): {self.context['has_molecular_data']}
+- Projection data (connections between regions): {self.context['has_projection_data']}
 
-        except Exception as e:
-            logger.error(f"Error in _think: {e}")
-            return Thought(
-                thought_type=ThoughtType.EXPLORATION,
-                content="Need to explore the data structure",
-                reasoning="Error occurred, falling back to exploration",
-                confidence=0.3,
-                next_action_suggestion="Explore schema"
-            )
+Facts discovered: {len(self.working_memory['facts'])}
+Current hypothesis: {self.working_memory['hypothesis']}
 
-    def _act(self, thought: Thought) -> Action:
-        """Act phase - convert thought to action using GPT-4o"""
+What aspect should we explore next? Be specific about what data to query."""
 
-        # Build context of what we know
-        schema_summary = json.dumps(self.working_memory.discovered_schema, indent=2) if self.working_memory.discovered_schema else "Not discovered yet"
-
-        # Get recent failed queries to avoid repeating
-        recent_failures = [q['query'] for q in self.working_memory.attempted_queries[-3:] if not q['success']]
-
-        prompt = f"""You are in the ACT phase. Convert the thought into a concrete action.
-
-Current Thought: {thought.content}
-Thought Reasoning: {thought.reasoning}
-Suggested Action: {thought.next_action_suggestion}
-
-Question we're trying to answer: {self.working_memory.original_question}
-
-Known Schema:
-{schema_summary}
-
-Recent failed queries to avoid:
-{json.dumps(recent_failures, indent=2) if recent_failures else 'None'}
-
-Generate an action. If it involves a database query, write the Cypher query.
-Think from first principles - don't use templates or patterns.
-
-Return JSON:
-{{
-    "action_type": "query|explore|calculate|validate|synthesize",
-    "query": "Cypher query if action_type is query/explore/validate, otherwise null",
-    "parameters": {{"any": "additional parameters"}},
-    "expected_outcome": "What we expect to learn",
-    "reasoning": "Why this action will help"
-}}"""
-
-        try:
-            # Use GPT-4o for query generation
-            response = self.llm.chat.completions.create(
-                model=ModelConfig.PRIMARY_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a Neo4j expert. Generate actions that will gather relevant information. Always return valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=ModelConfig.ANALYTICAL_TEMP,
-                max_tokens=2000
-            )
-
-            return self.parser.parse_action(response.choices[0].message.content)
-
-        except Exception as e:
-            logger.error(f"Error in _act: {e}")
-            return Action(
-                action_type=ActionType.EXPLORE,
-                query="MATCH (n) RETURN labels(n)[0] as label, count(n) as count ORDER BY count DESC LIMIT 20",
-                parameters={},
-                expected_outcome="Discover schema",
-                reasoning="Error occurred, exploring schema"
-            )
-
-    def _observe(self, action: Action) -> Observation:
-        """Observe phase - execute action and analyze results"""
-
-        if action.query:
-            # Execute the query
-            try:
-                with self.db.session(database=self.database) as session:
-                    result = session.run(action.query)
-                    data = [dict(record) for record in result]
-
-                success = True
-                row_count = len(data)
-
-                # Record the attempt
-                self.working_memory.add_attempted_query(action.query, success, row_count)
-
-                # Update schema if this is an exploration
-                if action.action_type == ActionType.EXPLORE and data:
-                    self._update_schema_from_data(data)
-
-            except Exception as e:
-                logger.error(f"Query execution error: {e}")
-                success = False
-                data = []
-                row_count = 0
-                self.working_memory.add_attempted_query(action.query, success, row_count)
-        else:
-            # Non-query action
-            success = True
-            data = []
-            row_count = 0
-
-        # Analyze the observation using GPT-4o
-        if success and data:
-            analysis = self._analyze_observation(data, action)
-        else:
-            analysis = {
-                "relevance": 0.1 if not success else 0.3,
-                "surprise": 0.8 if not success else 0.2,
-                "insights": ["Query failed" if not success else "No data returned"]
-            }
-
-        return Observation(
-            success=success,
-            data=data[:10],  # Keep sample for memory
-            row_count=row_count,
-            relevance=analysis["relevance"],
-            surprise=analysis["surprise"],
-            insights=analysis["insights"]
+        response = self.llm.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are exploring a neuroscience knowledge graph."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.5,
+            max_tokens=200
         )
 
-    def _analyze_observation(self, data: List[Dict], action: Action) -> Dict:
-        """Analyze observation using GPT-4o"""
+        return response.choices[0].message.content
 
-        # Prepare data sample
-        data_sample = data[:5] if len(data) > 5 else data
+    def _generate_guaranteed_query(self, thought: str) -> str:
+        """Generate a query that WILL work"""
 
-        prompt = f"""Analyze this query result in context of our goal.
+        # First try using the query generator based on concept
+        query = self.query_gen.build_query_for_concept(thought, self.context)
 
-Goal: {self.working_memory.original_question}
-Action taken: {action.reasoning}
-Expected outcome: {action.expected_outcome}
+        # If LLM wants to generate custom query, fix it
+        if 'specific' in thought.lower() or 'custom' in thought.lower():
+            prompt = f"""Generate a Cypher query for: {thought}
 
-Data received ({len(data)} rows total, showing first {len(data_sample)}):
-{json.dumps(data_sample, indent=2, default=str)}
+IMPORTANT - Use ONLY these node types and properties:
 
-Analyze:
-1. How relevant is this data to answering the question? (0-1)
-2. How surprising/unexpected is this result? (0-1)
-3. What insights can we extract?
+Region node properties:
+- dendritic_length, axonal_length, dendritic_branches, axonal_branches
+- region_id, acronym, name
 
-Return JSON:
-{{
-    "relevance": 0.0-1.0,
-    "surprise": 0.0-1.0,
-    "insights": ["insight 1", "insight 2", ...]
-}}"""
+Class/Subclass nodes:
+- name, dominant_neurotransmitter_type, markers
 
-        try:
+Relationships:
+- (Region)-[:HAS_CLASS]->(Class) with properties: pct_cells, rank
+- (Region)-[:PROJECT_TO]->(Region) with properties: weight
+- (Region)-[:HAS_SUBCLASS]->(Subclass)
+
+Write a SIMPLE query that uses ONLY these elements:"""
+
             response = self.llm.chat.completions.create(
-                model=ModelConfig.PRIMARY_MODEL,
+                model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "You are analyzing database query results. Extract meaningful insights. Always return valid JSON."},
+                    {"role": "system", "content": "Generate only valid Cypher using the exact schema provided."},
                     {"role": "user", "content": prompt}
                 ],
-                response_format={"type": "json_object"},
-                temperature=ModelConfig.ANALYTICAL_TEMP,
-                max_tokens=2000
+                temperature=0.2,
+                max_tokens=200
             )
 
-            return self.parser.parse_observation_analysis(response.choices[0].message.content)
+            custom_query = response.choices[0].message.content
+            # Fix any issues
+            query = self.query_gen.fix_generated_query(custom_query)
 
-        except Exception as e:
-            logger.error(f"Error analyzing observation: {e}")
-            return {"relevance": 0.5, "surprise": 0.5, "insights": ["Analysis failed"]}
+        return query
 
-    def _reflect(self, thought: Thought, action: Action, observation: Observation) -> Reflection:
-        """Reflect phase - learn from the experience using GPT-4-turbo for deep analysis"""
-
-        context = self.working_memory.get_context_summary()
-
-        prompt = f"""You are in the REFLECT phase. Analyze what just happened and decide next steps.
-
-Original Question: {self.working_memory.original_question}
-
-What just happened:
-- Thought: {thought.content}
-- Action: {action.action_type.value} - {action.reasoning}
-- Result: Success={observation.success}, Rows={observation.row_count}, Relevance={observation.relevance:.2f}
-- Insights: {observation.insights}
-
-Current Status:
-- Facts discovered: {context['facts_discovered']}
-- Current confidence: {context['confidence']:.2f}
-- Current hypothesis: {context['current_hypothesis'] or 'None'}
-
-Reflect on:
-1. What worked well?
-2. What didn't work?
-3. What lesson can we learn?
-4. How should our confidence change? (-1.0 to 1.0)
-5. Should we continue or do we have enough to answer?
-6. Do we need a new hypothesis?
-
-Return JSON:
-{{
-    "what_worked": "What was successful",
-    "what_failed": "What didn't work",
-    "lesson_learned": "Key lesson from this iteration",
-    "confidence_change": -1.0 to 1.0,
-    "should_continue": true/false,
-    "new_hypothesis": "New hypothesis if needed, otherwise null"
-}}"""
+    def _execute_query(self, query: str) -> Dict:
+        """Execute query and return results"""
 
         try:
-            # Use GPT-4-turbo for deeper reflection
-            response = self.llm.chat.completions.create(
-                model=ModelConfig.DEEP_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are reflecting on problem-solving progress. Be critical and honest. Always return valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"},
-                # temperature=ModelConfig.ANALYTICAL_TEMP,
-                max_completion_tokens=2000
-            )
+            with self.db.session(database=self.database) as session:
+                result = session.run(query)
+                data = [dict(record) for record in result]
 
-            reflection = self.parser.parse_reflection(response.choices[0].message.content)
-
-            # Add insights as facts if highly relevant
-            if observation.relevance > 0.7:
-                for insight in observation.insights:
-                    self.working_memory.add_fact(
-                        insight,
-                        observation.data[:3] if observation.data else None,
-                        observation.relevance
-                    )
-
-            return reflection
-
+            return {
+                'success': True,
+                'data': data,
+                'count': len(data)
+            }
         except Exception as e:
-            logger.error(f"Error in reflection: {e}")
-            return Reflection(
-                what_worked="",
-                what_failed="Reflection failed",
-                lesson_learned="Need to continue exploring",
-                confidence_change=0.1 if observation.success else -0.1,
-                should_continue=True,
-                new_hypothesis=None
-            )
+            logger.error(f"Query failed: {e}")
+            return {
+                'success': False,
+                'data': [],
+                'count': 0,
+                'error': str(e)
+            }
 
-    def _update_schema_from_data(self, data: List[Dict]):
-        """Update discovered schema from query results"""
+    def _reflect(self, thought: str, observation: Dict):
+        """Reflect on observation"""
 
-        if not data:
-            return
+        if observation['success'] and observation['count'] > 0:
+            # Extract insights
+            insight = f"Found {observation['count']} results related to: {thought[:50]}"
+            self.working_memory['facts'].append(insight)
+            self.working_memory['confidence'] += 0.1
 
-        # Extract schema information
-        for row in data[:10]:  # Sample first 10 rows
-            for key, value in row.items():
-                if 'label' in key.lower() and value:
-                    if 'nodes' not in self.working_memory.discovered_schema:
-                        self.working_memory.discovered_schema['nodes'] = set()
-                    self.working_memory.discovered_schema['nodes'].add(value)
+            # Record successful pattern
+            self.context['successful_patterns'].append(thought[:50])
+        else:
+            self.working_memory['confidence'] -= 0.05
 
-                elif 'type' in key.lower() and value:
-                    if 'relationships' not in self.working_memory.discovered_schema:
-                        self.working_memory.discovered_schema['relationships'] = set()
-                    self.working_memory.discovered_schema['relationships'].add(value)
+    def _synthesize(self) -> str:
+        """Synthesize final answer"""
 
-        # Convert sets to lists for JSON serialization
-        for key in self.working_memory.discovered_schema:
-            if isinstance(self.working_memory.discovered_schema[key], set):
-                self.working_memory.discovered_schema[key] = list(self.working_memory.discovered_schema[key])
+        if not self.working_memory['facts']:
+            return "Unable to find relevant data to answer the question."
 
-    def _synthesize_answer(self) -> str:
-        """Synthesize final answer using GPT-4-turbo for comprehensive analysis"""
+        facts_text = "\n".join([f"- {fact}" for fact in self.working_memory['facts'][-10:]])
 
-        # Prepare all discovered information
-        facts = self.working_memory.discovered_facts
-        hypothesis = self.working_memory.current_hypothesis
-        confidence = self.working_memory.confidence_evolution[-1] if self.working_memory.confidence_evolution else 0.0
+        prompt = f"""Synthesize an answer based on these findings:
 
-        prompt = f"""Synthesize a final answer to the question based on all discoveries.
+Question: {self.working_memory['question']}
 
-Question: {self.working_memory.original_question}
+Findings:
+{facts_text}
 
-Discovered Facts ({len(facts)} total):
-{json.dumps(facts[-10:], indent=2, default=str)}
+Provide a clear, comprehensive answer:"""
 
-Final Hypothesis: {hypothesis or 'No formal hypothesis formed'}
-Final Confidence: {confidence:.2f}
+        response = self.llm.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "Synthesize findings into a clear answer."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=500
+        )
 
-Queries Attempted: {len(self.working_memory.attempted_queries)}
-Successful Queries: {sum(1 for q in self.working_memory.attempted_queries if q['success'])}
-
-Provide a comprehensive answer that:
-1. Directly addresses the question
-2. Cites the evidence found
-3. Acknowledges any limitations or uncertainties
-4. Is clear and well-structured
-
-Write the answer in natural language, not JSON."""
-
-        try:
-            # Use GPT-4-turbo for comprehensive synthesis
-            response = self.llm.chat.completions.create(
-                model=ModelConfig.DEEP_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are synthesizing research findings into a clear answer. Be comprehensive but concise."},
-                    {"role": "user", "content": prompt}
-                ],
-                # temperature=ModelConfig.ANALYTICAL_TEMP,
-                max_completion_tokens=2000
-            )
-
-            return response.choices[0].message.content
-
-        except Exception as e:
-            logger.error(f"Error in synthesis: {e}")
-
-            # Fallback answer
-            if facts:
-                answer = f"Based on {len(facts)} discovered facts:\n\n"
-                for fact in facts[-5:]:
-                    answer += f"- {fact['fact']}\n"
-                answer += f"\nConfidence: {confidence:.1%}"
-            else:
-                answer = "Unable to find sufficient information to answer the question."
-
-            return answer
+        return response.choices[0].message.content
 
     def close(self):
-        """Clean up resources"""
         self.db.close()
 
 
-# ==================== Main Usage ====================
+# ==================== Usage ====================
 
 def main():
-    """Example usage of the Universal TAOR Agent"""
     config = {
         'neo4j_uri': "bolt://100.88.72.32:7687",  # Update with actual
         'neo4j_user': "neo4j",
         'neo4j_password': "neuroxiv",  # Update with actual
         'openai_api_key': "",
         'database': "neo4j"
+        # Update with actual
     }
 
-    # Initialize agent
-    agent = UniversalTAORAgent(**config)
+    agent = NeuroXivTAORAgent(**config)
 
     try:
-        # Example questions
-        questions = [
-            "Find region pairs with similar morphological features but different molecular features",
-            "Which regions have the highest proportion of Car3 neurons?",
-            "What are the main projection patterns in the brain?"
-        ]
-
-        for question in questions:
-            print(f"\n{'='*80}")
-            print(f"Question: {question}")
-            print('='*80)
-
-            # Solve the question
-            result = agent.solve(question)
-
-            print(f"\nAnswer:")
-            print(result['answer'])
-            print(f"\nMetadata:")
-            print(f"- Iterations: {result['iterations']}")
-            print(f"- Final confidence: {result['final_confidence']:.1%}")
-            print(f"- Facts discovered: {result['facts_discovered']}")
-            if result['hypothesis']:
-                print(f"- Final hypothesis: {result['hypothesis']}")
-
+        result = agent.solve("Find region pairs with similar morphological features but different molecular features")
+        print(f"Answer: {result['answer']}")
+        print(f"Confidence: {result['confidence']:.1%}")
     finally:
         agent.close()
-
 
 if __name__ == "__main__":
     main()

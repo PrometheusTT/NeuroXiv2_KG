@@ -114,7 +114,7 @@ class LLMClient:
                 messages=messages,
                 tools=tool_schema,
                 tool_choice="auto",
-                temperature=0.2
+                # temperature=0.2
             )
             choice = resp.choices[0]
             fn_call = getattr(choice.message, "tool_calls", None) or getattr(choice.message, "function_call", None)

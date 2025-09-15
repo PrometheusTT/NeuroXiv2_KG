@@ -136,10 +136,22 @@ class RealAgentWrapper:
 
 
 # ==================== STEP 4: 导入评估系统 ====================
-from evaluation import (
-    TestCase, TestSuite, EvaluationMetrics,
-    KGAgentEvaluator, EvaluationVisualizer
-)
+USE_IMPROVED_EVALUATION = True  # 切换到改进版
+
+if USE_IMPROVED_EVALUATION:
+    from improved_evaluation import (
+        ImprovedEvaluator,
+        ImprovedEvaluationMetrics,
+        run_improved_evaluation,
+        ScientificVisualizer
+    )
+    # 使用改进版的TestCase定义
+    from evaluation import TestCase, TestSuite
+else:
+    from evaluation import (
+        TestCase, TestSuite, EvaluationMetrics,
+        KGAgentEvaluator, EvaluationVisualizer
+    )
 
 
 # ==================== STEP 5: 自定义测试用例 ====================

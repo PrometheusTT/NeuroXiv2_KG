@@ -268,45 +268,67 @@ from KG_ConstructorV3 import (
 )
 
 # ==================== 神经元数据加载器类 ====================
-class NeuronDataLoader:
-    """神经元数据加载器"""
 
-    def __init__(self, data_path: Path, region_analyzer=None):
+class NeuronDataLoader:
+    """神经元数据加载器 - 处理列表格式的连接数据和完整形态学特征"""
+
+    def __init__(self, data_path: Path, region_analyzer=None, morphology_loader=None):
         """
         初始化神经元数据加载器
 
         参数:
             data_path: 数据目录路径
             region_analyzer: 区域分析器实例
+            morphology_loader: 形态学数据加载器实例
         """
         self.data_path = data_path
         self.region_analyzer = region_analyzer
+        self.morphology_loader = morphology_loader
         self.info_df = None
         self.connections_df = None
         self.neurons_data = {}
         self.neuron_connections = {
-            'den_neighbouring': {},  # neuron_id -> list of dendrite neighbors
-            'axon_neighbouring': {}  # neuron_id -> list of axon neighbors
+            'den_neighbouring': {},  # neuron_id -> set of dendrite neighbors
+            'axon_neighbouring': {}  # neuron_id -> set of axon neighbors
         }
+
+        # 形态学数据映射
+        self.axon_morph_df = None
+        self.dendrite_morph_df = None
+
+        # 形态学特征列表
+        self.morph_features = set()
 
     def load_neuron_data(self) -> bool:
         """加载神经元数据"""
         logger.info("加载神经元数据...")
 
         # 1. 加载info.csv
-        info_file = self.data_path / "info.csv"
+        info_file = self.data_path / INFO_FILE
         if not info_file.exists():
             logger.error(f"info.csv文件不存在: {info_file}")
             return False
 
         try:
             self.info_df = pd.read_csv(info_file)
+
+            # 过滤掉带有'CCF-thin'或'local'的神经元（参考data_loader_enhanced.py）
+            if 'ID' in self.info_df.columns:
+                original_len = len(self.info_df)
+                # 如果ID列是字符串类型，进行过滤
+                if self.info_df['ID'].dtype == 'object':
+                    self.info_df = self.info_df[~self.info_df['ID'].str.contains('CCF-thin|local', na=False)]
+                    filtered_count = original_len - len(self.info_df)
+                    if filtered_count > 0:
+                        logger.info(f"过滤掉了 {filtered_count} 个带有'CCF-thin|local'的神经元")
+
             logger.info(f"加载了 {len(self.info_df)} 条神经元信息")
 
             # 检查必要的列
             required_cols = ['ID', 'celltype']
             if not all(col in self.info_df.columns for col in required_cols):
                 logger.error(f"info.csv缺少必要的列: {required_cols}")
+                logger.info(f"可用的列: {list(self.info_df.columns)}")
                 return False
 
         except Exception as e:
@@ -326,24 +348,139 @@ class NeuronDataLoader:
                 # 检查连接文件的列
                 if 'axon_ID' in self.connections_df.columns and 'dendrite_ID' in self.connections_df.columns:
                     logger.info("连接文件包含axon_ID和dendrite_ID列")
+
+                    # 显示数据样例以了解格式
+                    sample_row = self.connections_df.iloc[0] if len(self.connections_df) > 0 else None
+                    if sample_row is not None:
+                        logger.debug(f"axon_ID样例: {str(sample_row['axon_ID'])[:100]}...")
+                        logger.debug(f"dendrite_ID样例: {str(sample_row['dendrite_ID'])[:100]}...")
                 else:
                     logger.warning(f"连接文件列名: {list(self.connections_df.columns)}")
 
             except Exception as e:
                 logger.error(f"加载连接文件失败: {e}")
 
+        # 3. 加载形态学数据
+        self.load_morphology_data()
+
         return True
 
+    def load_morphology_data(self):
+        """加载完整的形态学数据"""
+        logger.info("加载神经元形态学数据...")
+
+        try:
+            # 加载轴突形态数据
+            axon_file = self.data_path / "axonfull_morpho.csv"
+            if axon_file.exists():
+                self.axon_morph_df = pd.read_csv(axon_file)
+                # 过滤掉带有'CCF-thin'或'local'的记录
+                if 'name' in self.axon_morph_df.columns:
+                    original_len = len(self.axon_morph_df)
+                    self.axon_morph_df = self.axon_morph_df[~self.axon_morph_df['name'].str.contains('CCF-thin|local', na=False)]
+                    filtered_count = original_len - len(self.axon_morph_df)
+                    if filtered_count > 0:
+                        logger.info(f"从轴突数据中过滤掉了 {filtered_count} 条记录")
+
+                # 收集所有形态学特征列
+                exclude_cols = ['ID', 'name', 'celltype', 'type']
+                axon_features = [col for col in self.axon_morph_df.columns if col not in exclude_cols]
+                self.morph_features.update([f'axonal_{feat}' for feat in axon_features])
+
+                logger.info(f"加载了 {len(self.axon_morph_df)} 条轴突形态数据，包含 {len(axon_features)} 个特征")
+                logger.debug(f"轴突形态特征: {axon_features}")
+
+            # 加载树突形态数据
+            dendrite_file = self.data_path / "denfull_morpho.csv"
+            if dendrite_file.exists():
+                self.dendrite_morph_df = pd.read_csv(dendrite_file)
+                # 过滤掉带有'CCF-thin'或'local'的记录
+                if 'name' in self.dendrite_morph_df.columns:
+                    original_len = len(self.dendrite_morph_df)
+                    self.dendrite_morph_df = self.dendrite_morph_df[~self.dendrite_morph_df['name'].str.contains('CCF-thin|local', na=False)]
+                    filtered_count = original_len - len(self.dendrite_morph_df)
+                    if filtered_count > 0:
+                        logger.info(f"从树突数据中过滤掉了 {filtered_count} 条记录")
+
+                # 收集所有形态学特征列
+                dendrite_features = [col for col in self.dendrite_morph_df.columns if col not in exclude_cols]
+                self.morph_features.update([f'dendritic_{feat}' for feat in dendrite_features])
+
+                logger.info(f"加载了 {len(self.dendrite_morph_df)} 条树突形态数据，包含 {len(dendrite_features)} 个特征")
+                logger.debug(f"树突形态特征: {dendrite_features}")
+
+            logger.info(f"总共收集了 {len(self.morph_features)} 个形态学特征")
+
+        except Exception as e:
+            logger.warning(f"加载形态学数据失败: {e}")
+
+    def parse_id_list(self, id_str: str) -> List[str]:
+        """
+        解析ID列表字符串
+
+        参数:
+            id_str: 包含ID列表的字符串，格式如 "[id1, id2, id3]" 或 "id1,id2,id3"
+
+        返回:
+            ID列表
+        """
+        if pd.isna(id_str) or not id_str:
+            return []
+
+        id_str = str(id_str).strip()
+
+        # 处理不同的格式
+        try:
+            # 尝试作为Python列表解析
+            if id_str.startswith('[') and id_str.endswith(']'):
+                # 使用ast.literal_eval安全解析
+                ids = ast.literal_eval(id_str)
+                if isinstance(ids, list):
+                    return [str(id).strip() for id in ids if id]
+
+            # 尝试作为JSON数组解析
+            if id_str.startswith('['):
+                ids = json.loads(id_str)
+                if isinstance(ids, list):
+                    return [str(id).strip() for id in ids if id]
+
+            # 处理被引号包裹的逗号分隔列表
+            if id_str.startswith('"') and id_str.endswith('"'):
+                id_str = id_str[1:-1]
+
+            # 处理逗号分隔的列表
+            if ',' in id_str:
+                ids = id_str.split(',')
+                return [id.strip().strip('"').strip("'") for id in ids if id.strip()]
+
+            # 单个ID的情况
+            clean_id = id_str.strip('"').strip("'")
+            if clean_id:
+                return [clean_id]
+
+        except Exception as e:
+            logger.debug(f"解析ID列表失败: {id_str[:100]}... 错误: {e}")
+
+        return []
+
     def process_neuron_data(self):
-        """处理神经元数据"""
+        """处理神经元数据，包含所有形态学特征"""
         if self.info_df is None:
             logger.error("没有加载神经元数据")
             return
 
         logger.info("处理神经元数据...")
 
+        # 创建区域名称到ID的映射
+        region_name_to_id = {}
+        if self.region_analyzer:
+            for region_id, info in self.region_analyzer.region_info.items():
+                acronym = info.get('acronym', '')
+                if acronym:
+                    region_name_to_id[acronym] = region_id
+
         # 从info.csv提取神经元信息
-        for idx, row in self.info_df.iterrows():
+        for idx, row in tqdm(self.info_df.iterrows(), total=len(self.info_df), desc="处理神经元信息"):
             neuron_id = str(row['ID'])
 
             # 提取基础区域名称（移除层信息）
@@ -351,23 +488,68 @@ class NeuronDataLoader:
             base_region = self.extract_base_region(celltype)
 
             # 获取区域ID
-            region_id = None
-            if self.region_analyzer and base_region:
-                # 从region_analyzer获取区域ID
-                for rid, info in self.region_analyzer.region_info.items():
-                    if info.get('acronym') == base_region:
-                        region_id = rid
-                        break
+            region_id = region_name_to_id.get(base_region) if base_region else None
 
-            self.neurons_data[neuron_id] = {
+            # 初始化神经元数据，包含所有可能的形态学特征
+            neuron_data = {
                 'neuron_id': neuron_id,
                 'name': row.get('name', neuron_id),
                 'celltype': celltype,
                 'base_region': base_region,
-                'region_id': region_id,
+                'region_id': region_id
             }
 
+            # 添加轴突形态学数据（所有特征）
+            if self.axon_morph_df is not None and 'ID' in self.axon_morph_df.columns:
+                axon_data = self.axon_morph_df[self.axon_morph_df['ID'] == neuron_id]
+                if not axon_data.empty:
+                    # 对每个特征列取平均值（如果有多条记录）
+                    for col in self.axon_morph_df.columns:
+                        if col not in ['ID', 'name', 'celltype', 'type']:
+                            feature_name = f'axonal_{col}'.replace(' ', '_').replace('/', '_').lower()
+                            try:
+                                # 尝试转换为数值
+                                values = pd.to_numeric(axon_data[col], errors='coerce')
+                                if not values.isna().all():
+                                    neuron_data[feature_name] = float(values.mean())
+                                else:
+                                    neuron_data[feature_name] = 0.0
+                            except:
+                                neuron_data[feature_name] = 0.0
+
+            # 添加树突形态学数据（所有特征）
+            if self.dendrite_morph_df is not None and 'ID' in self.dendrite_morph_df.columns:
+                dendrite_data = self.dendrite_morph_df[self.dendrite_morph_df['ID'] == neuron_id]
+                if not dendrite_data.empty:
+                    # 对每个特征列取平均值（如果有多条记录）
+                    for col in self.dendrite_morph_df.columns:
+                        if col not in ['ID', 'name', 'celltype', 'type']:
+                            feature_name = f'dendritic_{col}'.replace(' ', '_').replace('/', '_').lower()
+                            try:
+                                # 尝试转换为数值
+                                values = pd.to_numeric(dendrite_data[col], errors='coerce')
+                                if not values.isna().all():
+                                    neuron_data[feature_name] = float(values.mean())
+                                else:
+                                    neuron_data[feature_name] = 0.0
+                            except:
+                                neuron_data[feature_name] = 0.0
+
+            # 为缺失的形态学特征设置默认值
+            for feature in self.morph_features:
+                clean_feature = feature.replace(' ', '_').replace('/', '_').lower()
+                if clean_feature not in neuron_data:
+                    neuron_data[clean_feature] = 0.0
+
+            self.neurons_data[neuron_id] = neuron_data
+
         logger.info(f"处理了 {len(self.neurons_data)} 个神经元")
+
+        # 显示一个样例神经元的所有特征
+        if self.neurons_data:
+            sample_neuron = list(self.neurons_data.values())[0]
+            logger.debug(f"样例神经元特征数量: {len(sample_neuron)}")
+            logger.debug(f"样例神经元特征键: {list(sample_neuron.keys())[:10]}...")
 
         # 处理连接数据
         if self.connections_df is not None:
@@ -389,8 +571,8 @@ class NeuronDataLoader:
 
         # 处理每条连接记录
         for idx, row in tqdm(self.connections_df.iterrows(),
-                             total=len(self.connections_df),
-                             desc="处理连接记录"):
+                            total=len(self.connections_df),
+                            desc="处理连接记录"):
             # 解析axon_ID列表
             axon_ids = self.parse_id_list(row.get('axon_ID', ''))
             # 解析dendrite_ID列表
@@ -415,20 +597,19 @@ class NeuronDataLoader:
                                 total_den_connections += 1
 
         # 统计连接
-        neurons_with_axon_connections = sum(
-            1 for neighbors in self.neuron_connections['axon_neighbouring'].values() if neighbors)
-        neurons_with_den_connections = sum(
-            1 for neighbors in self.neuron_connections['den_neighbouring'].values() if neighbors)
+        neurons_with_axon_connections = sum(1 for neighbors in self.neuron_connections['axon_neighbouring'].values() if neighbors)
+        neurons_with_den_connections = sum(1 for neighbors in self.neuron_connections['den_neighbouring'].values() if neighbors)
 
         logger.info(f"处理了 {processed_rows} 行连接记录")
         logger.info(f"创建了 {total_axon_connections} 个轴突连接和 {total_den_connections} 个树突连接")
-        logger.info(
-            f"{neurons_with_axon_connections} 个神经元有轴突连接，{neurons_with_den_connections} 个神经元有树突连接")
+        logger.info(f"{neurons_with_axon_connections} 个神经元有轴突连接，{neurons_with_den_connections} 个神经元有树突连接")
 
     def extract_base_region(self, celltype):
         """提取基础区域名称（移除层信息）"""
         if not celltype or pd.isna(celltype):
             return None
+
+        celltype = str(celltype).strip()
 
         # 要移除的层模式
         layer_patterns = ['1', '2/3', '4', '5', '6a', '6b']
@@ -436,10 +617,11 @@ class NeuronDataLoader:
 
         for layer in layer_patterns:
             if celltype.endswith(layer):
-                base_region = celltype[:-len(layer)]
+                base_region = celltype[:-len(layer)].strip()
                 break
 
-        return base_region
+        return base_region if base_region else None
+
 
 class KnowledgeGraphBuilderNeo4j:
     """知识图谱构建器 - Neo4j实时插入版本"""

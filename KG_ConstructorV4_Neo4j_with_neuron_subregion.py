@@ -268,7 +268,6 @@ from KG_ConstructorV3 import (
 )
 
 # ==================== 神经元数据加载器类 ====================
-
 class NeuronDataLoader:
     """神经元数据加载器 - 处理列表格式的连接数据和完整形态学特征"""
 
@@ -556,7 +555,18 @@ class NeuronDataLoader:
             self.process_connections()
 
     def process_connections(self):
-        """处理神经元连接数据（列表格式）"""
+        """
+        处理神经元连接数据（修正版本）
+
+        文件结构：
+        - SWC_Name: 源神经元ID
+        - axon_ID: 该神经元的轴突邻居列表
+        - dendrite_ID: 该神经元的树突邻居列表
+
+        关系理解：
+        - axon_neighbouring: 源神经元的轴突连接到的目标神经元
+        - den_neighbouring: 连接到源神经元树突的其他神经元
+        """
         logger.info("处理神经元连接...")
 
         # 初始化连接字典
@@ -568,41 +578,57 @@ class NeuronDataLoader:
         total_axon_connections = 0
         total_den_connections = 0
         processed_rows = 0
+        skipped_rows = 0
 
         # 处理每条连接记录
         for idx, row in tqdm(self.connections_df.iterrows(),
-                            total=len(self.connections_df),
-                            desc="处理连接记录"):
-            # 解析axon_ID列表
-            axon_ids = self.parse_id_list(row.get('axon_ID', ''))
-            # 解析dendrite_ID列表
-            dendrite_ids = self.parse_id_list(row.get('dendrite_ID', ''))
+                             total=len(self.connections_df),
+                             desc="处理连接记录"):
 
-            if axon_ids and dendrite_ids:
+            # 获取源神经元ID（从SWC_Name列）
+            source_id = str(row.get('SWC_Name', ''))
+
+            # 如果源神经元不在我们的数据中，跳过
+            if not source_id or source_id not in self.neurons_data:
+                skipped_rows += 1
+                continue
+
+            # 解析轴突邻居列表
+            axon_neighbors = self.parse_id_list(row.get('axon_ID', ''))
+            for neighbor_id in axon_neighbors:
+                neighbor_id = str(neighbor_id)
+                if neighbor_id in self.neurons_data:
+                    # 源神经元的轴突连接到neighbor_id
+                    self.neuron_connections['axon_neighbouring'][source_id].add(neighbor_id)
+                    total_axon_connections += 1
+
+            # 解析树突邻居列表
+            dendrite_neighbors = self.parse_id_list(row.get('dendrite_ID', ''))
+            for neighbor_id in dendrite_neighbors:
+                neighbor_id = str(neighbor_id)
+                if neighbor_id in self.neurons_data:
+                    # neighbor_id连接到源神经元的树突
+                    self.neuron_connections['den_neighbouring'][source_id].add(neighbor_id)
+                    total_den_connections += 1
+
+            if axon_neighbors or dendrite_neighbors:
                 processed_rows += 1
 
-                # 创建连接关系
-                for axon_id in axon_ids:
-                    axon_id = str(axon_id)
-                    if axon_id in self.neurons_data:
-                        for dendrite_id in dendrite_ids:
-                            dendrite_id = str(dendrite_id)
-                            if dendrite_id in self.neurons_data:
-                                # axon_id的轴突连接到dendrite_id的树突
-                                self.neuron_connections['axon_neighbouring'][axon_id].add(dendrite_id)
-                                total_axon_connections += 1
-
-                                # dendrite_id的树突接收来自axon_id的连接
-                                self.neuron_connections['den_neighbouring'][dendrite_id].add(axon_id)
-                                total_den_connections += 1
-
         # 统计连接
-        neurons_with_axon_connections = sum(1 for neighbors in self.neuron_connections['axon_neighbouring'].values() if neighbors)
-        neurons_with_den_connections = sum(1 for neighbors in self.neuron_connections['den_neighbouring'].values() if neighbors)
+        neurons_with_axon_connections = sum(
+            1 for neighbors in self.neuron_connections['axon_neighbouring'].values()
+            if neighbors
+        )
+        neurons_with_den_connections = sum(
+            1 for neighbors in self.neuron_connections['den_neighbouring'].values()
+            if neighbors
+        )
 
-        logger.info(f"处理了 {processed_rows} 行连接记录")
-        logger.info(f"创建了 {total_axon_connections} 个轴突连接和 {total_den_connections} 个树突连接")
-        logger.info(f"{neurons_with_axon_connections} 个神经元有轴突连接，{neurons_with_den_connections} 个神经元有树突连接")
+        logger.info(f"处理了 {processed_rows} 行有效连接记录，跳过了 {skipped_rows} 行")
+        logger.info(f"创建了 {total_axon_connections} 个轴突连接")
+        logger.info(f"创建了 {total_den_connections} 个树突连接")
+        logger.info(f"{neurons_with_axon_connections} 个神经元有轴突连接")
+        logger.info(f"{neurons_with_den_connections} 个神经元有树突连接")
 
     def extract_base_region(self, celltype):
         """提取基础区域名称（移除层信息）"""
@@ -1628,9 +1654,9 @@ if __name__ == "__main__":
                         help='Neo4j数据库URI')
     parser.add_argument('--neo4j_user', type=str, default='neo4j',
                         help='Neo4j用户名')
-    parser.add_argument('--neo4j_password', type=str, required=True,
+    parser.add_argument('--neo4j_password', type=str, required=True,default='neuroxiv',
                         help='Neo4j密码')
-    parser.add_argument('--database', type=str, default='neuroxiv',
+    parser.add_argument('--database', type=str, default='neo4j',
                         help='数据库名称')
     parser.add_argument('--clear_database', action='store_true',
                         help='清空数据库后重新导入')

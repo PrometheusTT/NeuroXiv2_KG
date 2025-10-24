@@ -18,6 +18,7 @@ import pandas as pd
 from loguru import logger
 from neo4j import GraphDatabase
 from tqdm import tqdm
+from Subregion_Loader import SubregionLoader
 
 warnings.filterwarnings('ignore')
 
@@ -123,6 +124,8 @@ class Neo4jConnector:
             "CREATE CONSTRAINT cluster_id IF NOT EXISTS FOR (c:Cluster) REQUIRE c.tran_id IS UNIQUE",
             # 新增Neuron约束
             "CREATE CONSTRAINT neuron_id IF NOT EXISTS FOR (n:Neuron) REQUIRE n.neuron_id IS UNIQUE",
+            "CREATE CONSTRAINT subregion_id IF NOT EXISTS FOR (sr:Subregion) REQUIRE sr.subregion_id IS UNIQUE",
+            "CREATE CONSTRAINT me_subregion_id IF NOT EXISTS FOR (me:ME_Subregion) REQUIRE me.me_subregion_id IS UNIQUE",
             
             # 索引
             "CREATE INDEX region_name IF NOT EXISTS FOR (r:Region) ON (r.name)",
@@ -134,6 +137,8 @@ class Neo4jConnector:
             # 新增Neuron索引
             "CREATE INDEX neuron_name IF NOT EXISTS FOR (n:Neuron) ON (n.name)",
             "CREATE INDEX neuron_celltype IF NOT EXISTS FOR (n:Neuron) ON (n.celltype)"
+            "CREATE INDEX subregion_acronym IF NOT EXISTS FOR (sr:Subregion) ON (sr.acronym)",
+            "CREATE INDEX me_subregion_acronym IF NOT EXISTS FOR (me:ME_Subregion) ON (me.acronym)",
         ]
         
         with self.driver.session(database=self.database) as session:
@@ -1448,15 +1453,155 @@ class KnowledgeGraphBuilderNeo4j:
 
         logger.info(f"插入了 {axon_count} 个AXON_NEIGHBOURING关系")
 
+    def generate_and_insert_subregion_nodes(self, subregion_loader: SubregionLoader):
+        """
+        生成并插入Subregion节点
+
+        参数:
+            subregion_loader: Subregion数据加载器
+        """
+        logger.info("生成并插入Subregion节点...")
+
+        batch_nodes = []
+
+        for subregion in tqdm(subregion_loader.subregions, desc="处理Subregion节点"):
+            node_dict = {
+                'subregion_id': subregion['subregion_id'],
+                'acronym': subregion['acronym'],
+                'name': subregion['name'],
+                'parent_region': subregion['parent_region'],
+                'has_me_children': subregion.get('has_me_children', False),
+                'rgb_triplet': subregion.get('rgb_triplet', [])
+            }
+
+            batch_nodes.append(node_dict)
+
+            # 批量插入
+            if len(batch_nodes) >= BATCH_SIZE:
+                self.neo4j.insert_nodes_batch('Subregion', batch_nodes)
+                self.stats['subregions_inserted'] = self.stats.get('subregions_inserted', 0) + len(batch_nodes)
+                batch_nodes = []
+
+        # 插入剩余的节点
+        if batch_nodes:
+            self.neo4j.insert_nodes_batch('Subregion', batch_nodes)
+            self.stats['subregions_inserted'] = self.stats.get('subregions_inserted', 0) + len(batch_nodes)
+
+        logger.info(f"成功插入 {self.stats.get('subregions_inserted', 0)} 个Subregion节点")
+
+    def generate_and_insert_me_subregion_nodes(self, subregion_loader: SubregionLoader):
+        """
+        生成并插入ME_Subregion节点
+
+        参数:
+            subregion_loader: Subregion数据加载器
+        """
+        logger.info("生成并插入ME_Subregion节点...")
+
+        batch_nodes = []
+
+        for me_subregion in tqdm(subregion_loader.me_subregions, desc="处理ME_Subregion节点"):
+            node_dict = {
+                'me_subregion_id': me_subregion['me_subregion_id'],
+                'acronym': me_subregion['acronym'],
+                'name': me_subregion['name'],
+                'parent_subregion': me_subregion['parent_subregion'],
+                'rgb_triplet': me_subregion.get('rgb_triplet', [])
+            }
+
+            batch_nodes.append(node_dict)
+
+            # 批量插入
+            if len(batch_nodes) >= BATCH_SIZE:
+                self.neo4j.insert_nodes_batch('ME_Subregion', batch_nodes)
+                self.stats['me_subregions_inserted'] = self.stats.get('me_subregions_inserted', 0) + len(batch_nodes)
+                batch_nodes = []
+
+        # 插入剩余的节点
+        if batch_nodes:
+            self.neo4j.insert_nodes_batch('ME_Subregion', batch_nodes)
+            self.stats['me_subregions_inserted'] = self.stats.get('me_subregions_inserted', 0) + len(batch_nodes)
+
+        logger.info(f"成功插入 {self.stats.get('me_subregions_inserted', 0)} 个ME_Subregion节点")
+
+    def generate_and_insert_subregion_relationships(self, subregion_loader: SubregionLoader):
+        """
+        生成并插入Subregion相关的BELONGS_TO关系
+        包括:
+        1. ME_Subregion -> Subregion (BELONGS_TO)
+        2. Subregion -> Region (BELONGS_TO)
+
+        参数:
+            subregion_loader: Subregion数据加载器
+        """
+        logger.info("生成并插入Subregion相关的BELONGS_TO关系...")
+
+        with self.neo4j.driver.session(database=self.neo4j.database) as session:
+
+            # 1. 插入 ME_Subregion -> Subregion 关系
+            logger.info("插入 ME_Subregion -> Subregion 关系...")
+            me_to_subregion_count = 0
+
+            for me_acronym, subregion_acronym in tqdm(
+                    subregion_loader.me_to_subregion.items(),
+                    desc="ME_Subregion->Subregion"
+            ):
+                query = """
+                MATCH (me:ME_Subregion {acronym: $me_acronym})
+                MATCH (sr:Subregion {acronym: $subregion_acronym})
+                CREATE (me)-[r:BELONGS_TO]->(sr)
+                """
+                try:
+                    session.run(query, me_acronym=me_acronym, subregion_acronym=subregion_acronym)
+                    me_to_subregion_count += 1
+                except Exception as e:
+                    logger.error(f"插入关系失败 {me_acronym} -> {subregion_acronym}: {e}")
+
+            logger.info(f"插入了 {me_to_subregion_count} 个 ME_Subregion->Subregion 关系")
+
+            # 2. 插入 Subregion -> Region 关系
+            logger.info("插入 Subregion -> Region 关系...")
+            subregion_to_region_count = 0
+            failed_count = 0
+
+            for subregion_acronym, region_acronym in tqdm(
+                    subregion_loader.subregion_to_region.items(),
+                    desc="Subregion->Region"
+            ):
+                # 注意：这里parent_region是Region节点的acronym，不需要再次查询
+                # 直接使用region_acronym作为Region的匹配条件
+                query = """
+                MATCH (sr:Subregion {acronym: $subregion_acronym})
+                MATCH (r:Region {acronym: $parent_region_acronym})
+                CREATE (sr)-[rel:BELONGS_TO]->(r)
+                """
+                try:
+                    session.run(query,
+                                subregion_acronym=subregion_acronym,
+                                parent_region_acronym=region_acronym)
+                    subregion_to_region_count += 1
+                except Exception as e:
+                    failed_count += 1
+                    if failed_count <= 5:  # 只显示前5个错误
+                        logger.error(f"插入关系失败 {subregion_acronym} -> {region_acronym}: {e}")
+
+            logger.info(f"插入了 {subregion_to_region_count} 个 Subregion->Region 关系")
+
+            # 更新统计
+            self.stats['relationships_inserted'] = self.stats.get('relationships_inserted', 0) + \
+                                                   me_to_subregion_count + subregion_to_region_count
+
     # ==================== 更新统计报告方法 ====================
-    def print_statistics_report_enhanced(self):
-        """打印增强的统计报告"""
+    def print_statistics_report_enhanced_with_subregion(self):
+        """打印包含Subregion统计的增强报告"""
         report = []
         report.append("=" * 60)
-        report.append("NeuroXiv 2.0 知识图谱Neo4j导入统计报告")
+        report.append("NeuroXiv 2.0 知识图谱Neo4j导入统计报告（含Subregion）")
         report.append("=" * 60)
         report.append("节点统计:")
         report.append(f"  - Region节点: {self.stats.get('regions_inserted', 0)}")
+        report.append(f"  - Subregion节点: {self.stats.get('subregions_inserted', 0)}")
+        report.append(f"  - ME_Subregion节点: {self.stats.get('me_subregions_inserted', 0)}")
         report.append(f"  - Neuron节点: {self.stats.get('neurons_inserted', 0)}")
         report.append(f"  - Class节点: {self.stats.get('classes_inserted', 0)}")
         report.append(f"  - Subclass节点: {self.stats.get('subclasses_inserted', 0)}")
@@ -1465,6 +1610,8 @@ class KnowledgeGraphBuilderNeo4j:
 
         total_nodes = sum([
             self.stats.get('regions_inserted', 0),
+            self.stats.get('subregions_inserted', 0),
+            self.stats.get('me_subregions_inserted', 0),
             self.stats.get('neurons_inserted', 0),
             self.stats.get('classes_inserted', 0),
             self.stats.get('subclasses_inserted', 0),
@@ -1594,6 +1741,13 @@ def main(data_dir: str = "../data",
         else:
             logger.warning("无法加载神经元数据")
             neuron_loader = None
+        ccf_me_json = '/home/wlj/NeuroXiv2/data/surf_tree_ccf-me.json'
+        ccf_me_path = Path(ccf_me_json) if ccf_me_json else data_path / "surf_tree_ccf-me.json"
+        subregion_loader = SubregionLoader(ccf_me_path)
+
+        if not subregion_loader.load_subregion_data():
+            logger.warning("无法加载Subregion数据，跳过Subregion节点插入")
+            subregion_loader = None
 
         # Phase 4: 知识图谱生成和插入
         logger.info("Phase 4: 知识图谱生成和实时插入")
@@ -1609,6 +1763,9 @@ def main(data_dir: str = "../data",
         # 生成并插入Neuron节点
         if neuron_loader:
             builder.generate_and_insert_neuron_nodes(neuron_loader)
+        if subregion_loader:
+            builder.generate_and_insert_subregion_nodes(subregion_loader)
+            builder.generate_and_insert_me_subregion_nodes(subregion_loader)
 
         # 生成并插入MERFISH细胞类型节点
         builder.generate_and_insert_merfish_nodes_from_hierarchy(merfish_cells)
@@ -1630,8 +1787,11 @@ def main(data_dir: str = "../data",
         if neuron_loader:
             builder.generate_and_insert_neuron_relationships(neuron_loader)
 
+        if subregion_loader:
+            builder.generate_and_insert_subregion_relationships(subregion_loader)
+
         # 打印统计报告
-        builder.print_statistics_report()
+        builder.print_statistics_report_enhanced_with_subregion()
 
         logger.info("=" * 60)
         logger.info("知识图谱构建和导入完成！")

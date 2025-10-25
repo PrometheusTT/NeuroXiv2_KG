@@ -1260,19 +1260,84 @@ class KnowledgeGraphBuilderNeo4j:
 
         logger.info(f"插入了BELONGS_TO关系")
 
+    # def generate_and_insert_neuron_nodes(self, neuron_loader: NeuronDataLoader):
+    #     """生成并插入Neuron节点"""
+    #     if not neuron_loader or not neuron_loader.neurons_data:
+    #         logger.warning("没有神经元数据可插入")
+    #         return
+    #
+    #     logger.info("生成并插入Neuron节点...")
+    #
+    #     batch_nodes = []
+    #     neuron_count = 0
+    #
+    #     for neuron_id, neuron_data in tqdm(neuron_loader.neurons_data.items(), desc="处理Neuron节点"):
+    #         # 创建神经元节点
+    #         node_dict = {
+    #             'neuron_id': neuron_id,
+    #             'name': neuron_data.get('name', neuron_id),
+    #             'celltype': neuron_data.get('celltype', ''),
+    #             'base_region': neuron_data.get('base_region', ''),
+    #             'axonal_length': float(neuron_data.get('axonal_length', 0.0)),
+    #             'axonal_branches': int(neuron_data.get('axonal_branches', 0)),
+    #             'dendritic_length': float(neuron_data.get('dendritic_length', 0.0)),
+    #             'dendritic_branches': int(neuron_data.get('dendritic_branches', 0)),
+    #             'number_of_transcriptomic_neurons': int(neuron_data.get('number_of_transcriptomic_neurons', 0))
+    #         }
+    #
+    #         batch_nodes.append(node_dict)
+    #
+    #         # 批量插入
+    #         if len(batch_nodes) >= BATCH_SIZE:
+    #             self.neo4j.insert_nodes_batch('Neuron', batch_nodes)
+    #             neuron_count += len(batch_nodes)
+    #             batch_nodes = []
+    #
+    #     # 插入剩余的节点
+    #     if batch_nodes:
+    #         self.neo4j.insert_nodes_batch('Neuron', batch_nodes)
+    #         neuron_count += len(batch_nodes)
+    #
+    #     self.stats['neurons_inserted'] = neuron_count
+    #     logger.info(f"成功插入 {neuron_count} 个Neuron节点")
     def generate_and_insert_neuron_nodes(self, neuron_loader: NeuronDataLoader):
-        """生成并插入Neuron节点"""
+        """
+        生成并插入Neuron节点（修正版 - 防止重复）
+
+        改进点:
+        1. 使用MERGE代替CREATE，避免重复插入
+        2. 在批量插入前进行去重
+        3. 添加更详细的日志
+        """
         if not neuron_loader or not neuron_loader.neurons_data:
             logger.warning("没有神经元数据可插入")
             return
 
-        logger.info("生成并插入Neuron节点...")
+        logger.info("生成并插入Neuron节点（防重复版本）...")
 
+        # 收集所有neuron数据并去重
+        unique_neurons = {}
+        duplicate_count = 0
+
+        for neuron_id, neuron_data in tqdm(neuron_loader.neurons_data.items(),
+                                           desc="准备Neuron数据"):
+            if neuron_id in unique_neurons:
+                duplicate_count += 1
+                logger.debug(f"发现重复的neuron_id: {neuron_id}")
+            else:
+                unique_neurons[neuron_id] = neuron_data
+
+        if duplicate_count > 0:
+            logger.warning(f"发现并移除了 {duplicate_count} 个重复的神经元ID")
+
+        logger.info(f"准备插入 {len(unique_neurons)} 个唯一的神经元...")
+
+        # 方案1: 使用MERGE批量插入（推荐）
         batch_nodes = []
         neuron_count = 0
 
-        for neuron_id, neuron_data in tqdm(neuron_loader.neurons_data.items(), desc="处理Neuron节点"):
-            # 创建神经元节点
+        for neuron_id, neuron_data in tqdm(unique_neurons.items(), desc="插入Neuron节点"):
+            # 创建神经元节点数据
             node_dict = {
                 'neuron_id': neuron_id,
                 'name': neuron_data.get('name', neuron_id),
@@ -1287,19 +1352,78 @@ class KnowledgeGraphBuilderNeo4j:
 
             batch_nodes.append(node_dict)
 
-            # 批量插入
+            # 批量插入（使用MERGE）
             if len(batch_nodes) >= BATCH_SIZE:
-                self.neo4j.insert_nodes_batch('Neuron', batch_nodes)
+                self._insert_neurons_batch_with_merge(batch_nodes)
                 neuron_count += len(batch_nodes)
                 batch_nodes = []
 
         # 插入剩余的节点
         if batch_nodes:
-            self.neo4j.insert_nodes_batch('Neuron', batch_nodes)
+            self._insert_neurons_batch_with_merge(batch_nodes)
             neuron_count += len(batch_nodes)
 
         self.stats['neurons_inserted'] = neuron_count
         logger.info(f"成功插入 {neuron_count} 个Neuron节点")
+
+    def _insert_neurons_batch_with_merge(self, batch_nodes):
+        """
+        使用MERGE批量插入Neuron节点（辅助方法）
+
+        MERGE会先检查节点是否存在，如果存在则更新，不存在则创建
+        这样可以避免唯一性约束冲突
+        """
+        with self.neo4j.driver.session(database=self.neo4j.database) as session:
+            query = """
+            UNWIND $batch AS props
+            MERGE (n:Neuron {neuron_id: props.neuron_id})
+            SET n.name = props.name,
+                n.celltype = props.celltype,
+                n.base_region = props.base_region,
+                n.axonal_length = props.axonal_length,
+                n.axonal_branches = props.axonal_branches,
+                n.dendritic_length = props.dendritic_length,
+                n.dendritic_branches = props.dendritic_branches,
+                n.number_of_transcriptomic_neurons = props.number_of_transcriptomic_neurons
+            """
+            try:
+                session.run(query, batch=batch_nodes)
+            except Exception as e:
+                logger.error(f"批量插入Neuron节点失败: {e}")
+                # 如果批量失败，尝试逐个插入以定位问题
+                self._insert_neurons_one_by_one(batch_nodes)
+
+    def _insert_neurons_one_by_one(self, nodes):
+        """
+        逐个插入Neuron节点（当批量插入失败时使用）
+
+        用于定位具体是哪个节点导致问题
+        """
+        logger.warning("批量插入失败，切换到逐个插入模式...")
+        failed_count = 0
+
+        with self.neo4j.driver.session(database=self.neo4j.database) as session:
+            for node in nodes:
+                query = """
+                MERGE (n:Neuron {neuron_id: $neuron_id})
+                SET n.name = $name,
+                    n.celltype = $celltype,
+                    n.base_region = $base_region,
+                    n.axonal_length = $axonal_length,
+                    n.axonal_branches = $axonal_branches,
+                    n.dendritic_length = $dendritic_length,
+                    n.dendritic_branches = $dendritic_branches,
+                    n.number_of_transcriptomic_neurons = $number_of_transcriptomic_neurons
+                """
+                try:
+                    session.run(query, **node)
+                except Exception as e:
+                    failed_count += 1
+                    if failed_count <= 5:
+                        logger.error(f"插入神经元失败 {node['neuron_id']}: {e}")
+
+        if failed_count > 0:
+            logger.error(f"共有 {failed_count} 个神经元插入失败")
 
     def generate_and_insert_neuron_relationships(self, neuron_loader: NeuronDataLoader):
         """生成并插入神经元相关的关系"""

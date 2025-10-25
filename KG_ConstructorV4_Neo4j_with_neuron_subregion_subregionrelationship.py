@@ -1581,16 +1581,87 @@ class KnowledgeGraphBuilderNeo4j:
 
         logger.info(f"插入了 {axon_count} 个AXON_NEIGHBOURING关系")
 
-    def generate_and_insert_subregion_nodes(self, subregion_loader: SubregionLoader):
+    # def generate_and_insert_subregion_nodes(self, subregion_loader: SubregionLoader):
+    #     """
+    #     生成并插入Subregion节点
+    #
+    #     参数:
+    #         subregion_loader: Subregion数据加载器
+    #     """
+    #     logger.info("生成并插入Subregion节点...")
+    #
+    #     batch_nodes = []
+    #
+    #     for subregion in tqdm(subregion_loader.subregions, desc="处理Subregion节点"):
+    #         node_dict = {
+    #             'subregion_id': subregion['subregion_id'],
+    #             'acronym': subregion['acronym'],
+    #             'name': subregion['name'],
+    #             'parent_region': subregion['parent_region'],
+    #             'has_me_children': subregion.get('has_me_children', False),
+    #             'rgb_triplet': subregion.get('rgb_triplet', [])
+    #         }
+    #
+    #         batch_nodes.append(node_dict)
+    #
+    #         # 批量插入
+    #         if len(batch_nodes) >= BATCH_SIZE:
+    #             self.neo4j.insert_nodes_batch('Subregion', batch_nodes)
+    #             self.stats['subregions_inserted'] = self.stats.get('subregions_inserted', 0) + len(batch_nodes)
+    #             batch_nodes = []
+    #
+    #     # 插入剩余的节点
+    #     if batch_nodes:
+    #         self.neo4j.insert_nodes_batch('Subregion', batch_nodes)
+    #         self.stats['subregions_inserted'] = self.stats.get('subregions_inserted', 0) + len(batch_nodes)
+    #
+    #     logger.info(f"成功插入 {self.stats.get('subregions_inserted', 0)} 个Subregion节点")
+    #
+    # def generate_and_insert_me_subregion_nodes(self, subregion_loader: SubregionLoader):
+    #     """
+    #     生成并插入ME_Subregion节点
+    #
+    #     参数:
+    #         subregion_loader: Subregion数据加载器
+    #     """
+    #     logger.info("生成并插入ME_Subregion节点...")
+    #
+    #     batch_nodes = []
+    #
+    #     for me_subregion in tqdm(subregion_loader.me_subregions, desc="处理ME_Subregion节点"):
+    #         node_dict = {
+    #             'me_subregion_id': me_subregion['me_subregion_id'],
+    #             'acronym': me_subregion['acronym'],
+    #             'name': me_subregion['name'],
+    #             'parent_subregion': me_subregion['parent_subregion'],
+    #             'rgb_triplet': me_subregion.get('rgb_triplet', [])
+    #         }
+    #
+    #         batch_nodes.append(node_dict)
+    #
+    #         # 批量插入
+    #         if len(batch_nodes) >= BATCH_SIZE:
+    #             self.neo4j.insert_nodes_batch('ME_Subregion', batch_nodes)
+    #             self.stats['me_subregions_inserted'] = self.stats.get('me_subregions_inserted', 0) + len(batch_nodes)
+    #             batch_nodes = []
+    #
+    #     # 插入剩余的节点
+    #     if batch_nodes:
+    #         self.neo4j.insert_nodes_batch('ME_Subregion', batch_nodes)
+    #         self.stats['me_subregions_inserted'] = self.stats.get('me_subregions_inserted', 0) + len(batch_nodes)
+    #
+    #     logger.info(f"成功插入 {self.stats.get('me_subregions_inserted', 0)} 个ME_Subregion节点")
+    def generate_and_insert_subregion_nodes(self, subregion_loader):
         """
-        生成并插入Subregion节点
+        生成并插入Subregion节点（修复版 - 使用MERGE避免重复）
 
         参数:
             subregion_loader: Subregion数据加载器
         """
-        logger.info("生成并插入Subregion节点...")
+        logger.info("生成并插入Subregion节点（使用MERGE避免重复）...")
 
         batch_nodes = []
+        BATCH_SIZE = 1000  # 如果类中已有BATCH_SIZE常量，可以使用self.BATCH_SIZE
 
         for subregion in tqdm(subregion_loader.subregions, desc="处理Subregion节点"):
             node_dict = {
@@ -1604,29 +1675,85 @@ class KnowledgeGraphBuilderNeo4j:
 
             batch_nodes.append(node_dict)
 
-            # 批量插入
+            # 批量插入（使用MERGE）
             if len(batch_nodes) >= BATCH_SIZE:
-                self.neo4j.insert_nodes_batch('Subregion', batch_nodes)
+                self._insert_subregion_batch_with_merge(batch_nodes)
                 self.stats['subregions_inserted'] = self.stats.get('subregions_inserted', 0) + len(batch_nodes)
                 batch_nodes = []
 
         # 插入剩余的节点
         if batch_nodes:
-            self.neo4j.insert_nodes_batch('Subregion', batch_nodes)
+            self._insert_subregion_batch_with_merge(batch_nodes)
             self.stats['subregions_inserted'] = self.stats.get('subregions_inserted', 0) + len(batch_nodes)
 
-        logger.info(f"成功插入 {self.stats.get('subregions_inserted', 0)} 个Subregion节点")
+        logger.info(f"成功插入/更新 {self.stats.get('subregions_inserted', 0)} 个Subregion节点")
 
-    def generate_and_insert_me_subregion_nodes(self, subregion_loader: SubregionLoader):
+    def _insert_subregion_batch_with_merge(self, batch_nodes):
         """
-        生成并插入ME_Subregion节点
+        使用MERGE批量插入Subregion节点（辅助方法）
+
+        MERGE会先检查节点是否存在:
+        - 如果存在: 更新属性
+        - 如果不存在: 创建新节点
+        """
+        with self.neo4j.driver.session(database=self.neo4j.database) as session:
+            query = """
+            UNWIND $batch AS props
+            MERGE (n:Subregion {subregion_id: props.subregion_id})
+            SET n.acronym = props.acronym,
+                n.name = props.name,
+                n.parent_region = props.parent_region,
+                n.has_me_children = props.has_me_children,
+                n.rgb_triplet = props.rgb_triplet
+            """
+            try:
+                session.run(query, batch=batch_nodes)
+            except Exception as e:
+                logger.error(f"批量插入Subregion节点失败: {e}")
+                # 如果批量失败，尝试逐个插入以定位问题
+                self._insert_subregion_one_by_one(batch_nodes)
+
+    def _insert_subregion_one_by_one(self, nodes):
+        """
+        逐个插入Subregion节点（当批量插入失败时使用）
+        用于定位具体是哪个节点导致问题
+        """
+        logger.warning("批量插入Subregion失败，切换到逐个插入模式...")
+        failed_count = 0
+
+        with self.neo4j.driver.session(database=self.neo4j.database) as session:
+            for node in nodes:
+                query = """
+                MERGE (n:Subregion {subregion_id: $subregion_id})
+                SET n.acronym = $acronym,
+                    n.name = $name,
+                    n.parent_region = $parent_region,
+                    n.has_me_children = $has_me_children,
+                    n.rgb_triplet = $rgb_triplet
+                """
+                try:
+                    session.run(query, **node)
+                except Exception as e:
+                    failed_count += 1
+                    if failed_count <= 5:  # 只显示前5个错误
+                        logger.error(f"插入Subregion失败 {node['subregion_id']}: {e}")
+
+        if failed_count > 0:
+            logger.error(f"共有 {failed_count} 个Subregion插入失败")
+
+    # ==================== 修复方法2: ME_Subregion节点插入 ====================
+
+    def generate_and_insert_me_subregion_nodes(self, subregion_loader):
+        """
+        生成并插入ME_Subregion节点（修复版 - 使用MERGE避免重复）
 
         参数:
             subregion_loader: Subregion数据加载器
         """
-        logger.info("生成并插入ME_Subregion节点...")
+        logger.info("生成并插入ME_Subregion节点（使用MERGE避免重复）...")
 
         batch_nodes = []
+        BATCH_SIZE = 1000  # 如果类中已有BATCH_SIZE常量，可以使用self.BATCH_SIZE
 
         for me_subregion in tqdm(subregion_loader.me_subregions, desc="处理ME_Subregion节点"):
             node_dict = {
@@ -1639,18 +1766,69 @@ class KnowledgeGraphBuilderNeo4j:
 
             batch_nodes.append(node_dict)
 
-            # 批量插入
+            # 批量插入（使用MERGE）
             if len(batch_nodes) >= BATCH_SIZE:
-                self.neo4j.insert_nodes_batch('ME_Subregion', batch_nodes)
+                self._insert_me_subregion_batch_with_merge(batch_nodes)
                 self.stats['me_subregions_inserted'] = self.stats.get('me_subregions_inserted', 0) + len(batch_nodes)
                 batch_nodes = []
 
         # 插入剩余的节点
         if batch_nodes:
-            self.neo4j.insert_nodes_batch('ME_Subregion', batch_nodes)
+            self._insert_me_subregion_batch_with_merge(batch_nodes)
             self.stats['me_subregions_inserted'] = self.stats.get('me_subregions_inserted', 0) + len(batch_nodes)
 
-        logger.info(f"成功插入 {self.stats.get('me_subregions_inserted', 0)} 个ME_Subregion节点")
+        logger.info(f"成功插入/更新 {self.stats.get('me_subregions_inserted', 0)} 个ME_Subregion节点")
+
+    def _insert_me_subregion_batch_with_merge(self, batch_nodes):
+        """
+        使用MERGE批量插入ME_Subregion节点（辅助方法）
+
+        MERGE会先检查节点是否存在:
+        - 如果存在: 更新属性
+        - 如果不存在: 创建新节点
+        """
+        with self.neo4j.driver.session(database=self.neo4j.database) as session:
+            query = """
+            UNWIND $batch AS props
+            MERGE (n:ME_Subregion {me_subregion_id: props.me_subregion_id})
+            SET n.acronym = props.acronym,
+                n.name = props.name,
+                n.parent_subregion = props.parent_subregion,
+                n.rgb_triplet = props.rgb_triplet
+            """
+            try:
+                session.run(query, batch=batch_nodes)
+            except Exception as e:
+                logger.error(f"批量插入ME_Subregion节点失败: {e}")
+                # 如果批量失败，尝试逐个插入以定位问题
+                self._insert_me_subregion_one_by_one(batch_nodes)
+
+    def _insert_me_subregion_one_by_one(self, nodes):
+        """
+        逐个插入ME_Subregion节点（当批量插入失败时使用）
+        用于定位具体是哪个节点导致问题
+        """
+        logger.warning("批量插入ME_Subregion失败，切换到逐个插入模式...")
+        failed_count = 0
+
+        with self.neo4j.driver.session(database=self.neo4j.database) as session:
+            for node in nodes:
+                query = """
+                MERGE (n:ME_Subregion {me_subregion_id: $me_subregion_id})
+                SET n.acronym = $acronym,
+                    n.name = $name,
+                    n.parent_subregion = $parent_subregion,
+                    n.rgb_triplet = $rgb_triplet
+                """
+                try:
+                    session.run(query, **node)
+                except Exception as e:
+                    failed_count += 1
+                    if failed_count <= 5:  # 只显示前5个错误
+                        logger.error(f"插入ME_Subregion失败 {node['me_subregion_id']}: {e}")
+
+        if failed_count > 0:
+            logger.error(f"共有 {failed_count} 个ME_Subregion插入失败")
 
     def generate_and_insert_subregion_relationships(self, subregion_loader: SubregionLoader):
         """

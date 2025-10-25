@@ -1,14 +1,26 @@
 """
-神经元ME_Subregion映射工具 V2 - 修正版
-基于已知的Subregion（celltype）和soma坐标精确定位ME_Subregion
+神经元ME_Subregion映射工具 - 正确版本
+基于正确理解的数据结构
 
-关键修正：
-1. ME_Subregion带有-ME后缀
-2. 使用info.csv中已有的celltype作为Subregion
-3. 通过soma坐标在NRRD中查找ME_Subregion（带-ME后缀的区域）
+关键理解：
+1. NRRD体素值本身就是ME子区域的唯一标识符
+   - 体素值 953 = MOp2/3-ME1
+   - 体素值 954 = MOp2/3-ME2
 
-作者: Claude (修正版)
+2. PKL文件: {NRRD体素值: 父区域ID}
+   - {953: 943} 表示 "ME子区域953属于父区域943 (MOp2/3)"
+
+3. JSON文件: 提供ME子区域的详细信息
+   - ID格式 '943_953' 中，953就是NRRD体素值
+
+正确的映射流程：
+  soma坐标 → NRRD体素值 → 直接就是ME子区域！
+           → 查询JSON获取名称 (通过体素值)
+           → 查询PKL验证父区域 (可选)
+
+作者: Claude
 日期: 2025-10-25
+版本: CORRECT
 """
 import pickle
 import numpy as np
@@ -20,7 +32,7 @@ import nrrd
 
 
 class NeuronMESubregionMapperV2:
-    """修正版：将神经元映射到ME_Subregion（带-ME后缀）"""
+    """正确版本：基于NRRD体素值直接对应ME子区域的理解"""
 
     def __init__(self,
                  nrrd_file: Path,
@@ -32,11 +44,11 @@ class NeuronMESubregionMapperV2:
         初始化映射器
 
         参数:
-            nrrd_file: ME注释的nrrd文件（包含ME_Subregion）
-            pkl_file: NRRD value到区域ID的映射pkl文件
+            nrrd_file: ME注释的nrrd文件（体素值=ME子区域标识）
+            pkl_file: NRRD体素值到父区域ID的映射
             soma_file: 包含神经元soma坐标的CSV文件
-            info_file: 神经元信息文件（包含celltype=Subregion）
-            json_tree_file: 区域层级树JSON文件（用于获取区域名称）
+            info_file: 神经元信息文件（包含celltype）
+            json_tree_file: 区域层级树JSON文件（提供ME子区域名称）
         """
         self.nrrd_file = nrrd_file
         self.pkl_file = pkl_file
@@ -47,8 +59,8 @@ class NeuronMESubregionMapperV2:
         # 数据容器
         self.annotation_volume = None
         self.annotation_header = None
-        self.nrrd_to_region_id_map = None  # NRRD value -> Region ID
-        self.region_id_to_info_map = {}    # Region ID -> 区域信息（包括名称）
+        self.voxel_to_parent_map = None      # NRRD体素值 -> 父区域ID
+        self.voxel_to_me_info_map = {}       # NRRD体素值 -> ME子区域信息
         self.soma_df = None
         self.info_df = None
 
@@ -56,7 +68,7 @@ class NeuronMESubregionMapperV2:
         self.stats = {
             'total_neurons': 0,
             'mapped_to_me_subregion': 0,
-            'mapped_to_subregion_only': 0,
+            'mapped_to_non_me_region': 0,
             'unmapped': 0
         }
 
@@ -70,9 +82,9 @@ class NeuronMESubregionMapperV2:
             logger.info(f"NRRD数据类型: {self.annotation_volume.dtype}")
 
             # 检查注释值的范围
-            unique_ids = np.unique(self.annotation_volume)
-            logger.info(f"注释中包含 {len(unique_ids)} 个唯一值")
-            logger.info(f"值范围: {unique_ids.min()} - {unique_ids.max()}")
+            unique_values = np.unique(self.annotation_volume)
+            logger.info(f"NRRD中包含 {len(unique_values)} 个唯一体素值")
+            logger.info(f"体素值范围: {unique_values.min()} - {unique_values.max()}")
 
             return True
 
@@ -84,27 +96,26 @@ class NeuronMESubregionMapperV2:
         """
         加载PKL映射文件
 
-        PKL格式: {nrrd_voxel_value: region_id}
+        PKL格式: {nrrd_voxel_value: parent_region_id}
+        作用: 告诉我们每个NRRD体素值(可能是ME子区域)属于哪个父区域
         """
         logger.info(f"加载PKL映射文件: {self.pkl_file}")
 
         try:
             with open(self.pkl_file, 'rb') as f:
-                self.nrrd_to_region_id_map = pickle.load(f)
+                self.voxel_to_parent_map = pickle.load(f)
 
-            logger.info(f"PKL文件类型: {type(self.nrrd_to_region_id_map)}")
-
-            if not isinstance(self.nrrd_to_region_id_map, dict):
+            if not isinstance(self.voxel_to_parent_map, dict):
                 logger.error(f"PKL文件不是字典格式")
                 return False
 
-            logger.info(f"加载了 {len(self.nrrd_to_region_id_map)} 个NRRD->Region ID映射")
+            logger.info(f"加载了 {len(self.voxel_to_parent_map)} 个体素值->父区域映射")
 
             # 显示样例
-            sample_items = list(self.nrrd_to_region_id_map.items())[:5]
-            logger.info(f"映射样例 (NRRD value -> Region ID):")
-            for nrrd_val, region_id in sample_items:
-                logger.info(f"  {nrrd_val} -> {region_id}")
+            sample_items = list(self.voxel_to_parent_map.items())[:5]
+            logger.info(f"映射样例 (NRRD体素值 -> 父区域ID):")
+            for voxel_val, parent_id in sample_items:
+                logger.info(f"  {voxel_val} -> {parent_id}")
 
             return True
 
@@ -112,45 +123,51 @@ class NeuronMESubregionMapperV2:
             logger.error(f"加载PKL文件失败: {e}")
             return False
 
-    def load_region_info_from_json(self) -> bool:
-        """从JSON文件加载区域信息"""
+    def load_me_regions_from_json(self) -> bool:
+        """
+        从JSON文件加载ME子区域信息
+
+        关键：提取JSON中'943_953'格式的ID，其中953就是NRRD体素值
+        """
         if not self.json_tree_file or not self.json_tree_file.exists():
             logger.warning(f"JSON文件不存在或未提供: {self.json_tree_file}")
             return False
 
-        logger.info(f"加载区域信息: {self.json_tree_file}")
+        logger.info(f"加载ME子区域信息: {self.json_tree_file}")
 
         try:
             import json
             with open(self.json_tree_file, 'r') as f:
                 tree_data = json.load(f)
 
-            # 递归提取所有区域信息
-            self._extract_region_info_from_tree(tree_data)
+            # 递归提取所有ME子区域
+            self._extract_me_regions_from_tree(tree_data)
 
-            logger.info(f"从JSON加载了 {len(self.region_id_to_info_map)} 个区域信息")
+            logger.info(f"从JSON提取了 {len(self.voxel_to_me_info_map)} 个ME子区域映射")
 
-            # 统计ME_Subregion数量
-            me_count = sum(1 for info in self.region_id_to_info_map.values()
-                          if info.get('acronym', '').endswith('-ME'))
-            logger.info(f"其中包含 {me_count} 个ME_Subregion（带-ME后缀）")
+            # 显示一些ME子区域样例
+            if self.voxel_to_me_info_map:
+                logger.info("ME子区域样例（前10个）:")
+                for i, (voxel, info) in enumerate(list(self.voxel_to_me_info_map.items())[:10]):
+                    logger.info(f"  体素{voxel:4d}: {info['acronym']:<20} (父区域{info['parent_id']})")
 
-            # 显示一些ME_Subregion样例
-            me_samples = [info for info in self.region_id_to_info_map.values()
-                         if info.get('acronym', '').endswith('-ME')][:5]
-            if me_samples:
-                logger.info("ME_Subregion样例:")
-                for info in me_samples:
-                    logger.info(f"  ID {info['id']}: {info['acronym']} ({info.get('name', 'N/A')})")
+            # 验证PKL和JSON的一致性
+            self._verify_pkl_json_consistency()
 
             return True
 
         except Exception as e:
             logger.error(f"加载JSON文件失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
 
-    def _extract_region_info_from_tree(self, nodes, parent_info=None):
-        """递归提取区域信息"""
+    def _extract_me_regions_from_tree(self, nodes, parent_info=None):
+        """
+        递归提取ME子区域信息
+
+        关键：从'943_953'格式中提取953作为NRRD体素值
+        """
         if isinstance(nodes, dict):
             nodes = [nodes]
 
@@ -158,25 +175,65 @@ class NeuronMESubregionMapperV2:
             if not isinstance(node, dict):
                 continue
 
-            # 提取节点信息
             node_id = node.get('id')
             acronym = node.get('acronym', '')
             name = node.get('name', '')
 
-            if node_id is not None:
-                self.region_id_to_info_map[node_id] = {
-                    'id': node_id,
-                    'acronym': acronym,
-                    'name': name,
-                    'is_me_subregion': acronym.endswith('-ME'),
-                    'parent': parent_info
-                }
+            # 只处理ME子区域（带-ME后缀）
+            if acronym and '-ME' in acronym:
+                if isinstance(node_id, str) and '_' in node_id:
+                    # 格式: '943_953'
+                    parts = node_id.split('_')
+                    try:
+                        parent_id = int(parts[0])  # 943
+                        voxel_value = int(parts[1])  # 953 - 这就是NRRD体素值！
+
+                        self.voxel_to_me_info_map[voxel_value] = {
+                            'voxel_value': voxel_value,
+                            'parent_id': parent_id,
+                            'acronym': acronym,
+                            'name': name,
+                            'json_id': node_id
+                        }
+                    except (ValueError, IndexError) as e:
+                        logger.warning(f"无法解析ME子区域ID: {node_id}")
 
             # 递归处理子节点
             children = node.get('children', [])
             if children:
-                parent_for_children = {'id': node_id, 'acronym': acronym}
-                self._extract_region_info_from_tree(children, parent_for_children)
+                self._extract_me_regions_from_tree(children, node)
+
+    def _verify_pkl_json_consistency(self):
+        """验证PKL和JSON的一致性"""
+        logger.info("验证PKL和JSON的一致性...")
+
+        me_voxels = set(self.voxel_to_me_info_map.keys())
+        pkl_voxels = set(self.voxel_to_parent_map.keys())
+
+        # ME体素值应该都在PKL中
+        me_in_pkl = me_voxels & pkl_voxels
+        logger.info(f"ME子区域体素值在PKL中: {len(me_in_pkl)}/{len(me_voxels)} ({len(me_in_pkl)/len(me_voxels)*100:.1f}%)")
+
+        if len(me_in_pkl) < len(me_voxels):
+            missing = me_voxels - pkl_voxels
+            logger.warning(f"有 {len(missing)} 个ME子区域体素值不在PKL中")
+            logger.warning(f"缺失样例: {list(missing)[:5]}")
+
+        # 验证父区域ID是否一致
+        mismatches = 0
+        for voxel in me_in_pkl:
+            expected_parent = self.voxel_to_me_info_map[voxel]['parent_id']
+            actual_parent = self.voxel_to_parent_map[voxel]
+            if expected_parent != actual_parent:
+                mismatches += 1
+                if mismatches <= 3:  # 只显示前3个不匹配的
+                    logger.warning(f"父区域ID不匹配: 体素{voxel}, "
+                                 f"JSON中={expected_parent}, PKL中={actual_parent}")
+
+        if mismatches == 0:
+            logger.info("✓ PKL和JSON的父区域ID完全一致")
+        else:
+            logger.warning(f"⚠ 有 {mismatches} 个ME子区域的父区域ID不匹配")
 
     def load_soma_coordinates(self) -> bool:
         """加载soma坐标数据"""
@@ -192,10 +249,8 @@ class NeuronMESubregionMapperV2:
 
             if missing_cols:
                 logger.error(f"Soma文件缺少必要的列: {missing_cols}")
-                logger.info(f"可用列: {list(self.soma_df.columns)}")
                 return False
 
-            # 显示坐标范围
             logger.info(f"X坐标范围: {self.soma_df['x'].min():.1f} - {self.soma_df['x'].max():.1f}")
             logger.info(f"Y坐标范围: {self.soma_df['y'].min():.1f} - {self.soma_df['y'].max():.1f}")
             logger.info(f"Z坐标范围: {self.soma_df['z'].min():.1f} - {self.soma_df['z'].max():.1f}")
@@ -213,18 +268,10 @@ class NeuronMESubregionMapperV2:
         try:
             self.info_df = pd.read_csv(self.info_file)
             logger.info(f"加载了 {len(self.info_df)} 条info记录")
-            logger.info(f"Info列名: {list(self.info_df.columns)}")
 
-            # 检查celltype列
             if 'celltype' in self.info_df.columns:
                 non_null_celltype = self.info_df['celltype'].notna().sum()
                 logger.info(f"包含 {non_null_celltype}/{len(self.info_df)} 个有celltype的记录")
-
-                # 显示celltype样例
-                sample_celltypes = self.info_df['celltype'].dropna().head(5).tolist()
-                logger.info(f"Celltype样例: {sample_celltypes}")
-            else:
-                logger.warning("Info文件中没有celltype列")
 
             return True
 
@@ -233,26 +280,32 @@ class NeuronMESubregionMapperV2:
             return False
 
     def coordinate_to_voxel(self, x: float, y: float, z: float) -> Tuple[int, int, int]:
-        """
-        将物理坐标转换为体素索引
-
-        假设坐标是CCF空间的微米坐标，分辨率为25微米
-        """
+        """将物理坐标转换为体素索引（假设25μm分辨率）"""
         resolution = 25.0
-
         voxel_x = int(x / resolution)
         voxel_y = int(y / resolution)
         voxel_z = int(z / resolution)
-
         return voxel_x, voxel_y, voxel_z
 
-    def get_region_at_coordinate(self, x: float, y: float, z: float) -> Tuple[Optional[int], Optional[str], bool]:
+    def get_me_subregion_at_coordinate(self, x: float, y: float, z: float) -> Optional[Dict]:
         """
-        获取指定坐标处的区域信息
+        获取指定坐标处的ME子区域信息
 
         返回:
-            (region_id, acronym, is_me_subregion)
-            is_me_subregion: True表示该区域是ME_Subregion（带-ME后缀）
+            如果是ME子区域: {
+                'voxel_value': int,
+                'parent_id': int,
+                'acronym': str,
+                'name': str,
+                'is_me_subregion': True
+            }
+            如果是其他区域: {
+                'voxel_value': int,
+                'parent_id': int (from PKL),
+                'acronym': None,
+                'is_me_subregion': False
+            }
+            如果无效: None
         """
         # 转换为体素索引
         voxel_x, voxel_y, voxel_z = self.coordinate_to_voxel(x, y, z)
@@ -261,49 +314,43 @@ class NeuronMESubregionMapperV2:
         if not (0 <= voxel_x < self.annotation_volume.shape[0] and
                 0 <= voxel_y < self.annotation_volume.shape[1] and
                 0 <= voxel_z < self.annotation_volume.shape[2]):
-            return None, None, False
+            return None
 
         # 获取NRRD体素值
-        nrrd_value = int(self.annotation_volume[voxel_x, voxel_y, voxel_z])
+        voxel_value = int(self.annotation_volume[voxel_x, voxel_y, voxel_z])
 
-        if nrrd_value == 0:
-            return None, None, False
+        if voxel_value == 0:
+            return None
 
-        # 通过PKL映射获取region ID
-        region_id = self.nrrd_to_region_id_map.get(nrrd_value)
-
-        if region_id is None:
-            return None, None, False
-
-        # 获取区域信息
-        region_info = self.region_id_to_info_map.get(region_id)
-
-        if region_info:
-            acronym = region_info['acronym']
-            is_me = region_info['is_me_subregion']
-            return region_id, acronym, is_me
+        # 检查是否是ME子区域
+        if voxel_value in self.voxel_to_me_info_map:
+            # 是ME子区域！
+            me_info = self.voxel_to_me_info_map[voxel_value].copy()
+            me_info['is_me_subregion'] = True
+            return me_info
         else:
-            # 如果没有区域信息，假设非ME
-            return region_id, f"Region_{region_id}", False
+            # 不是ME子区域，但可能是其他区域
+            parent_id = self.voxel_to_parent_map.get(voxel_value)
+            return {
+                'voxel_value': voxel_value,
+                'parent_id': parent_id,
+                'acronym': None,
+                'name': None,
+                'is_me_subregion': False
+            }
 
     def map_neurons_to_regions(self) -> pd.DataFrame:
         """
-        将所有神经元映射到区域
+        将所有神经元映射到区域（包括ME子区域）
 
-        对于每个神经元：
-        1. 从info.csv获取已知的Subregion（celltype）
-        2. 通过soma坐标查找NRRD中的区域
-        3. 如果找到的是ME_Subregion（带-ME后缀），则记录
-        4. 否则只记录Subregion
-
-        返回包含以下列的DataFrame:
+        返回DataFrame包含:
         - ID: 神经元ID
         - subregion: 从celltype获取的Subregion
-        - me_subregion_id: 通过soma坐标找到的ME_Subregion ID（如果有）
-        - me_subregion_acronym: ME_Subregion的缩写（如果有）
-        - found_region_id: NRRD中找到的区域ID
-        - found_region_acronym: NRRD中找到的区域缩写
-        - is_me_subregion: 找到的区域是否为ME_Subregion
+        - me_subregion_voxel: ME子区域的NRRD体素值
+        - me_subregion_acronym: ME子区域的缩写名称
+        - me_subregion_name: ME子区域的完整名称
+        - parent_region_id: 父区域ID
+        - is_me_subregion: 是否为ME子区域
         """
         logger.info("开始映射神经元到区域...")
 
@@ -325,8 +372,8 @@ class NeuronMESubregionMapperV2:
             celltype = row.get('celltype', '')
             x, y, z = row['x'], row['y'], row['z']
 
-            # 通过soma坐标查找区域
-            region_id, acronym, is_me = self.get_region_at_coordinate(x, y, z)
+            # 查找ME子区域
+            region_info = self.get_me_subregion_at_coordinate(x, y, z)
 
             result = {
                 'ID': neuron_id,
@@ -334,23 +381,35 @@ class NeuronMESubregionMapperV2:
                 'soma_x': x,
                 'soma_y': y,
                 'soma_z': z,
-                'found_region_id': region_id,
-                'found_region_acronym': acronym,
-                'is_me_subregion': is_me
             }
 
-            # 如果找到的是ME_Subregion，记录详细信息
-            if is_me:
-                result['me_subregion_id'] = region_id
-                result['me_subregion_acronym'] = acronym
-                self.stats['mapped_to_me_subregion'] += 1
-            else:
-                result['me_subregion_id'] = None
-                result['me_subregion_acronym'] = None
-                if region_id:
-                    self.stats['mapped_to_subregion_only'] += 1
+            if region_info:
+                is_me = region_info.get('is_me_subregion', False)
+
+                if is_me:
+                    # 映射到ME子区域
+                    result['me_subregion_voxel'] = region_info['voxel_value']
+                    result['me_subregion_acronym'] = region_info['acronym']
+                    result['me_subregion_name'] = region_info['name']
+                    result['parent_region_id'] = region_info['parent_id']
+                    result['is_me_subregion'] = True
+                    self.stats['mapped_to_me_subregion'] += 1
                 else:
-                    self.stats['unmapped'] += 1
+                    # 映射到其他区域（非ME）
+                    result['me_subregion_voxel'] = None
+                    result['me_subregion_acronym'] = None
+                    result['me_subregion_name'] = None
+                    result['parent_region_id'] = region_info.get('parent_id')
+                    result['is_me_subregion'] = False
+                    self.stats['mapped_to_non_me_region'] += 1
+            else:
+                # 未映射
+                result['me_subregion_voxel'] = None
+                result['me_subregion_acronym'] = None
+                result['me_subregion_name'] = None
+                result['parent_region_id'] = None
+                result['is_me_subregion'] = False
+                self.stats['unmapped'] += 1
 
             results.append(result)
 
@@ -364,8 +423,8 @@ class NeuronMESubregionMapperV2:
         logger.info(f"  总神经元数: {self.stats['total_neurons']}")
         logger.info(f"  映射到ME_Subregion: {self.stats['mapped_to_me_subregion']} "
                    f"({self.stats['mapped_to_me_subregion']/self.stats['total_neurons']*100:.1f}%)")
-        logger.info(f"  仅映射到Subregion: {self.stats['mapped_to_subregion_only']} "
-                   f"({self.stats['mapped_to_subregion_only']/self.stats['total_neurons']*100:.1f}%)")
+        logger.info(f"  映射到非ME区域: {self.stats['mapped_to_non_me_region']} "
+                   f"({self.stats['mapped_to_non_me_region']/self.stats['total_neurons']*100:.1f}%)")
         logger.info(f"  未映射: {self.stats['unmapped']} "
                    f"({self.stats['unmapped']/self.stats['total_neurons']*100:.1f}%)")
         logger.info("="*60)
@@ -375,57 +434,56 @@ class NeuronMESubregionMapperV2:
         me_mapped = result_df[result_df['is_me_subregion'] == True]
 
         if not me_mapped.empty:
-            logger.info("ME_Subregion映射样例:")
-            for idx, row in me_mapped.head(5).iterrows():
+            logger.info(f"\nME_Subregion映射样例（前10个）:")
+            for idx, row in me_mapped.head(10).iterrows():
                 logger.info(f"  神经元 {row['ID']}: "
-                          f"Subregion={row['subregion']}, "
-                          f"ME_Subregion={row['me_subregion_acronym']}")
+                          f"{row['me_subregion_acronym']} "
+                          f"(体素{row['me_subregion_voxel']}, 父区域{row['parent_region_id']})")
+
+            # 统计每个ME子区域映射的神经元数
+            me_counts = me_mapped['me_subregion_acronym'].value_counts()
+            logger.info(f"\nME子区域分布（前10个）:")
+            for acronym, count in me_counts.head(10).items():
+                logger.info(f"  {acronym}: {count} 个神经元")
+        else:
+            logger.warning("⚠ 没有神经元被映射到ME_Subregion!")
 
         return result_df
 
     def update_info_file(self, mapping_df: pd.DataFrame, output_file: Optional[Path] = None):
-        """
-        更新info.csv文件，添加ME_Subregion信息
-
-        参数:
-            mapping_df: 包含映射结果的DataFrame
-            output_file: 输出文件路径，如果为None则覆盖原文件
-        """
+        """更新info.csv文件，添加ME_Subregion信息"""
         logger.info("更新info文件...")
 
-        # 选择要添加的列
         columns_to_add = [
             'ID',
-            'me_subregion_id',
+            'me_subregion_voxel',
             'me_subregion_acronym',
-            'found_region_id',
-            'found_region_acronym',
+            'me_subregion_name',
+            'parent_region_id',
             'is_me_subregion'
         ]
 
-        # 合并到原info_df
         updated_info = self.info_df.merge(
             mapping_df[columns_to_add],
             on='ID',
             how='left'
         )
 
-        # 确定输出文件
         if output_file is None:
-            output_file = self.info_file
+            output_file = self.info_file.parent / "info_with_me_subregion.csv"
 
-        # 保存
         updated_info.to_csv(output_file, index=False)
         logger.info(f"已保存更新后的info文件到: {output_file}")
 
-        # 统计
-        me_count = updated_info['me_subregion_id'].notna().sum()
+        me_count = updated_info['is_me_subregion'].sum()
         logger.info(f"Info文件中 {me_count}/{len(updated_info)} 个神经元有ME_Subregion信息")
+
+        return output_file
 
     def run_full_pipeline(self, output_info_file: Optional[Path] = None) -> bool:
         """运行完整的映射流程"""
         logger.info("="*60)
-        logger.info("开始神经元区域映射流程 V2（修正版）")
+        logger.info("开始神经元ME_Subregion映射流程（正确版本）")
         logger.info("="*60)
 
         # 1. 加载NRRD注释
@@ -436,8 +494,10 @@ class NeuronMESubregionMapperV2:
         if not self.load_pkl_mapping():
             return False
 
-        # 3. 加载区域信息（可选但推荐）
-        self.load_region_info_from_json()
+        # 3. 加载ME子区域信息
+        if not self.load_me_regions_from_json():
+            logger.error("无法加载JSON文件，无法继续")
+            return False
 
         # 4. 加载soma坐标
         if not self.load_soma_coordinates():
@@ -451,10 +511,11 @@ class NeuronMESubregionMapperV2:
         mapping_df = self.map_neurons_to_regions()
 
         # 7. 更新info文件
-        self.update_info_file(mapping_df, output_info_file)
+        output_path = self.update_info_file(mapping_df, output_info_file)
 
         logger.info("="*60)
         logger.info("映射流程完成")
+        logger.info(f"输出文件: {output_path}")
         logger.info("="*60)
 
         return True
@@ -462,39 +523,25 @@ class NeuronMESubregionMapperV2:
 
 def main():
     """主函数"""
-    from loguru import logger
     import sys
 
     # 设置日志
     logger.remove()
     logger.add(sys.stderr, level="INFO")
-    logger.add("neuron_me_mapping_v2.log", rotation="100 MB", level="DEBUG")
+    logger.add("neuron_me_mapping_correct.log", rotation="100 MB", level="DEBUG")
 
-    # 文件路径
+    # 文件路径 - 根据实际情况修改
     data_dir = Path("../data")
 
-    nrrd_file = Path("/mnt/user-data/uploads/parc_r671_full.nrrd")
-    pkl_file = Path("/mnt/user-data/uploads/parc_r671_full_nrrd.pkl")
+    nrrd_file = data_dir / "parc_r671_full.nrrd"
+    pkl_file = data_dir / "parc_r671_full.nrrd.pkl"
     soma_file = data_dir / "soma.csv"
     info_file = data_dir / "info.csv"
     json_file = data_dir / "surf_tree_ccf-me.json"
-    output_file = data_dir / "info_with_me_subregion_v2.csv"
-
-    # 检查必需文件
-    required_files = [nrrd_file, pkl_file, soma_file, info_file]
-    for f in required_files:
-        if not f.exists():
-            logger.error(f"必需文件不存在: {f}")
-            return False
-
-    # JSON文件是可选的
-    if not json_file.exists():
-        logger.warning(f"JSON文件不存在: {json_file}")
-        logger.warning("将使用简单的Region ID作为名称")
-        json_file = None
+    output_file = data_dir / "info_with_me_subregion.csv"
 
     # 创建映射器
-    mapper = NeuronMESubregionMapperV2(
+    mapper = NeuronMESubregionMapper(
         nrrd_file=nrrd_file,
         pkl_file=pkl_file,
         soma_file=soma_file,
@@ -507,12 +554,8 @@ def main():
 
     if success:
         logger.info("✓ 映射成功完成!")
-        logger.info(f"✓ 更新后的info文件: {output_file}")
     else:
         logger.error("✗ 映射失败!")
+        return 1
 
-    return success
-
-
-if __name__ == "__main__":
-    main()
+    return 0

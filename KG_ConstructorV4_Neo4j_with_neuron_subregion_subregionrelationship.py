@@ -12,7 +12,7 @@ import warnings
 import ast
 from pathlib import Path
 from typing import Dict, List, Set, Optional, Union
-
+import time
 import numpy as np
 import pandas as pd
 from loguru import logger
@@ -107,14 +107,175 @@ class Neo4jConnector:
         if self.driver:
             self.driver.close()
             logger.info("关闭Neo4j连接")
-    
-    def clear_database(self):
-        """清空数据库（谨慎使用）"""
-        logger.warning("清空数据库中...")
-        with self.driver.session(database=self.database) as session:
-            session.run("MATCH (n) DETACH DELETE n")
-        logger.info("数据库已清空")
-    
+
+    def clear_database(self, batch_size=10000):
+        """
+        清空数据库（改进版 - 分批删除避免内存溢出）
+
+        参数:
+            batch_size: 每批删除的节点数，默认10000
+        """
+        logger.warning("清空数据库中（分批删除）...")
+
+        total_deleted = 0
+        batch_num = 0
+
+        while True:
+            batch_num += 1
+
+            with self.driver.session(database=self.database) as session:
+                # 先检查还剩多少节点
+                try:
+                    result = session.run("MATCH (n) RETURN count(n) as count")
+                    remaining = result.single()['count']
+
+                    if remaining == 0:
+                        logger.info("✓ 所有节点已删除")
+                        break
+
+                    if batch_num == 1:
+                        logger.info(f"数据库中有 {remaining:,} 个节点需要删除")
+                    elif batch_num % 10 == 0:  # 每10批报告一次
+                        logger.info(f"进度: 剩余 {remaining:,} 个节点 (已删除 {total_deleted:,})")
+
+                except Exception as e:
+                    logger.error(f"查询节点数失败: {e}")
+                    break
+
+                # 分批删除节点和关系
+                try:
+                    result = session.run(f"""
+                        MATCH (n)
+                        WITH n LIMIT {batch_size}
+                        DETACH DELETE n
+                        RETURN count(n) as deleted
+                    """)
+
+                    deleted = result.single()['deleted']
+                    total_deleted += deleted
+
+                    if deleted == 0:
+                        logger.warning("无法删除更多节点")
+                        break
+
+                    # 短暂休息，让数据库释放内存
+                    time.sleep(0.3)
+
+                except Exception as e:
+                    logger.error(f"删除节点时出错: {e}")
+                    # 如果删除失败，减小批次大小重试
+                    if batch_size > 1000:
+                        logger.info(f"减小批次大小到 {batch_size // 2} 重试...")
+                        return self.clear_database(batch_size // 2)
+                    else:
+                        raise
+
+        logger.info(f"✓ 数据库已清空，共删除 {total_deleted:,} 个节点")
+
+    # ==================== 或者使用智能清空方法 ====================
+
+    def clear_database_smart(self):
+        """
+        智能清空数据库（按类型顺序删除）
+        先删除Neuron等大量节点，减少内存压力
+        """
+        logger.warning("智能清空数据库中...")
+
+        # 删除顺序：从多到少，从叶子到根
+        delete_order = [
+            ('Neuron', 5000),  # Neuron最多，用较小批次
+            ('Cluster', 10000),
+            ('Supertype', 10000),
+            ('Subclass', 10000),
+            ('Class', 10000),
+            ('ME_Subregion', 10000),
+            ('Subregion', 10000),
+            ('Region', 10000),
+        ]
+
+        total_deleted = 0
+
+        for label, batch_size in delete_order:
+            deleted_count = self._delete_nodes_by_label(label, batch_size)
+            total_deleted += deleted_count
+
+            if deleted_count > 0:
+                logger.info(f"✓ 已删除 {label}: {deleted_count:,} 个节点")
+
+        # 清理剩余节点
+        logger.info("清理剩余节点...")
+        remaining_deleted = self._delete_all_remaining_nodes(batch_size=5000)
+        total_deleted += remaining_deleted
+
+        logger.info(f"✓ 数据库已清空，共删除 {total_deleted:,} 个节点")
+
+    def _delete_nodes_by_label(self, label, batch_size):
+        """
+        按标签删除节点（辅助方法）
+
+        返回:
+            删除的节点总数
+        """
+        total = 0
+
+        while True:
+            with self.driver.session(database=self.database) as session:
+                try:
+                    result = session.run(f"""
+                        MATCH (n:{label})
+                        WITH n LIMIT {batch_size}
+                        DETACH DELETE n
+                        RETURN count(n) as deleted
+                    """)
+
+                    deleted = result.single()['deleted']
+                    total += deleted
+
+                    if deleted == 0:
+                        break
+
+                    time.sleep(0.2)
+
+                except Exception as e:
+                    # 如果该标签不存在或其他错误，跳过
+                    logger.debug(f"删除 {label} 时出错: {e}")
+                    break
+
+        return total
+
+    def _delete_all_remaining_nodes(self, batch_size):
+        """
+        删除所有剩余节点（辅助方法）
+
+        返回:
+            删除的节点总数
+        """
+        total = 0
+
+        while True:
+            with self.driver.session(database=self.database) as session:
+                try:
+                    result = session.run(f"""
+                        MATCH (n)
+                        WITH n LIMIT {batch_size}
+                        DETACH DELETE n
+                        RETURN count(n) as deleted
+                    """)
+
+                    deleted = result.single()['deleted']
+                    total += deleted
+
+                    if deleted == 0:
+                        break
+
+                    time.sleep(0.2)
+
+                except Exception as e:
+                    logger.error(f"删除剩余节点时出错: {e}")
+                    break
+
+        return total
+
     def create_constraints(self):
         """创建约束和索引（增强版，包括Neuron）"""
         logger.info("创建数据库约束和索引...")
@@ -1986,7 +2147,7 @@ def main(data_dir: str = "../data",
     try:
         # 清空数据库（如果需要）
         if clear_database:
-            neo4j_conn.clear_database()
+            neo4j_conn.clear_database_smart()
 
         # 创建约束和索引
         neo4j_conn.create_constraints()

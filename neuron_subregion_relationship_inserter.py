@@ -40,7 +40,7 @@ class NeuronSubregionRelationshipInserter:
 
     def load_neuron_subregion_mapping(self) -> bool:
         """
-        加载神经元-Subregion映射数据
+        加载神经元-Subregion映射数据（修复版）
 
         返回:
             bool: 是否加载成功
@@ -89,14 +89,17 @@ class NeuronSubregionRelationshipInserter:
 
             logger.info(f"成功加载 {len(self.neuron_subregion_df)} 条神经元映射记录")
 
-            # 统计有映射的神经元
+            # 统计有映射的神经元（修复版）
             neurons_with_subregion = self.neuron_subregion_df['subregion'].notna().sum()
-            neurons_with_me = self.neuron_subregion_df['is_me_subregion'].sum()
+
+
+            neurons_with_me = (self.neuron_subregion_df['is_me_subregion'].astype(str).str.lower() == "true").sum()
+
+            total_neurons = len(self.neuron_subregion_df)
 
             logger.info(
-                f"有Subregion映射的神经元: {neurons_with_subregion} ({neurons_with_subregion / len(self.neuron_subregion_df) * 100:.2f}%)")
-            logger.info(
-                f"有ME_Subregion映射的神经元: {neurons_with_me} ({neurons_with_me / len(self.neuron_subregion_df) * 100:.2f}%)")
+                f"有Subregion映射的神经元: {neurons_with_subregion} ({neurons_with_subregion / total_neurons * 100:.2f}%)")
+            logger.info(f"有ME_Subregion映射的神经元: {neurons_with_me} ({neurons_with_me / total_neurons * 100:.2f}%)")
 
             # 显示样例
             logger.info("\n样例数据（前5条有ME映射的记录）:")
@@ -219,8 +222,7 @@ class NeuronSubregionRelationshipInserter:
 
         # 筛选有ME_Subregion映射的神经元
         valid_neurons = self.neuron_subregion_df[
-            self.neuron_subregion_df['is_me_subregion'] == True
-            ].copy()
+            self.neuron_subregion_df['is_me_subregion'].astype(str).str.lower() == "true"].copy()
 
         logger.info(f"找到 {len(valid_neurons)} 个有ME_Subregion映射的神经元")
 

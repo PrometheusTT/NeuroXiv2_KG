@@ -378,43 +378,50 @@ class NeuronProjectionProcessorV5Fixed:
 # ==================== 修复2: MERFISH空间映射处理器 ====================
 
 class MERFISHSubregionMapper:
-    """修复版：正确映射 MERFISH 细胞到 Subregion/ME_Subregion"""
+    """
+    完全正确的MERFISH映射器
 
-    def __init__(self, data_path: Path, ccf_tree_json: Path):
-        """
-        初始化
+    关键理解：
+    1. MERFISH坐标已经是25μm单位（data_loader中乘以40是因为原始是mm）
+    2. 需要直接使用坐标整数部分作为索引
+    3. 只有皮层区域有ME细分
+    """
 
-        参数:
-            data_path: 数据目录
-            ccf_tree_json: CCF树结构JSON文件
-        """
+    def __init__(self, data_path: Path, ccf_tree_json: Path, ccf_me_json: Path):
+        """初始化"""
         self.data_path = data_path
         self.ccf_tree_json = ccf_tree_json
+        self.ccf_me_json = ccf_me_json
 
-        # CCF结构映射
+        # 标准CCF映射
         self.id_to_acronym = {}
         self.id_to_name = {}
-        self.id_to_parent = {}
+        self.acronym_to_id = {}
 
-        # ME注释
+        # Subregion信息（从CCF-ME树）
+        self.subregion_acronyms = set()
+        self.subregion_id_to_acronym = {}
+        self.subregion_to_region = {}
+
+        # ME_Subregion信息
         self.me_annotation = None
-        self.voxel_to_me_subregion = {}
+        self.voxel_to_parent_id = {}
+        self.parent_id_to_me_acronym = {}
+        self.me_acronym_to_subregion = {}
 
-    # ⭐ 修复2: 改进 CCF 树加载
-    def load_ccf_tree_for_subregion_mapping(self) -> bool:
-        """加载 CCF 树以构建 subregion 映射"""
-        logger.info(f"加载 CCF 树用于 subregion 映射: {self.ccf_tree_json}")
+    def load_standard_ccf_tree(self) -> bool:
+        """加载标准CCF树"""
+        logger.info(f"加载标准CCF树: {self.ccf_tree_json}")
 
         if not self.ccf_tree_json.exists():
-            logger.error(f"CCF树文件不存在: {self.ccf_tree_json}")
+            logger.error(f"标准CCF树文件不存在")
             return False
 
         try:
             with open(self.ccf_tree_json, 'r') as f:
                 tree_data = json.load(f)
 
-            def traverse_tree(node, parent_info=None):
-                """递归遍历树节点"""
+            def traverse_tree(node):
                 if not isinstance(node, dict):
                     return
 
@@ -425,14 +432,10 @@ class MERFISHSubregionMapper:
                 if node_id is not None:
                     self.id_to_acronym[node_id] = acronym
                     self.id_to_name[node_id] = name
-                    
-                    if parent_info:
-                        self.id_to_parent[node_id] = parent_info
+                    self.acronym_to_id[acronym] = node_id
 
-                # 递归处理children
-                children = node.get('children', [])
-                for child in children:
-                    traverse_tree(child, {'id': node_id, 'acronym': acronym})
+                for child in node.get('children', []):
+                    traverse_tree(child)
 
             if isinstance(tree_data, list):
                 for root in tree_data:
@@ -440,195 +443,354 @@ class MERFISHSubregionMapper:
             else:
                 traverse_tree(tree_data)
 
-            logger.info(f"  - 加载了 {len(self.id_to_acronym)} 个区域映射")
+            logger.info(f"  - 加载了 {len(self.id_to_acronym)} 个CCF区域映射")
             return True
 
         except Exception as e:
-            logger.error(f"加载CCF树失败: {e}")
+            logger.error(f"加载标准CCF树失败: {e}")
             return False
 
-    # ⭐ 修复2: 改进 ME_Subregion 注释加载
+    def load_ccf_me_tree_for_subregions(self) -> bool:
+        """加载CCF-ME树识别subregion"""
+        logger.info(f"加载CCF-ME树: {self.ccf_me_json}")
+
+        if not self.ccf_me_json.exists():
+            logger.error(f"CCF-ME树文件不存在")
+            return False
+
+        try:
+            with open(self.ccf_me_json, 'r') as f:
+                tree_data = json.load(f)
+
+            for root in tree_data:
+                self._traverse_ccf_me_tree(root)
+
+            logger.info(f"  - 识别了 {len(self.subregion_acronyms)} 个Subregion")
+            logger.info(f"  - 识别了 {len(self.me_acronym_to_subregion)} 个ME_Subregion")
+
+            # 样例
+            sample_sr = list(self.subregion_acronyms)[:5]
+            logger.info(f"  - Subregion样例: {sample_sr}")
+
+            sample_me = list(self.me_acronym_to_subregion.items())[:5]
+            logger.info(f"  - ME样例: {sample_me}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"加载CCF-ME树失败: {e}")
+            return False
+
+    def _traverse_ccf_me_tree(self, node, parent_acronym=None, grandparent_acronym=None):
+        """递归遍历CCF-ME树"""
+        acronym = node.get('acronym', '')
+        node_id = node.get('id')
+        name = node.get('name', '')
+
+        # 1. 识别ME节点
+        if '-ME' in acronym:
+            if parent_acronym:
+                self.me_acronym_to_subregion[acronym] = parent_acronym
+
+                # 建立parent_id到ME acronym的多种映射
+                # 方式1: 从node_id提取（如 "VIS-ME_324"）
+                if isinstance(node_id, str) and '_' in node_id:
+                    parts = node_id.split('_')
+                    if len(parts) >= 2:
+                        try:
+                            parent_ccf_id = int(parts[1])
+                            self.parent_id_to_me_acronym[parent_ccf_id] = acronym
+                        except ValueError:
+                            pass
+
+                # 方式2: 从parent_structure_id
+                parent_structure_id = node.get('parent_structure_id')
+                if parent_structure_id is not None:
+                    self.parent_id_to_me_acronym[int(parent_structure_id)] = acronym
+
+                # 方式3: 如果node_id本身是整数
+                if isinstance(node_id, int):
+                    # 这个ID可能就是在pkl中使用的parent_id
+                    self.parent_id_to_me_acronym[node_id] = acronym
+
+        # 2. 识别Subregion（layer节点）
+        elif parent_acronym and '-ME' not in parent_acronym:
+            is_subregion = False
+
+            # 判断标准1: 名称包含"layer"
+            if 'layer' in name.lower():
+                is_subregion = True
+
+            # 判断标准2: acronym符合layer模式
+            if not is_subregion:
+                for pattern in ['1', '2/3', '4', '5', '6a', '6b']:
+                    if acronym.endswith(pattern) or f'{pattern}-' in acronym:
+                        is_subregion = True
+                        break
+
+            # 判断标准3: 有ME子节点
+            has_me_children = any('-ME' in child.get('acronym', '')
+                                  for child in node.get('children', []))
+
+            if has_me_children:
+                is_subregion = True
+
+            if is_subregion:
+                self.subregion_acronyms.add(acronym)
+
+                if node_id is not None:
+                    try:
+                        id_int = int(node_id)
+                        self.subregion_id_to_acronym[id_int] = acronym
+                    except (ValueError, TypeError):
+                        pass
+
+                if parent_acronym:
+                    self.subregion_to_region[acronym] = parent_acronym
+
+        # 递归
+        for child in node.get('children', []):
+            self._traverse_ccf_me_tree(child, acronym, parent_acronym)
+
+    def map_cells_to_subregions(
+            self,
+            cells_df: pd.DataFrame,
+            annotation_volume: np.ndarray
+    ) -> pd.DataFrame:
+        """
+        将细胞映射到Subregion
+
+        关键：参考data_loader_enhanced.py中的map_cells_to_regions_fixed
+        - 坐标已经是25μm单位
+        - 直接使用整数部分作为索引
+        """
+        logger.info("将MERFISH细胞映射到Subregion...")
+
+        if annotation_volume is None:
+            logger.warning("没有CCF注释数据")
+            cells_df['subregion_acronym'] = None
+            return cells_df
+
+        required_cols = ['x_ccf', 'y_ccf', 'z_ccf']
+        if not all(col in cells_df.columns for col in required_cols):
+            logger.error(f"缺少必要的坐标列")
+            cells_df['subregion_acronym'] = None
+            return cells_df
+
+        # 关键：坐标已经是25μm单位，直接转为整数索引
+        x_indices = cells_df['x_ccf'].astype(int)
+        y_indices = cells_df['y_ccf'].astype(int)
+        z_indices = cells_df['z_ccf'].astype(int)
+
+        volume_shape = annotation_volume.shape
+
+        logger.info(f"  注释volume形状: {volume_shape}")
+        logger.info(f"  坐标范围: X[{x_indices.min()}, {x_indices.max()}], "
+                    f"Y[{y_indices.min()}, {y_indices.max()}], "
+                    f"Z[{z_indices.min()}, {z_indices.max()}]")
+
+        # 检查有效索引
+        valid_indices = (
+                (0 <= x_indices) & (x_indices < volume_shape[0]) &
+                (0 <= y_indices) & (y_indices < volume_shape[1]) &
+                (0 <= z_indices) & (z_indices < volume_shape[2])
+        )
+
+        valid_count = valid_indices.sum()
+        logger.info(f"  有效索引: {valid_count}/{len(cells_df)} ({valid_count / len(cells_df) * 100:.1f}%)")
+
+        # 统计
+        mapped_to_subregion = 0
+        mapped_to_region = 0
+        out_of_bounds = 0
+
+        subregion_acronyms_found = []
+
+        # 批量处理
+        batch_size = 100000
+        for i in range(0, len(cells_df), batch_size):
+            batch_end = min(i + batch_size, len(cells_df))
+
+            batch_x = x_indices[i:batch_end]
+            batch_y = y_indices[i:batch_end]
+            batch_z = z_indices[i:batch_end]
+            batch_valid = valid_indices[i:batch_end]
+
+            for j, (x, y, z, is_valid) in enumerate(zip(batch_x, batch_y, batch_z, batch_valid)):
+                if is_valid:
+                    ccf_id = int(annotation_volume[x, y, z])
+
+                    if ccf_id == 0:
+                        subregion_acronyms_found.append(None)
+                    else:
+                        # 转为acronym
+                        acronym = self.id_to_acronym.get(ccf_id)
+
+                        if acronym and acronym in self.subregion_acronyms:
+                            # 是subregion
+                            subregion_acronyms_found.append(acronym)
+                            mapped_to_subregion += 1
+                        else:
+                            # 是region或其他
+                            subregion_acronyms_found.append(None)
+                            if acronym:
+                                mapped_to_region += 1
+                else:
+                    out_of_bounds += 1
+                    subregion_acronyms_found.append(None)
+
+            if (i + batch_size) % (batch_size * 10) == 0:
+                logger.info(f"  已处理 {batch_end}/{len(cells_df)} 个细胞")
+
+        cells_df['subregion_acronym'] = subregion_acronyms_found
+
+        logger.info(f"  ✓ 映射结果:")
+        logger.info(f"    - 映射到Subregion: {mapped_to_subregion} ({mapped_to_subregion / len(cells_df) * 100:.2f}%)")
+        logger.info(f"    - 在Region: {mapped_to_region} ({mapped_to_region / len(cells_df) * 100:.2f}%)")
+        logger.info(f"    - 超出边界: {out_of_bounds}")
+
+        return cells_df
+
     def load_me_subregion_annotation(self) -> bool:
-        """加载 ME_Subregion 注释"""
-        logger.info("加载 ME_Subregion 注释...")
+        """加载ME注释"""
+        logger.info("加载ME_Subregion注释...")
 
         me_file = self.data_path / "parc_r671_full.nrrd"
         pkl_file = self.data_path / "parc_r671_full.nrrd.pkl"
 
         if not me_file.exists():
-            logger.error(f"ME注释文件不存在: {me_file}")
+            logger.error(f"ME注释文件不存在")
             return False
 
         try:
-            # 加载NRRD
+            # 1. 加载NRRD
             self.me_annotation, _ = nrrd.read(str(me_file))
-            logger.info(f"  - 加载了 ME 注释: {self.me_annotation.shape}")
+            logger.info(f"  - 加载ME注释: {self.me_annotation.shape}")
 
-            # 加载pkl映射
+            # 2. 加载pkl
             if pkl_file.exists():
                 with open(pkl_file, 'rb') as f:
-                    parent_to_voxel = pickle.load(f)
-                logger.info(f"  - 加载了 pkl 映射: {len(parent_to_voxel)} 条")
+                    pkl_data = pickle.load(f)
 
-                # 反转映射：voxel -> parent
-                for parent, voxel_list in parent_to_voxel.items():
-                    for voxel_value in voxel_list:
-                        # parent 格式如 "VIS-ME_324"
-                        # 提取 acronym
-                        if isinstance(parent, str) and '-ME' in parent:
-                            parts = parent.split('_')
-                            if len(parts) >= 1:
-                                me_acronym = parts[0]  # 例如 "VIS-ME"
-                                self.voxel_to_me_subregion[voxel_value] = me_acronym
+                logger.info(f"  - pkl包含 {len(pkl_data)} 个映射")
 
-                logger.info(f"  - 创建了 {len(self.voxel_to_me_subregion)} 个体素到ME的映射")
+                # 转换
+                for voxel, parent_id in pkl_data.items():
+                    self.voxel_to_parent_id[int(voxel)] = int(parent_id)
 
-            # 也加载JSON获取完整结构
-            json_file = self.data_path / "surf_tree_ccf-me.json"
-            if json_file.exists():
-                with open(json_file, 'r') as f:
-                    tree_data = json.load(f)
-                
-                # 从JSON提取更多映射
-                additional_mappings = self._extract_me_mapping_from_json(tree_data)
-                self.voxel_to_me_subregion.update(additional_mappings)
-                
-                logger.info(f"  - 更新后共 {len(self.voxel_to_me_subregion)} 个映射")
+                logger.info(f"  - 转换了 {len(self.voxel_to_parent_id)} 个voxel->parent映射")
+
+            # 3. parent_id_to_me_acronym已经在遍历树时构建
+            logger.info(f"  - 已有 {len(self.parent_id_to_me_acronym)} 个parent->ME映射")
+
+            # 4. 检查映射覆盖率
+            pkl_parents = set(self.voxel_to_parent_id.values())
+            covered_parents = pkl_parents & set(self.parent_id_to_me_acronym.keys())
+            coverage = len(covered_parents) / len(pkl_parents) * 100 if pkl_parents else 0
+
+            logger.info(f"  - 映射覆盖率: {len(covered_parents)}/{len(pkl_parents)} ({coverage:.1f}%)")
+            logger.info(f"  ⓘ 注意: 只有皮层区域有ME细分，其他区域无法映射是正常的")
+
+            # 5. 显示未覆盖的parent_id样例（用于调试）
+            uncovered = pkl_parents - set(self.parent_id_to_me_acronym.keys())
+            if uncovered:
+                sample_uncovered = list(uncovered)[:5]
+                logger.info(f"  - 未覆盖parent_id样例: {sample_uncovered}")
+
+                # 尝试从标准CCF树查找这些ID对应的区域
+                for pid in sample_uncovered:
+                    acronym = self.id_to_acronym.get(pid, 'unknown')
+                    logger.info(f"      parent_id {pid} -> {acronym} (非皮层区域)")
 
             return True
 
         except Exception as e:
-            logger.error(f"加载 ME_Subregion 注释失败: {e}")
+            logger.error(f"加载ME注释失败: {e}")
             import traceback
             traceback.print_exc()
             return False
 
-    def _extract_me_mapping_from_json(self, tree_data) -> Dict[int, str]:
-        """从JSON树中提取ME子区域映射"""
-        voxel_to_me = {}
-
-        def traverse(nodes):
-            if isinstance(nodes, dict):
-                nodes = [nodes]
-
-            for node in nodes:
-                if not isinstance(node, dict):
-                    continue
-
-                acronym = node.get('acronym', '')
-                node_id = node.get('id')
-
-                # 处理ME子区域
-                if '-ME' in acronym and isinstance(node_id, str) and '_' in node_id:
-                    parts = node_id.split('_')
-                    try:
-                        voxel_value = int(parts[1])
-                        voxel_to_me[voxel_value] = acronym
-                    except (ValueError, IndexError):
-                        pass
-
-                # 递归
-                children = node.get('children', [])
-                if children:
-                    traverse(children)
-
-        traverse(tree_data)
-        return voxel_to_me
-
-    # ⭐ 修复2: 改进 MERFISH 到 subregion 映射
-    def map_cells_to_subregions(self, cells_df: pd.DataFrame, annotation_volume: np.ndarray) -> pd.DataFrame:
-        """
-        将 MERFISH 细胞映射到 Subregion
-        
-        参数:
-            cells_df: MERFISH 细胞数据
-            annotation_volume: CCF 注释体积数据
-        """
-        logger.info("将 MERFISH 细胞映射到 Subregion...")
-
-        if annotation_volume is None:
-            logger.warning("没有 CCF 注释数据")
-            cells_df['subregion_acronym'] = None
-            return cells_df
-
-        # 检查必要的列
-        required_cols = ['x_ccf', 'y_ccf', 'z_ccf']
-        if not all(col in cells_df.columns for col in required_cols):
-            logger.error(f"缺少必要的坐标列: {required_cols}")
-            cells_df['subregion_acronym'] = None
-            return cells_df
-
-        # 转换坐标到体素索引
-        resolution = 25.0
-        x_indices = (cells_df['x_ccf'] / resolution).astype(int)
-        y_indices = (cells_df['y_ccf'] / resolution).astype(int)
-        z_indices = (cells_df['z_ccf'] / resolution).astype(int)
-
-        # 查询 subregion
-        subregion_acronyms = []
-        for x, y, z in tqdm(zip(x_indices, y_indices, z_indices), total=len(cells_df), desc="映射subregion"):
-            if (0 <= x < annotation_volume.shape[0] and
-                0 <= y < annotation_volume.shape[1] and
-                0 <= z < annotation_volume.shape[2]):
-                ccf_id = int(annotation_volume[x, y, z])
-                acronym = self.id_to_acronym.get(ccf_id)
-                subregion_acronyms.append(acronym)
-            else:
-                subregion_acronyms.append(None)
-
-        cells_df['subregion_acronym'] = subregion_acronyms
-
-        mapped_count = cells_df['subregion_acronym'].notna().sum()
-        logger.info(f"  - 映射了 {mapped_count}/{len(cells_df)} 个细胞到 Subregion")
-
-        return cells_df
-
-    # ⭐ 修复2: 改进 MERFISH 到 ME_subregion 映射
     def map_cells_to_me_subregions(self, cells_df: pd.DataFrame) -> pd.DataFrame:
-        """将 MERFISH 细胞映射到 ME_Subregion"""
-        logger.info("将 MERFISH 细胞映射到 ME_Subregion...")
+        """映射到ME_Subregion"""
+        logger.info("将MERFISH细胞映射到ME_Subregion...")
 
         if self.me_annotation is None:
-            logger.warning("没有 ME_Subregion 注释数据")
+            logger.warning("没有ME注释数据")
             cells_df['me_subregion_acronym'] = None
             return cells_df
 
-        # 检查必要的列
         required_cols = ['x_ccf', 'y_ccf', 'z_ccf']
         if not all(col in cells_df.columns for col in required_cols):
-            logger.error(f"缺少必要的坐标列: {required_cols}")
+            logger.error(f"缺少必要的坐标列")
             cells_df['me_subregion_acronym'] = None
             return cells_df
 
-        # 转换坐标到体素索引
-        resolution = 25.0
-        x_indices = (cells_df['x_ccf'] / resolution).astype(int)
-        y_indices = (cells_df['y_ccf'] / resolution).astype(int)
-        z_indices = (cells_df['z_ccf'] / resolution).astype(int)
+        # 关键：坐标已经是25μm单位
+        x_indices = cells_df['x_ccf'].astype(int)
+        y_indices = cells_df['y_ccf'].astype(int)
+        z_indices = cells_df['z_ccf'].astype(int)
 
-        # 查询 ME_Subregion
+        # 统计
+        mapped_count = 0
+        voxel_zero = 0
+        voxel_not_in_pkl = 0
+        parent_not_in_json = 0
+        out_of_bounds = 0
+
         me_acronyms = []
-        unmapped_count = 0
-        
-        for x, y, z in tqdm(zip(x_indices, y_indices, z_indices), total=len(cells_df), desc="映射ME_subregion"):
-            if (0 <= x < self.me_annotation.shape[0] and
-                0 <= y < self.me_annotation.shape[1] and
-                0 <= z < self.me_annotation.shape[2]):
-                voxel_value = int(self.me_annotation[x, y, z])
-                acronym = self.voxel_to_me_subregion.get(voxel_value)
-                me_acronyms.append(acronym)
-                if acronym is None:
-                    unmapped_count += 1
-            else:
-                me_acronyms.append(None)
-                unmapped_count += 1
+
+        # 批量处理
+        batch_size = 100000
+        for i in range(0, len(cells_df), batch_size):
+            batch_end = min(i + batch_size, len(cells_df))
+
+            batch_x = x_indices[i:batch_end]
+            batch_y = y_indices[i:batch_end]
+            batch_z = z_indices[i:batch_end]
+
+            for x, y, z in zip(batch_x, batch_y, batch_z):
+                if (0 <= x < self.me_annotation.shape[0] and
+                        0 <= y < self.me_annotation.shape[1] and
+                        0 <= z < self.me_annotation.shape[2]):
+
+                    voxel = int(self.me_annotation[x, y, z])
+
+                    if voxel == 0:
+                        me_acronyms.append(None)
+                        voxel_zero += 1
+                        continue
+
+                    # voxel -> parent_id
+                    parent_id = self.voxel_to_parent_id.get(voxel)
+                    if parent_id is None:
+                        me_acronyms.append(None)
+                        voxel_not_in_pkl += 1
+                        continue
+
+                    # parent_id -> ME acronym
+                    me_acronym = self.parent_id_to_me_acronym.get(parent_id)
+                    if me_acronym:
+                        me_acronyms.append(me_acronym)
+                        mapped_count += 1
+                    else:
+                        me_acronyms.append(None)
+                        parent_not_in_json += 1
+                else:
+                    out_of_bounds += 1
+                    me_acronyms.append(None)
+
+            if (i + batch_size) % (batch_size * 10) == 0:
+                logger.info(f"  已处理 {batch_end}/{len(cells_df)} 个细胞")
 
         cells_df['me_subregion_acronym'] = me_acronyms
 
-        mapped_count = cells_df['me_subregion_acronym'].notna().sum()
-        logger.info(f"  - 映射了 {mapped_count}/{len(cells_df)} 个细胞到 ME_Subregion")
-        if unmapped_count > 0:
-            logger.info(f"  - {unmapped_count} 个细胞未能映射")
+        logger.info(f"  ✓ 映射结果:")
+        logger.info(f"    - 映射成功: {mapped_count} ({mapped_count / len(cells_df) * 100:.2f}%)")
+        logger.info(f"    - voxel为0: {voxel_zero}")
+        logger.info(f"    - voxel不在pkl: {voxel_not_in_pkl}")
+        logger.info(f"    - parent不在JSON: {parent_not_in_json} (非皮层区域)")
+        logger.info(f"    - 超出边界: {out_of_bounds}")
+        logger.info(f"  ⓘ 只有皮层区域有ME细分，其他区域映射失败是正常的")
 
         return cells_df
 
@@ -988,9 +1150,9 @@ class KnowledgeGraphBuilderNeo4jV5(KnowledgeGraphBuilderNeo4j):
     # ⭐ 修复3: 去重 neighbouring 关系
     def generate_and_insert_neuron_relationships(self, neuron_loader: NeuronDataLoader):
         """生成并插入神经元之间的关系（去重版本）"""
-        if not neuron_loader or not neuron_loader.connections_data.empty:
+        if not neuron_loader or not neuron_loader.connections_df.empty:
             logger.info("处理神经元之间的关系（NEIGHBOURING，去重版本）...")
-            self._insert_neighbouring_relationships_deduplicated(neuron_loader.connections_data)
+            self._insert_neighbouring_relationships_deduplicated(neuron_loader.connections_df)
 
     def _insert_neighbouring_relationships_deduplicated(self, connections_df: pd.DataFrame):
         """
@@ -1192,42 +1354,88 @@ def main(data_dir: str = "../data",
             logger.warning("投射数据处理失败")
             projection_processor = None
 
-        # Phase 3.7: ⭐ 修复2 - MERFISH空间映射
+        # Phase 3.7: MERFISH空间映射（最终正确版）
         logger.info("\n" + "=" * 60)
-        logger.info("Phase 3.7: MERFISH细胞空间映射（修复2：改进映射逻辑）")
+        logger.info("Phase 3.7: MERFISH细胞空间映射（最终正确版）")
+        logger.info("参考data_loader_enhanced.py的处理方式")
         logger.info("=" * 60)
-        
-        merfish_mapper = MERFISHSubregionMapper(data_path, ccf_tree_json)
 
-        # 加载CCF树
-        if merfish_mapper.load_ccf_tree_for_subregion_mapping():
-            
-            # 加载基础annotation（用于subregion映射）
-            annotation_file = data_path / "annotation_25.nrrd"
-            annotation_volume = None
-            if annotation_file.exists():
-                try:
-                    annotation_volume, _ = nrrd.read(str(annotation_file))
-                    logger.info(f"✓ 加载了基础注释: {annotation_volume.shape}")
-                    
-                    # 映射到subregion
-                    merfish_cells = merfish_mapper.map_cells_to_subregions(
-                        merfish_cells, 
-                        annotation_volume
-                    )
-                except Exception as e:
-                    logger.warning(f"加载基础注释失败: {e}")
+        # 文件路径
+        ccf_tree_json = data_path / "tree_yzx.json"
+        ccf_me_json = data_path / "surf_tree_ccf-me.json"
+        annotation_file = data_path / "annotation_25.nrrd"
 
-            # 加载ME注释并映射
+        # 验证文件
+        if not all([ccf_tree_json.exists(), ccf_me_json.exists(), annotation_file.exists()]):
+            logger.error("缺少必要的文件")
+            merfish_mapper = None
+        else:
+            # 初始化mapper
+            merfish_mapper = MERFISHSubregionMapper(
+                data_path=data_path,
+                ccf_tree_json=ccf_tree_json,
+                ccf_me_json=ccf_me_json
+            )
+
+            # 步骤1: 加载标准CCF树
+            logger.info("\n步骤1: 加载标准CCF树")
+            if not merfish_mapper.load_standard_ccf_tree():
+                logger.error("✗ 标准CCF树加载失败")
+                merfish_mapper = None
+            else:
+                logger.info(f"✓ 成功: {len(merfish_mapper.id_to_acronym)} 个区域映射")
+
+                # 步骤2: 加载CCF-ME树
+                logger.info("\n步骤2: 加载CCF-ME树识别subregion")
+                if not merfish_mapper.load_ccf_me_tree_for_subregions():
+                    logger.error("✗ CCF-ME树加载失败")
+                    merfish_mapper = None
+                else:
+                    logger.info(f"✓ Subregion: {len(merfish_mapper.subregion_acronyms)} 个")
+                    logger.info(f"✓ ME_Subregion: {len(merfish_mapper.me_acronym_to_subregion)} 个")
+
+        # 执行映射
+        if merfish_mapper:
+            # 步骤3: 加载annotation并映射到Subregion
+            logger.info("\n步骤3: 映射到Subregion")
+            try:
+                import nrrd
+                annotation_volume, annotation_header = nrrd.read(str(annotation_file))
+                logger.info(f"✓ 加载annotation: {annotation_volume.shape}")
+
+                # 关键：参考data_loader_enhanced.py，坐标已经是正确单位
+                merfish_cells = merfish_mapper.map_cells_to_subregions(
+                    merfish_cells,
+                    annotation_volume
+                )
+
+                mapped_count = merfish_cells['subregion_acronym'].notna().sum()
+                logger.info(f"✓ Subregion映射: {mapped_count}/{len(merfish_cells)}")
+
+            except Exception as e:
+                logger.error(f"✗ Subregion映射失败: {e}")
+                import traceback
+                traceback.print_exc()
+
+            # 步骤4: 映射到ME_Subregion
+            logger.info("\n步骤4: 映射到ME_Subregion")
             if merfish_mapper.load_me_subregion_annotation():
                 merfish_cells = merfish_mapper.map_cells_to_me_subregions(merfish_cells)
-                logger.info("✓ ME_Subregion 映射完成")
+
+                mapped_count = merfish_cells['me_subregion_acronym'].notna().sum()
+                logger.info(f"✓ ME_Subregion映射: {mapped_count}/{len(merfish_cells)}")
+            else:
+                logger.warning("✗ ME注释加载失败")
+
+        logger.info("=" * 60)
+        logger.info("Phase 3.7 完成")
+        logger.info("=" * 60)
 
         # Phase 3.8: 加载Subregion数据
         logger.info("\n" + "=" * 60)
         logger.info("Phase 3.8: 加载Subregion和ME_Subregion数据")
         logger.info("=" * 60)
-        
+
         ccf_me_json = data_path / "surf_tree_ccf-me.json"
         subregion_loader = SubregionLoader(ccf_me_json)
 

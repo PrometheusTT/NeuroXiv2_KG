@@ -451,8 +451,8 @@ class MERFISHSubregionMapper:
             return False
 
     def load_ccf_me_tree_for_subregions(self) -> bool:
-        """加载CCF-ME树识别subregion"""
-        logger.info(f"加载CCF-ME树: {self.ccf_me_json}")
+        """两遍遍历加载CCF-ME树"""
+        logger.info(f"加载CCF-ME树（两遍遍历）: {self.ccf_me_json}")
 
         if not self.ccf_me_json.exists():
             logger.error(f"CCF-ME树文件不存在")
@@ -462,18 +462,83 @@ class MERFISHSubregionMapper:
             with open(self.ccf_me_json, 'r') as f:
                 tree_data = json.load(f)
 
+            # 第一遍：收集所有节点信息
+            all_nodes = {}  # {acronym: node_info}
+
+            def collect_nodes(node, parent_acronym=None):
+                acronym = node.get('acronym', '')
+                node_id = node.get('id')
+
+                all_nodes[acronym] = {
+                    'node': node,
+                    'parent_acronym': parent_acronym,
+                    'node_id': node_id
+                }
+
+                for child in node.get('children', []):
+                    collect_nodes(child, acronym)
+
             for root in tree_data:
-                self._traverse_ccf_me_tree(root)
+                collect_nodes(root, None)
+
+            logger.info(f"  - 收集了 {len(all_nodes)} 个节点")
+
+            # 第二遍：识别Subregion和ME，建立映射
+            for acronym, info in all_nodes.items():
+                node = info['node']
+                parent_acronym = info['parent_acronym']
+                node_id = info['node_id']
+                name = node.get('name', '')
+
+                # 识别ME节点
+                if '-ME' in acronym and parent_acronym:
+                    self.me_acronym_to_subregion[acronym] = parent_acronym
+
+                    # ⭐ 关键：从parent找CCF ID
+                    if parent_acronym in all_nodes:
+                        parent_info = all_nodes[parent_acronym]
+                        parent_id = parent_info['node_id']
+
+                        if parent_id is not None:
+                            try:
+                                parent_ccf_id = int(parent_id)
+                                self.parent_id_to_me_acronym[parent_ccf_id] = acronym
+                            except (ValueError, TypeError):
+                                pass
+
+                # 识别Subregion
+                elif parent_acronym and '-ME' not in parent_acronym:
+                    is_subregion = False
+
+                    if 'layer' in name.lower():
+                        is_subregion = True
+
+                    for pattern in ['1', '2/3', '4', '5', '6a', '6b']:
+                        if acronym.endswith(pattern) or f'{pattern}-' in acronym:
+                            is_subregion = True
+                            break
+
+                    has_me_children = any('-ME' in child.get('acronym', '')
+                                          for child in node.get('children', []))
+                    if has_me_children:
+                        is_subregion = True
+
+                    if is_subregion:
+                        self.subregion_acronyms.add(acronym)
+
+                        if node_id is not None:
+                            try:
+                                id_int = int(node_id)
+                                self.subregion_id_to_acronym[id_int] = acronym
+                            except (ValueError, TypeError):
+                                pass
+
+                        if parent_acronym:
+                            self.subregion_to_region[acronym] = parent_acronym
 
             logger.info(f"  - 识别了 {len(self.subregion_acronyms)} 个Subregion")
             logger.info(f"  - 识别了 {len(self.me_acronym_to_subregion)} 个ME_Subregion")
-
-            # 样例
-            sample_sr = list(self.subregion_acronyms)[:5]
-            logger.info(f"  - Subregion样例: {sample_sr}")
-
-            sample_me = list(self.me_acronym_to_subregion.items())[:5]
-            logger.info(f"  - ME样例: {sample_me}")
+            logger.info(f"  - 建立了 {len(self.parent_id_to_me_acronym)} 个parent_id映射")
 
             return True
 
@@ -492,28 +557,27 @@ class MERFISHSubregionMapper:
             if parent_acronym:
                 self.me_acronym_to_subregion[acronym] = parent_acronym
 
-                # 建立parent_id到ME acronym的多种映射
-                # 方式1: 从node_id提取（如 "VIS-ME_324"）
-                if isinstance(node_id, str) and '_' in node_id:
-                    parts = node_id.split('_')
-                    if len(parts) >= 2:
-                        try:
-                            parent_ccf_id = int(parts[1])
-                            self.parent_id_to_me_acronym[parent_ccf_id] = acronym
-                        except ValueError:
-                            pass
-
-                # 方式2: 从parent_structure_id
+                # ⭐ 关键修复：使用parent_structure_id而不是从node_id提取
                 parent_structure_id = node.get('parent_structure_id')
+
                 if parent_structure_id is not None:
+                    # 这才是pkl中使用的parent_id！
                     self.parent_id_to_me_acronym[int(parent_structure_id)] = acronym
+                else:
+                    # 后备方案1：尝试从parent_acronym查找对应的CCF ID
+                    if parent_acronym in self.subregion_id_to_acronym.values():
+                        # 反向查找parent的ID
+                        for sid, sacronym in self.subregion_id_to_acronym.items():
+                            if sacronym == parent_acronym:
+                                self.parent_id_to_me_acronym[sid] = acronym
+                                break
 
-                # 方式3: 如果node_id本身是整数
-                if isinstance(node_id, int):
-                    # 这个ID可能就是在pkl中使用的parent_id
-                    self.parent_id_to_me_acronym[node_id] = acronym
+                    # 后备方案2：从标准CCF树查找
+                    elif parent_acronym in self.acronym_to_id:
+                        parent_ccf_id = self.acronym_to_id[parent_acronym]
+                        self.parent_id_to_me_acronym[parent_ccf_id] = acronym
 
-        # 2. 识别Subregion（layer节点）
+        # 2. 识别Subregion（保持不变）
         elif parent_acronym and '-ME' not in parent_acronym:
             is_subregion = False
 

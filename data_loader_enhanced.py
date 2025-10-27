@@ -979,20 +979,17 @@ def load_merfish_data(data_dir: Path, use_cached: bool = True) -> Dict[str, Any]
 
 def load_morphology_data(data_dir: Path) -> pd.DataFrame:
     """
-    加载脑区形态数据，确保每个脑区至少有100个同时具有完整轴突和树突形态学数据的神经元
-
-    这个函数先找出同时具有轴突和树突完整数据的神经元集合，然后按脑区聚合，
-    只保留至少有100个完整神经元的脑区。
+    加载脑区形态数据，保留ID带有full的神经元形态数据
 
     参数:
         data_dir: 数据目录
 
     返回:
-        包含区域形态特征与完整神经元计数的DataFrame
+        包含区域形态特征的DataFrame
     """
     # 记录运行信息
-    logger.info(f"数据加载器运行时间: 2025-08-13 20:01:02")
-    logger.info(f"运行用户: PrometheusTT")
+    logger.info(f"数据加载器运行时间: 2025-08-26 09:43:58")
+    logger.info(f"运行用户: wangmajortom")
 
     # 定义特征映射
     axon_features_prefix = ["axonal_length", "axonal_branches", "axonal_bifurcation_remote_angle",
@@ -1008,7 +1005,7 @@ def load_morphology_data(data_dir: Path) -> pd.DataFrame:
         "Max Branch Order": ["axonal_maximum_branch_order", "dendritic_maximum_branch_order"]
     }
 
-    # 1. 加载和过滤轴突数据，获取有轴突数据的神经元ID集合
+    # 1. 加载和过滤轴突数据
     axon_ids = set()
     axon_df = None
     axon_file = data_dir / MORPH_FILES["axon"]
@@ -1016,15 +1013,18 @@ def load_morphology_data(data_dir: Path) -> pd.DataFrame:
         logger.info(f"加载轴突形态数据: {MORPH_FILES['axon']}")
         axon_df = pd.read_csv(axon_file)
 
-        # 过滤掉名字中带有"CCF-thin"或"local"的行
-        if 'name' in axon_df.columns:
-            original_len = len(axon_df)
-            axon_df = axon_df[~axon_df['name'].str.contains('CCF-thin|local', na=False)]
-            filtered_count = original_len - len(axon_df)
-            logger.info(f"从轴突数据中过滤掉了{filtered_count}个带有'CCF-thin|local'的行")
-
-        # 提取具有ID的行
+        # 过滤数据：1. 移除CCF-thin和local，2. 保留包含full的数据
         if 'ID' in axon_df.columns:
+            original_len = len(axon_df)
+            # 过滤掉不含full的ID
+            axon_df = axon_df[axon_df['ID'].astype(str).str.contains('full', na=False)]
+            # 过滤掉包含CCF-thin或local的ID
+            axon_df = axon_df[~axon_df['ID'].astype(str).str.contains('CCF-thin|local', na=False)]
+
+            filtered_count = original_len - len(axon_df)
+            logger.info(f"从轴突数据中过滤掉了{filtered_count}个不符合条件的行，保留{len(axon_df)}行")
+
+            # 提取ID集合
             axon_ids = set(axon_df['ID'].unique())
             logger.info(f"找到{len(axon_ids)}个具有轴突形态学数据的神经元ID")
         else:
@@ -1032,7 +1032,7 @@ def load_morphology_data(data_dir: Path) -> pd.DataFrame:
     else:
         logger.warning(f"轴突形态文件不存在: {axon_file}")
 
-    # 2. 加载和过滤树突数据，获取有树突数据的神经元ID集合
+    # 2. 加载和过滤树突数据
     dendrite_ids = set()
     dendrite_df = None
     dendrite_file = data_dir / MORPH_FILES["dendrite"]
@@ -1040,15 +1040,18 @@ def load_morphology_data(data_dir: Path) -> pd.DataFrame:
         logger.info(f"加载树突形态数据: {MORPH_FILES['dendrite']}")
         dendrite_df = pd.read_csv(dendrite_file)
 
-        # 过滤掉名字中带有"CCF-thin"或"local"的行
-        if 'name' in dendrite_df.columns:
-            original_len = len(dendrite_df)
-            dendrite_df = dendrite_df[~dendrite_df['name'].str.contains('CCF-thin|local', na=False)]
-            filtered_count = original_len - len(dendrite_df)
-            logger.info(f"从树突数据中过滤掉了{filtered_count}个带有'CCF-thin|local'的行")
-
-        # 提取具有ID的行
+        # 过滤数据：1. 移除CCF-thin和local，2. 保留包含full的数据
         if 'ID' in dendrite_df.columns:
+            original_len = len(dendrite_df)
+            # 过滤掉不含full的ID
+            dendrite_df = dendrite_df[dendrite_df['ID'].astype(str).str.contains('full', na=False)]
+            # 过滤掉包含CCF-thin或local的ID
+            dendrite_df = dendrite_df[~dendrite_df['ID'].astype(str).str.contains('CCF-thin|local', na=False)]
+
+            filtered_count = original_len - len(dendrite_df)
+            logger.info(f"从树突数据中过滤掉了{filtered_count}个不符合条件的行，保留{len(dendrite_df)}行")
+
+            # 提取ID集合
             dendrite_ids = set(dendrite_df['ID'].unique())
             logger.info(f"找到{len(dendrite_ids)}个具有树突形态学数据的神经元ID")
         else:
@@ -1056,13 +1059,13 @@ def load_morphology_data(data_dir: Path) -> pd.DataFrame:
     else:
         logger.warning(f"树突形态文件不存在: {dendrite_file}")
 
-    # 3. 找出同时具有轴突和树突数据的神经元ID交集
-    complete_neuron_ids = axon_ids.intersection(dendrite_ids)
-    logger.info(f"找到{len(complete_neuron_ids)}个同时具有轴突和树突形态学数据的神经元")
+    # 3. 收集所有有效神经元ID（不再要求同时具有轴突和树突数据）
+    valid_neuron_ids = axon_ids.union(dendrite_ids)
+    logger.info(f"找到{len(valid_neuron_ids)}个有效神经元ID")
 
-    if not complete_neuron_ids:
-        logger.warning("没有找到同时具有轴突和树突形态学数据的神经元")
-        return pd.DataFrame({'region_id': [], 'region_name': [], 'complete_neuron_count': []})
+    if not valid_neuron_ids:
+        logger.warning("没有找到有效的神经元形态数据")
+        return pd.DataFrame({'region_id': [], 'region_name': [], 'neuron_count': []})
 
     # 4. 加载info.csv获取神经元区域映射
     info_file = data_dir / INFO_FILE
@@ -1102,36 +1105,25 @@ def load_morphology_data(data_dir: Path) -> pd.DataFrame:
     else:
         logger.warning(f"树结构文件不存在: {tree_file}")
 
-    # 提取基础区域名称的函数（不含层信息）
-    def extract_base_region(celltype):
-        # 要移除的层模式: 1, 2/3, 4, 5, 6a, 6b
-        layer_patterns = ['1', '2/3', '4', '5', '6a', '6b']
-        base_region = celltype
-
-        for layer in layer_patterns:
-            if celltype.endswith(layer):
-                base_region = celltype[:-len(layer)]
-                break
-
-        return base_region
-
-    # 6. 按脑区对完整神经元进行分组计数
-    region_neuron_counts = {}  # 每个区域的完整神经元计数
+    # 6. 按脑区对神经元进行分组计数
+    region_neuron_counts = {}  # 每个区域的神经元计数
     region_data = {}  # 每个区域的形态特征数据
 
-    # 按区域统计完整神经元数量
-    for neuron_id in complete_neuron_ids:
+    # 按区域统计神经元数量
+    for neuron_id in valid_neuron_ids:
         if neuron_id in neuron_regions:
             celltype = neuron_regions[neuron_id]
-            base_region = extract_base_region(celltype)
-            region_id = region_id_mapping.get(base_region, f"unknown_{base_region}")
+            # 直接使用完整的celltype作为脑区标识
+            region_name = celltype
+            # 获取region_id，如果无法匹配则使用一个唯一标识符
+            region_id = region_id_mapping.get(region_name, f"unknown_{region_name}")
 
             # 更新区域的神经元计数
             if region_id not in region_neuron_counts:
                 region_neuron_counts[region_id] = 0
                 region_data[region_id] = {
                     'region_id': region_id,
-                    'region_name': base_region,
+                    'region_name': region_name,
                     # 初始化用于统计计算的值列表
                     'axonal_length_values': [],
                     'axonal_branches_values': [],
@@ -1145,36 +1137,23 @@ def load_morphology_data(data_dir: Path) -> pd.DataFrame:
 
             region_neuron_counts[region_id] += 1
 
-    # 7. 筛选出至少有100个完整神经元的区域
-    regions_with_sufficient_neurons = []
-    for region_id, count in region_neuron_counts.items():
-        if count >= 0:
-            regions_with_sufficient_neurons.append(region_id)
-
-    logger.info(
-        f"找到 {len(regions_with_sufficient_neurons)} 个至少有100个完整神经元的区域，总区域数：{len(region_neuron_counts)}")
-
-    # 如果没有足够的区域，返回空DataFrame
-    if not regions_with_sufficient_neurons:
-        logger.warning("没有区域包含至少100个完整神经元")
-        return pd.DataFrame({'region_id': [], 'region_name': [], 'complete_neuron_count': []})
+    # 7. 保留所有区域数据，不做筛选
+    regions_to_process = list(region_neuron_counts.keys())
+    logger.info(f"处理 {len(regions_to_process)} 个区域的形态特征")
 
     # 8. 计算这些区域的形态学特征
-    # 8.1 首先提取有完整神经元的轴突数据
+    # 8.1 首先处理轴突数据
     logger.info("正在计算轴突形态特征...")
     if axon_df is not None and 'ID' in axon_df.columns:
-        # 只保留完整神经元的数据
-        axon_df_filtered = axon_df[axon_df['ID'].isin(complete_neuron_ids)]
-
-        # 处理每个区域的轴突数据
-        for neuron_id, group in axon_df_filtered.groupby('ID'):
+        # 处理每个神经元的轴突数据
+        for neuron_id, group in axon_df.groupby('ID'):
             if neuron_id in neuron_regions:
                 celltype = neuron_regions[neuron_id]
-                base_region = extract_base_region(celltype)
-                region_id = region_id_mapping.get(base_region, f"unknown_{base_region}")
+                # 直接使用完整的celltype
+                region_name = celltype
+                region_id = region_id_mapping.get(region_name, f"unknown_{region_name}")
 
-                # 只处理有足够神经元的区域
-                if region_id in regions_with_sufficient_neurons:
+                if region_id in regions_to_process:
                     # 添加特征值
                     for csv_col, feature_cols in column_mapping.items():
                         if csv_col in group.columns:
@@ -1185,21 +1164,18 @@ def load_morphology_data(data_dir: Path) -> pd.DataFrame:
                                     if feature_col in axon_features_prefix:
                                         region_data[region_id][f'{feature_col}_values'].extend(values)
 
-    # 8.2 然后提取有完整神经元的树突数据
+    # 8.2 然后处理树突数据
     logger.info("正在计算树突形态特征...")
     if dendrite_df is not None and 'ID' in dendrite_df.columns:
-        # 只保留完整神经元的数据
-        dendrite_df_filtered = dendrite_df[dendrite_df['ID'].isin(complete_neuron_ids)]
-
-        # 处理每个区域的树突数据
-        for neuron_id, group in dendrite_df_filtered.groupby('ID'):
+        # 处理每个神经元的树突数据
+        for neuron_id, group in dendrite_df.groupby('ID'):
             if neuron_id in neuron_regions:
                 celltype = neuron_regions[neuron_id]
-                base_region = extract_base_region(celltype)
-                region_id = region_id_mapping.get(base_region, f"unknown_{base_region}")
+                # 直接使用完整的celltype
+                region_name = celltype
+                region_id = region_id_mapping.get(region_name, f"unknown_{region_name}")
 
-                # 只处理有足够神经元的区域
-                if region_id in regions_with_sufficient_neurons:
+                if region_id in regions_to_process:
                     # 添加特征值
                     for csv_col, feature_cols in column_mapping.items():
                         if csv_col in group.columns:
@@ -1210,9 +1186,9 @@ def load_morphology_data(data_dir: Path) -> pd.DataFrame:
                                     if feature_col in dendrite_features_prefix:
                                         region_data[region_id][f'{feature_col}_values'].extend(values)
 
-    # 9. 计算每个有足够神经元的区域的统计数据
+    # 9. 计算每个区域的统计数据
     processed_data = []
-    for region_id in regions_with_sufficient_neurons:
+    for region_id in regions_to_process:
         region_dict = region_data.get(region_id, {})
         if not region_dict:
             continue
@@ -1220,7 +1196,7 @@ def load_morphology_data(data_dir: Path) -> pd.DataFrame:
         result_dict = {
             'region_id': region_id,
             'region_name': region_dict.get('region_name', f"Unknown_{region_id}"),
-            'complete_neuron_count': region_neuron_counts.get(region_id, 0)
+            'neuron_count': region_neuron_counts.get(region_id, 0)
         }
 
         # 计算每个形态特征的统计数据
@@ -1238,8 +1214,8 @@ def load_morphology_data(data_dir: Path) -> pd.DataFrame:
                 # 没有该特征的数据
                 result_dict[feature] = np.nan
                 result_dict[f'{feature}_std'] = np.nan
-                result_dict[f'{feature}_min'] = np.min(values) if values else np.nan
-                result_dict[f'{feature}_max'] = np.max(values) if values else np.nan
+                result_dict[f'{feature}_min'] = np.nan
+                result_dict[f'{feature}_max'] = np.nan
 
         processed_data.append(result_dict)
 
@@ -1253,7 +1229,7 @@ def load_morphology_data(data_dir: Path) -> pd.DataFrame:
                 logger.warning(f"形态特征列'{feature}'不存在，使用随机值填充")
                 morph_df[feature] = np.random.normal(0, 1, size=len(morph_df))
 
-    logger.info(f"处理了 {len(morph_df)} 个有足够完整神经元的区域的形态特征")
+    logger.info(f"完成处理 {len(morph_df)} 个区域的形态特征数据")
     return morph_df
 # def load_morphology_data(data_dir: Path) -> pd.DataFrame:
 #     """

@@ -858,6 +858,506 @@ class MERFISHSubregionMapper:
 
         return cells_df
 
+class HierarchicalProjectionProcessor:
+    """
+    层级投射关系处理器
+
+    功能：
+    1. 从 Neuron 投射聚合得到 Region -> Subregion 投射
+    2. 从 Neuron 投射聚合得到 Subregion -> Subregion 投射
+    3. 预留 ME_Subregion 级别投射框架
+    """
+
+    def __init__(self, projection_processor: 'NeuronProjectionProcessorV5Fixed',
+                 neo4j_connector, data_path: Path):
+        """
+        初始化
+
+        参数:
+            projection_processor: 神经元投射处理器
+            neo4j_connector: Neo4j连接器
+            data_path: 数据路径
+        """
+        self.proj_processor = projection_processor
+        self.neo4j = neo4j_connector
+        self.data_path = data_path
+
+        # 存储聚合后的投射数据
+        self.region_to_subregion_projections = {}  # {(region_acronym, subregion_acronym): total_length}
+        self.subregion_to_subregion_projections = {}  # {(source_subregion, target_subregion): total_length}
+
+        # ME_Subregion 投射（预留）
+        self.neuron_to_me_subregion_projections = {}  # 预留：从数据文件加载
+        self.region_to_me_subregion_projections = {}  # 预留：从神经元投射聚合
+
+        # 神经元的 soma 位置信息
+        self.neuron_locations = {}  # {neuron_id: {'region': ..., 'subregion': ..., 'me_subregion': ...}}
+
+        # 统计
+        self.stats = {
+            'region_to_subregion': 0,
+            'subregion_to_subregion': 0,
+            'neuron_to_me_subregion': 0,
+            'region_to_me_subregion': 0
+        }
+
+    def load_neuron_locations(self) -> bool:
+        """
+        加载神经元的 soma 位置信息
+
+        从 info_with_me_subregion_v2.csv 加载神经元所在的 Region/Subregion/ME_Subregion
+        """
+        logger.info("加载神经元位置信息...")
+
+        location_file = self.data_path / "info_with_me_subregion_v2.csv"
+
+        if not location_file.exists():
+            logger.warning(f"神经元位置文件不存在: {location_file}")
+            # 尝试从 info.csv 获取基础信息
+            return self._load_basic_neuron_locations()
+
+        try:
+            # 读取CSV（无表头）
+            df = pd.read_csv(location_file, header=None, encoding='latin1', low_memory=False)
+
+            # 定义列名
+            col_names = [
+                'ID', 'data_source', 'celltype', 'brain_atlas', 'recon_method',
+                'has_recon_axon', 'has_recon_den', 'has_ab', 'layer', 'has_apical',
+                'has_local', 'hemisphere', 'subregion', 'me_subregion_voxel',
+                'me_subregion_acronym', 'me_subregion_name', 'parent_region_id',
+                'is_me_subregion'
+            ]
+            df.columns = col_names
+
+            # 提取位置信息
+            for _, row in df.iterrows():
+                neuron_id = str(row['ID'])
+
+                # 从 celltype 提取 region（去除层信息）
+                celltype = str(row['celltype'])
+                region = self._extract_base_region(celltype)
+
+                self.neuron_locations[neuron_id] = {
+                    'region': region,
+                    'subregion': str(row['subregion']) if pd.notna(row['subregion']) else None,
+                    'me_subregion': str(row['me_subregion_acronym']) if pd.notna(row['me_subregion_acronym']) else None,
+                    'celltype': celltype
+                }
+
+            logger.info(f"成功加载 {len(self.neuron_locations)} 个神经元的位置信息")
+
+            # 统计
+            with_subregion = sum(1 for loc in self.neuron_locations.values() if loc['subregion'])
+            with_me = sum(1 for loc in self.neuron_locations.values() if loc['me_subregion'])
+
+            logger.info(f"  - 有 Subregion 信息: {with_subregion}")
+            logger.info(f"  - 有 ME_Subregion 信息: {with_me}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"加载神经元位置信息失败: {e}")
+            return False
+
+    def _load_basic_neuron_locations(self) -> bool:
+        """从基础 info.csv 加载神经元位置"""
+        info_file = self.data_path / "info.csv"
+
+        if not info_file.exists():
+            logger.error("无法找到神经元位置信息文件")
+            return False
+
+        try:
+            info_df = pd.read_csv(info_file)
+
+            for _, row in info_df.iterrows():
+                neuron_id = str(row['ID'])
+                celltype = str(row.get('celltype', ''))
+                region = self._extract_base_region(celltype)
+
+                self.neuron_locations[neuron_id] = {
+                    'region': region,
+                    'subregion': None,  # 无法从基础文件获取
+                    'me_subregion': None,
+                    'celltype': celltype
+                }
+
+            logger.info(f"从基础文件加载了 {len(self.neuron_locations)} 个神经元位置")
+            return True
+
+        except Exception as e:
+            logger.error(f"加载基础神经元位置失败: {e}")
+            return False
+
+    def _extract_base_region(self, celltype: str) -> str:
+        """从 celltype 提取基础 region（去除层信息）"""
+        layer_patterns = ['1', '2/3', '4', '5', '6a', '6b']
+        base_region = celltype
+
+        for layer in layer_patterns:
+            if celltype.endswith(layer):
+                base_region = celltype[:-len(layer)]
+                break
+
+        return base_region
+
+    def aggregate_region_to_subregion_projections(self):
+        """
+        聚合计算 Region -> Subregion 投射关系
+
+        逻辑：
+        如果来自某个 Region 的神经元投射到某个 Subregion，
+        则该 Region 投射到该 Subregion，投射强度为该 Region 所有神经元的投射总和
+        """
+        logger.info("=" * 60)
+        logger.info("聚合计算 Region -> Subregion 投射关系")
+        logger.info("=" * 60)
+
+        if not self.neuron_locations:
+            logger.error("未加载神经元位置信息，无法计算聚合投射")
+            return
+
+        # 遍历所有神经元的 subregion 投射
+        for neuron_id, subregion_projs in tqdm(
+                self.proj_processor.neuron_to_subregion_axon.items(),
+                desc="聚合 Region->Subregion"
+        ):
+            # 获取神经元所在的 Region
+            if neuron_id not in self.neuron_locations:
+                continue
+
+            source_region = self.neuron_locations[neuron_id]['region']
+            if not source_region:
+                continue
+
+            # 累加该神经元到各个 Subregion 的投射
+            for target_subregion, length in subregion_projs.items():
+                key = (source_region, target_subregion)
+
+                if key not in self.region_to_subregion_projections:
+                    self.region_to_subregion_projections[key] = 0.0
+
+                self.region_to_subregion_projections[key] += length
+
+        logger.info(f"✓ 计算了 {len(self.region_to_subregion_projections)} 个 Region->Subregion 投射关系")
+
+        # 显示样例
+        if self.region_to_subregion_projections:
+            logger.info("\n样例投射关系:")
+            sample_items = list(self.region_to_subregion_projections.items())[:5]
+            for (source, target), length in sample_items:
+                logger.info(f"  {source} -> {target}: {length:.2f}")
+
+    def aggregate_subregion_to_subregion_projections(self):
+        """
+        聚合计算 Subregion -> Subregion 投射关系
+
+        逻辑：
+        如果来自某个 Subregion 的神经元投射到另一个 Subregion，
+        则这两个 Subregion 之间有投射关系，投射强度为该源 Subregion 所有神经元的投射总和
+        """
+        logger.info("=" * 60)
+        logger.info("聚合计算 Subregion -> Subregion 投射关系")
+        logger.info("=" * 60)
+
+        if not self.neuron_locations:
+            logger.error("未加载神经元位置信息，无法计算聚合投射")
+            return
+
+        # 遍历所有神经元的 subregion 投射
+        for neuron_id, subregion_projs in tqdm(
+                self.proj_processor.neuron_to_subregion_axon.items(),
+                desc="聚合 Subregion->Subregion"
+        ):
+            # 获取神经元所在的 Subregion
+            if neuron_id not in self.neuron_locations:
+                continue
+
+            source_subregion = self.neuron_locations[neuron_id]['subregion']
+            if not source_subregion or source_subregion == 'None':
+                continue
+
+            # 累加该神经元到各个 Subregion 的投射
+            for target_subregion, length in subregion_projs.items():
+                key = (source_subregion, target_subregion)
+
+                if key not in self.subregion_to_subregion_projections:
+                    self.subregion_to_subregion_projections[key] = 0.0
+
+                self.subregion_to_subregion_projections[key] += length
+
+        logger.info(f"✓ 计算了 {len(self.subregion_to_subregion_projections)} 个 Subregion->Subregion 投射关系")
+
+        # 显示样例
+        if self.subregion_to_subregion_projections:
+            logger.info("\n样例投射关系:")
+            sample_items = list(self.subregion_to_subregion_projections.items())[:5]
+            for (source, target), length in sample_items:
+                logger.info(f"  {source} -> {target}: {length:.2f}")
+
+    def insert_region_to_subregion_projections(self, batch_size: int = 1000):
+        """
+        插入 Region -> Subregion 投射关系到 Neo4j
+        """
+        logger.info("插入 Region -> Subregion 投射关系...")
+
+        if not self.region_to_subregion_projections:
+            logger.warning("没有 Region->Subregion 投射数据")
+            return
+
+        batch_relationships = []
+        success_count = 0
+
+        for (source_region, target_subregion), length in tqdm(
+                self.region_to_subregion_projections.items(),
+                desc="插入 Region->Subregion"
+        ):
+            rel = {
+                'source_acronym': source_region,
+                'target_acronym': target_subregion,
+                'projection_length': float(length),
+                'projection_type': 'axon',
+                'aggregation_level': 'region_to_subregion'
+            }
+
+            batch_relationships.append(rel)
+
+            if len(batch_relationships) >= batch_size:
+                count = self._execute_region_to_subregion_batch(batch_relationships)
+                success_count += count
+                batch_relationships = []
+
+        # 插入剩余
+        if batch_relationships:
+            count = self._execute_region_to_subregion_batch(batch_relationships)
+            success_count += count
+
+        self.stats['region_to_subregion'] = success_count
+        logger.info(f"✓ 成功插入 {success_count} 个 Region->Subregion 投射关系")
+
+    def _execute_region_to_subregion_batch(self, batch: List[Dict]) -> int:
+        """执行 Region->Subregion 批量插入"""
+        query = """
+        UNWIND $batch AS rel
+        MATCH (r:Region)
+        WHERE r.acronym = rel.source_acronym
+        MATCH (s:Subregion {acronym: rel.target_acronym})
+        MERGE (r)-[p:PROJECT_TO]->(s)
+        SET p.projection_length = rel.projection_length,
+            p.projection_type = rel.projection_type,
+            p.aggregation_level = rel.aggregation_level,
+            p.target_level = 'subregion',
+            p.source_level = 'region'
+        RETURN count(p) as created_count
+        """
+
+        try:
+            with self.neo4j.driver.session(database=self.neo4j.database) as session:
+                result = session.run(query, batch=batch)
+                record = result.single()
+                return record['created_count'] if record else 0
+        except Exception as e:
+            logger.error(f"批量插入 Region->Subregion 投射失败: {e}")
+            return 0
+
+    def insert_subregion_to_subregion_projections(self, batch_size: int = 1000):
+        """
+        插入 Subregion -> Subregion 投射关系到 Neo4j
+        """
+        logger.info("插入 Subregion -> Subregion 投射关系...")
+
+        if not self.subregion_to_subregion_projections:
+            logger.warning("没有 Subregion->Subregion 投射数据")
+            return
+
+        batch_relationships = []
+        success_count = 0
+
+        for (source_subregion, target_subregion), length in tqdm(
+                self.subregion_to_subregion_projections.items(),
+                desc="插入 Subregion->Subregion"
+        ):
+            rel = {
+                'source_acronym': source_subregion,
+                'target_acronym': target_subregion,
+                'projection_length': float(length),
+                'projection_type': 'axon',
+                'aggregation_level': 'subregion_to_subregion'
+            }
+
+            batch_relationships.append(rel)
+
+            if len(batch_relationships) >= batch_size:
+                count = self._execute_subregion_to_subregion_batch(batch_relationships)
+                success_count += count
+                batch_relationships = []
+
+        # 插入剩余
+        if batch_relationships:
+            count = self._execute_subregion_to_subregion_batch(batch_relationships)
+            success_count += count
+
+        self.stats['subregion_to_subregion'] = success_count
+        logger.info(f"✓ 成功插入 {success_count} 个 Subregion->Subregion 投射关系")
+
+    def _execute_subregion_to_subregion_batch(self, batch: List[Dict]) -> int:
+        """执行 Subregion->Subregion 批量插入"""
+        query = """
+        UNWIND $batch AS rel
+        MATCH (s1:Subregion {acronym: rel.source_acronym})
+        MATCH (s2:Subregion {acronym: rel.target_acronym})
+        MERGE (s1)-[p:PROJECT_TO]->(s2)
+        SET p.projection_length = rel.projection_length,
+            p.projection_type = rel.projection_type,
+            p.aggregation_level = rel.aggregation_level,
+            p.target_level = 'subregion',
+            p.source_level = 'subregion'
+        RETURN count(p) as created_count
+        """
+
+        try:
+            with self.neo4j.driver.session(database=self.neo4j.database) as session:
+                result = session.run(query, batch=batch)
+                record = result.single()
+                return record['created_count'] if record else 0
+        except Exception as e:
+            logger.error(f"批量插入 Subregion->Subregion 投射失败: {e}")
+            return 0
+
+    # ==================== 预留：ME_Subregion 投射框架 ====================
+
+    def load_neuron_to_me_subregion_projections(self) -> bool:
+        """
+        预留：加载 Neuron -> ME_Subregion 投射数据
+
+        当有 ME 级别的投射数据文件时，从这里加载
+        文件格式应该类似：axonfull_me_proj.csv
+        """
+        logger.info("=" * 60)
+        logger.info("预留功能：加载 Neuron -> ME_Subregion 投射数据")
+        logger.info("=" * 60)
+
+        me_proj_file = self.data_path / "axonfull_me_proj.csv"
+
+        if not me_proj_file.exists():
+            logger.info("  ⓘ ME 级别投射数据文件不存在（预期行为）")
+            logger.info(f"  ⓘ 预期文件位置: {me_proj_file}")
+            logger.info("  ⓘ 当数据可用时，取消注释下面的代码即可使用")
+            return False
+
+        # ⭐ 预留代码（当数据可用时取消注释）
+        """
+        try:
+            me_proj_df = pd.read_csv(me_proj_file, index_col=0)
+            logger.info(f"  - 加载了 ME 投射数据: {me_proj_df.shape}")
+
+            # 过滤
+            me_proj_df = me_proj_df[
+                ~me_proj_df.index.str.contains('CCF-thin|local', na=False)
+            ]
+
+            # 提取投射关系
+            for neuron_id in tqdm(me_proj_df.index, desc="提取ME投射"):
+                neuron_row = me_proj_df.loc[neuron_id]
+                self.neuron_to_me_subregion_projections[neuron_id] = {}
+
+                # 遍历所有 ME 列
+                for col in me_proj_df.columns:
+                    if col.endswith('-ME'):  # ME_Subregion 的标识
+                        value = neuron_row[col]
+                        if pd.notna(value) and float(value) > 0:
+                            self.neuron_to_me_subregion_projections[neuron_id][col] = float(value)
+
+            total = sum(len(v) for v in self.neuron_to_me_subregion_projections.values())
+            logger.info(f"  ✓ 提取了 {total} 个 Neuron->ME_Subregion 投射关系")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"加载 ME 投射数据失败: {e}")
+            return False
+        """
+
+        return False
+
+    def aggregate_region_to_me_subregion_projections(self):
+        """
+        预留：聚合计算 Region -> ME_Subregion 投射关系
+
+        逻辑类似 Region -> Subregion
+        """
+        logger.info("=" * 60)
+        logger.info("预留功能：聚合 Region -> ME_Subregion 投射")
+        logger.info("=" * 60)
+
+        if not self.neuron_to_me_subregion_projections:
+            logger.info("  ⓘ 没有 Neuron->ME_Subregion 投射数据")
+            logger.info("  ⓘ 当数据可用时，此功能将自动启用")
+            return
+
+        # ⭐ 预留代码（当数据可用时取消注释）
+        """
+        for neuron_id, me_projs in tqdm(
+            self.neuron_to_me_subregion_projections.items(),
+            desc="聚合 Region->ME_Subregion"
+        ):
+            if neuron_id not in self.neuron_locations:
+                continue
+
+            source_region = self.neuron_locations[neuron_id]['region']
+            if not source_region:
+                continue
+
+            for target_me, length in me_projs.items():
+                key = (source_region, target_me)
+
+                if key not in self.region_to_me_subregion_projections:
+                    self.region_to_me_subregion_projections[key] = 0.0
+
+                self.region_to_me_subregion_projections[key] += length
+
+        logger.info(f"✓ 计算了 {len(self.region_to_me_subregion_projections)} 个 Region->ME_Subregion 投射")
+        """
+
+    def insert_all_hierarchical_projections(self, batch_size: int = 1000):
+        """
+        插入所有层级投射关系
+        """
+        logger.info("=" * 80)
+        logger.info("插入层级投射关系")
+        logger.info("=" * 80)
+
+        # 1. 加载神经元位置信息
+        if not self.load_neuron_locations():
+            logger.warning("无法加载神经元位置，某些聚合功能可能不可用")
+
+        # 2. 聚合计算投射关系
+        self.aggregate_region_to_subregion_projections()
+        self.aggregate_subregion_to_subregion_projections()
+
+        # 3. 插入到 Neo4j
+        self.insert_region_to_subregion_projections(batch_size)
+        self.insert_subregion_to_subregion_projections(batch_size)
+
+        # 4. 预留：ME_Subregion 投射
+        self.load_neuron_to_me_subregion_projections()
+        self.aggregate_region_to_me_subregion_projections()
+
+        # 5. 打印统计
+        self.print_statistics()
+
+    def print_statistics(self):
+        """打印统计信息"""
+        logger.info("=" * 60)
+        logger.info("层级投射关系统计")
+        logger.info("=" * 60)
+        logger.info(f"Region -> Subregion: {self.stats['region_to_subregion']}")
+        logger.info(f"Subregion -> Subregion: {self.stats['subregion_to_subregion']}")
+        logger.info(f"Neuron -> ME_Subregion: {self.stats['neuron_to_me_subregion']} (预留)")
+        logger.info(f"Region -> ME_Subregion: {self.stats['region_to_me_subregion']} (预留)")
+        logger.info(f"\n总层级投射关系: {sum(self.stats.values())}")
+        logger.info("=" * 60)
 
 # ==================== 扩展KnowledgeGraphBuilderNeo4j类 ====================
 
@@ -1590,6 +2090,22 @@ def main(data_dir: str = "../data",
             logger.info("\n插入Subregion层级关系...")
             builder.generate_and_insert_subregion_relationships(subregion_loader)
 
+        # ⭐ 新增 Phase 6: 插入层级投射关系
+        if projection_processor:
+            logger.info("\n" + "=" * 60)
+            logger.info("Phase 6: 插入层级投射关系")
+            logger.info("=" * 60)
+
+            hierarchical_proj_processor = HierarchicalProjectionProcessor(
+                projection_processor=projection_processor,
+                neo4j_connector=neo4j_conn,
+                data_path=data_path
+            )
+
+            # 插入所有层级投射关系
+            hierarchical_proj_processor.insert_all_hierarchical_projections(
+                batch_size=BATCH_SIZE
+            )
         # Neuron-Subregion关系
         logger.info("\n" + "=" * 60)
         logger.info("Phase 6: 插入Neuron-Subregion关系")

@@ -2250,7 +2250,7 @@ def main(data_dir: str = "../data",
             logger.info("\n插入Subregion层级关系...")
             builder.generate_and_insert_subregion_relationships(subregion_loader)
 
-            # ⭐ 新增 Phase 6: 插入层级投射关系
+        # ⭐ 新增 Phase 6: 插入层级投射关系
         if projection_processor:
             logger.info("\n" + "=" * 60)
             logger.info("Phase 6: 插入层级投射关系")

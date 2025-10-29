@@ -317,13 +317,23 @@ class CompleteMERFISHAnalyzer:
         return comp_df
 
     def plot_celltype_composition_heatmap(
-        self,
-        comp_df: pd.DataFrame,
-        output_file: Path,
-        top_n: int = 10
+            self,
+            comp_df: pd.DataFrame,
+            output_file: Path,
+            top_n: int = 10
     ):
         """绘制细胞类型组成热图"""
         logger.info("\n绘制细胞类型组成热图...")
+
+        # 定义区域顺序（与堆叠柱状图一致）
+        region_order = [
+            "ACAd2/3", "ACAd5", "ACAd6a", "ACAv2/3", "ACAv5",
+            "MOs2/3", "MOs5", "MOs6a", "MOp6a",
+            "AId6a", "AIp6a",
+            "CP", "EPd", "SNr",
+            "ENTl2", "ENTl3", "ENTl5", "ENTl6a",
+            "RSPv5", "CLA"
+        ]
 
         # 为每个区域选择top N的subclass
         plot_data = []
@@ -342,6 +352,10 @@ class CompleteMERFISHAnalyzer:
             values='percentage'
         ).fillna(0)
 
+        # 按照指定顺序重新排列行（只保留存在的区域）
+        available_regions = [r for r in region_order if r in heatmap_data.index]
+        heatmap_data = heatmap_data.reindex(available_regions)
+
         # 创建图形
         fig, ax = plt.subplots(figsize=(16, max(10, len(heatmap_data) * 0.5)))
 
@@ -358,17 +372,21 @@ class CompleteMERFISHAnalyzer:
         )
 
         # 标题
-        ax.set_title(
-            f'Cell Type Composition of Target Brain Regions\n(Top {top_n} Subclasses per Region)',
-            fontsize=14,
-            fontweight='bold',
-            pad=20
-        )
-        ax.set_xlabel('Cell Subclass', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Brain Region', fontsize=12, fontweight='bold')
+        # ax.set_title(
+        #     f'Cell Type Composition of Target Brain Regions\n(Top {top_n} Subclasses per Region)',
+        #     fontsize=14,
+        #     fontweight='bold',
+        #     pad=20
+        # )
+        # 设置 x 轴标签字体大小
+        ax.set_xticklabels(ax.get_xticklabels(), fontsize=14)
+        # 设置 y 轴标签字体大小
+        ax.set_yticklabels(ax.get_yticklabels(), fontsize=14)
+        ax.set_xlabel('Cell Subclass', fontsize=20, fontweight='bold')
+        ax.set_ylabel('Brain Region', fontsize=20, fontweight='bold')
 
         plt.tight_layout()
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.savefig(output_file, dpi=1200, bbox_inches='tight')
         logger.info(f"  ✓ 保存到: {output_file}")
 
         plt.close()
@@ -429,13 +447,23 @@ class CompleteMERFISHAnalyzer:
         plt.close()
 
     def plot_subclass_distribution_stacked(
-        self,
-        comp_df: pd.DataFrame,
-        output_file: Path,
-        top_n_subclasses: int = 10
+            self,
+            comp_df: pd.DataFrame,
+            output_file: Path,
+            top_n_subclasses: int = 10
     ):
         """绘制堆叠柱状图显示细胞类型分布"""
         logger.info("\n绘制堆叠柱状图...")
+
+        # 定义区域顺序
+        region_order = [
+            "ACAd2/3", "ACAd5", "ACAd6a", "ACAv2/3", "ACAv5",
+            "MOs2/3", "MOs5", "MOs6a", "MOp6a",
+            "AId6a", "AIp6a",
+            "CP", "EPd", "SNr",
+            "ENTl2", "ENTl3", "ENTl5", "ENTl6a",
+            "RSPv5", "CLA"
+        ]
 
         # 选择top N的subclass
         top_subclasses = comp_df.groupby('subclass')['cell_count'].sum().nlargest(top_n_subclasses).index
@@ -450,8 +478,12 @@ class CompleteMERFISHAnalyzer:
             values='percentage'
         ).fillna(0)
 
+        # 按照指定顺序重新排列行（只保留存在的区域）
+        available_regions = [r for r in region_order if r in pivot_df.index]
+        pivot_df = pivot_df.reindex(available_regions)
+
         # 创建图形
-        fig, ax = plt.subplots(figsize=(14, 8))
+        fig, ax = plt.subplots(figsize=(14,12))
 
         # 堆叠柱状图
         pivot_df.plot(
@@ -463,29 +495,31 @@ class CompleteMERFISHAnalyzer:
         )
 
         # 标题和标签
-        ax.set_title(
-            f'Cell Type Distribution Across Regions\n(Top {top_n_subclasses} Subclasses)',
-            fontsize=14,
-            fontweight='bold'
-        )
-        ax.set_xlabel('Brain Region', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Percentage of Cells (%)', fontsize=12, fontweight='bold')
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
-
+        # ax.set_title(
+        #     f'Cell Type Distribution Across Regions\n(Top {top_n_subclasses} Subclasses)',
+        #     fontsize=20,
+        #     fontweight='bold'
+        # )
+        ax.set_xlabel('Brain Region', fontsize=20, fontweight='bold')
+        ax.set_ylabel('Percentage of Cells (%)', fontsize=20, fontweight='bold')
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right',fontsize=16)
+        ax.set_yticklabels(ax.get_yticklabels(), fontsize=16)
         # 图例
         ax.legend(
-            title='Subclass',
-            bbox_to_anchor=(1.05, 1),
-            loc='upper left',
-            frameon=True
-        )
+                title='Subclass',
+                bbox_to_anchor=(0.5, -0.5),
+                loc='upper center',
+                ncol=5,
+                frameon=True,
+                fontsize=13
+            )
 
         # 网格
         ax.grid(axis='y', alpha=0.3, linestyle='--')
         ax.set_axisbelow(True)
 
         plt.tight_layout()
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.savefig(output_file, dpi=1200, bbox_inches='tight')
         logger.info(f"  ✓ 保存到: {output_file}")
 
         plt.close()
@@ -594,23 +628,26 @@ def main():
 
         # 定义目标区域
         target_regions = [
-            'ACAd2/3',
-            'ACAd5',
-            'ACAd6a',
-            'ACAv5',
-            'AId6a',
-            'AIp6a',
-            'CP',
-            'ENTl2',
-            'ENTl5',
-            'ENTl6a',
-            'EPd',
-            'MOp6a',
-            'MOs2/3',
-            'MOs5',
-            'MOs6a',
-            'RSPv5',
-            'SNr',
+            "CP",
+            "CLA",
+            "ENTl5",
+            "MOs5",
+            "MOs2/3",
+            "MOs6a",
+            "ACAd5",
+            "SNr",
+            "ENTl3",
+            "AId6a",
+            "ACAd2/3",
+            "ENTl2",
+            "ACAd6a",
+            "EPd",
+            "ENTl6a",
+            "MOp6a",
+            "RSPv5",
+            "ACAv5",
+            "ACAv2/3",
+            "AIp6a"
         ]
 
         logger.info(f"\n目标区域: {target_regions}")

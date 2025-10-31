@@ -214,7 +214,26 @@ class BrainRegionFingerprints:
 
         print(f"形态指纹数组形状: {all_sigs.shape}")
 
-        # 对每个特征维度进行z-score
+        # ========== 关键修复：处理dendritic特征中的0值 ==========
+        # 特征索引：0-3是axonal，4-7是dendritic
+        dendritic_indices = [4, 5, 6, 7]  # bifurc_angle, length, branches, max_order
+
+        print("处理dendritic特征的0值（无dendrite的神经元）...")
+
+        # 对dendritic特征，将0值替换为NaN（这样zscore会忽略它们）
+        for i in dendritic_indices:
+            col = all_sigs[:, i].copy()
+            # 将接近0的值（考虑浮点精度）视为无dendrite
+            zero_mask = np.abs(col) < 1e-6
+            n_zeros = zero_mask.sum()
+            if n_zeros > 0:
+                feature_names = ['dendritic_bifurcation_angle', 'dendritic_length',
+                               'dendritic_branches', 'dendritic_max_order']
+                print(f"  {feature_names[i-4]:30s}: 排除 {n_zeros}/{len(col)} 个0值")
+                col[zero_mask] = np.nan
+                all_sigs[:, i] = col
+
+        # 对每个特征维度进行z-score（zscore会自动忽略NaN）
         for i in range(all_sigs.shape[1]):
             col = all_sigs[:, i]
             valid = ~np.isnan(col)
@@ -487,11 +506,10 @@ class BrainRegionFingerprints:
         # === 1. 形态雷达图 ===
         ax_radar = fig.add_subplot(gs[0], projection='polar')
 
-        # 获取形态特征（非z-score的原始值）
+        # 获取形态特征（z-score值）
         morph1_zscore = self.morph_signatures[region1]
         morph2_zscore = self.morph_signatures[region2]
 
-        # 如果需要原始值，这里暂时用z-score值（因为我们已经标准化了）
         # 创建雷达图的角度
         feature_names = [
             'Axon\nBifurc\nAngle',
@@ -508,24 +526,62 @@ class BrainRegionFingerprints:
         angles = np.linspace(0, 2 * np.pi, n_features, endpoint=False).tolist()
         angles += angles[:1]  # 闭合
 
-        # 准备数据（归一化到0-1以便可视化）
-        morph1_norm = (morph1_zscore - morph1_zscore.min()) / (morph1_zscore.max() - morph1_zscore.min() + 1e-9)
-        morph2_norm = (morph2_zscore - morph2_zscore.min()) / (morph2_zscore.max() - morph2_zscore.min() + 1e-9)
+        # 准备数据 - 使用更好的归一化方法
+        # 方法：将z-score转换到合适的可视化范围
+        valid_mask = ~(np.isnan(morph1_zscore) | np.isnan(morph2_zscore))
+
+        # 如果有有效数据，使用自适应归一化
+        if valid_mask.sum() > 0:
+            # 找到两个区域的共同范围
+            all_values = np.concatenate([morph1_zscore[valid_mask], morph2_zscore[valid_mask]])
+            vmin = np.min(all_values)
+            vmax = np.max(all_values)
+
+            # 如果范围太小，扩展一下以便可视化
+            if vmax - vmin < 1.0:
+                center = (vmax + vmin) / 2
+                vmin = center - 1.0
+                vmax = center + 1.0
+
+            # 归一化到0-1，保持相对关系
+            morph1_norm = np.zeros_like(morph1_zscore)
+            morph2_norm = np.zeros_like(morph2_zscore)
+
+            morph1_norm[valid_mask] = (morph1_zscore[valid_mask] - vmin) / (vmax - vmin)
+            morph2_norm[valid_mask] = (morph2_zscore[valid_mask] - vmin) / (vmax - vmin)
+
+            # NaN位置填充0.5（中间值）
+            morph1_norm[~valid_mask] = 0.5
+            morph2_norm[~valid_mask] = 0.5
+        else:
+            # 如果没有有效数据，全部填充0.5
+            morph1_norm = np.full_like(morph1_zscore, 0.5)
+            morph2_norm = np.full_like(morph2_zscore, 0.5)
 
         morph1_plot = morph1_norm.tolist() + [morph1_norm[0]]
         morph2_plot = morph2_norm.tolist() + [morph2_norm[0]]
 
-        ax_radar.plot(angles, morph1_plot, 'o-', linewidth=2, label=region1, color='#E74C3C')
+        # 绘制雷达图 - 使用更明显的样式
+        ax_radar.plot(angles, morph1_plot, 'o-', linewidth=2.5, markersize=8,
+                     label=region1, color='#E74C3C')
         ax_radar.fill(angles, morph1_plot, alpha=0.25, color='#E74C3C')
-        ax_radar.plot(angles, morph2_plot, 's-', linewidth=2, label=region2, color='#3498DB')
+        ax_radar.plot(angles, morph2_plot, 's-', linewidth=2.5, markersize=8,
+                     label=region2, color='#3498DB')
         ax_radar.fill(angles, morph2_plot, alpha=0.25, color='#3498DB')
 
         ax_radar.set_xticks(angles[:-1])
         ax_radar.set_xticklabels(feature_names, size=8)
         ax_radar.set_ylim(0, 1)
-        ax_radar.set_title('Morphology Features\n(Normalized)', fontsize=11, fontweight='bold', pad=20)
-        ax_radar.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
-        ax_radar.grid(True)
+        ax_radar.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+        ax_radar.set_yticklabels(['Low', '', 'Mid', '', 'High'], size=7)
+        ax_radar.set_title('Morphology Features\n(Normalized Z-scores)',
+                          fontsize=11, fontweight='bold', pad=20)
+        ax_radar.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize=9)
+        ax_radar.grid(True, linewidth=0.5, alpha=0.5)
+
+        # 添加参考圆
+        for y in [0.25, 0.5, 0.75]:
+            ax_radar.plot(angles, [y]*len(angles), '--', linewidth=0.5, color='gray', alpha=0.3)
 
         # === 2. 分子组成对比 (Top 10 Subclasses) ===
         ax_mol = fig.add_subplot(gs[1])
@@ -962,11 +1018,16 @@ and projection patterns."""
             for j in range(i + 1, len(regions)):
                 val = mol_morph_mismatch.iloc[i, j]
                 if not np.isnan(val):
-                    mm_values.append((regions[i], regions[j], val))
+                    # 计算形态差异度（用于筛选有明显差异的对）
+                    morph_contrast = self._compute_morphology_contrast(regions[i], regions[j])
+                    mm_values.append((regions[i], regions[j], val, morph_contrast))
 
-        mm_values.sort(key=lambda x: x[2], reverse=True)
-        for rank, (r1, r2, val) in enumerate(mm_values[:n], 1):
-            print(f"{rank:2d}. {r1:10s} <-> {r2:10s}  |  Mismatch = {val:.4f}")
+        # 按mismatch和形态差异度的综合得分排序
+        # 综合得分 = mismatch * 0.7 + 形态差异度 * 0.3
+        mm_values.sort(key=lambda x: x[2] * 0.7 + x[3] * 0.3, reverse=True)
+
+        for rank, (r1, r2, val, contrast) in enumerate(mm_values[:n], 1):
+            print(f"{rank:2d}. {r1:10s} <-> {r2:10s}  |  Mismatch = {val:.4f}  |  形态差异度 = {contrast:.4f}")
 
         # Molecular-Projection Mismatch
         print(f"\n【分子-投射 Mismatch Top {n}】")
@@ -986,11 +1047,68 @@ and projection patterns."""
 
         print("=" * 80 + "\n")
 
-        # 返回top pairs用于详细可视化
+        # 返回top pairs用于详细可视化（只返回简化的三元组）
         return {
-            'mol_morph': mm_values[:n],
+            'mol_morph': [(r1, r2, val) for r1, r2, val, _ in mm_values[:n]],
             'mol_proj': mp_values[:n]
         }
+
+    def _compute_morphology_contrast(self, region1: str, region2: str) -> float:
+        """
+        计算两个脑区的形态对比度（用于筛选视觉效果好的脑区对）
+
+        对比度高 = 雷达图有明显的差异，适合可视化
+
+        考虑因素：
+        1. 特征值的标准差（越大越有起伏）
+        2. 两个脑区的差异大小
+        3. 非NaN特征的数量（需要足够多的有效特征）
+
+        Returns:
+            对比度分数 (0-1)，越高越适合可视化
+        """
+        morph1 = self.morph_signatures[region1]
+        morph2 = self.morph_signatures[region2]
+
+        # 检查有效特征数量
+        valid_mask = ~(np.isnan(morph1) | np.isnan(morph2))
+        n_valid = valid_mask.sum()
+
+        if n_valid < 4:  # 至少需要4个有效特征
+            return 0.0
+
+        morph1_valid = morph1[valid_mask]
+        morph2_valid = morph2[valid_mask]
+
+        # 1. 特征标准差（衡量起伏程度）
+        std1 = np.std(morph1_valid)
+        std2 = np.std(morph2_valid)
+        avg_std = (std1 + std2) / 2
+        std_score = np.clip(avg_std / 2.0, 0, 1)  # 标准化到0-1
+
+        # 2. 两个脑区的差异大小
+        diff = np.abs(morph1_valid - morph2_valid)
+        avg_diff = np.mean(diff)
+        diff_score = np.clip(avg_diff / 3.0, 0, 1)  # 标准化到0-1
+
+        # 3. 特征范围（max-min，衡量动态范围）
+        range1 = np.max(morph1_valid) - np.min(morph1_valid)
+        range2 = np.max(morph2_valid) - np.min(morph2_valid)
+        avg_range = (range1 + range2) / 2
+        range_score = np.clip(avg_range / 4.0, 0, 1)  # 标准化到0-1
+
+        # 4. 有效特征占比
+        completeness = n_valid / 8.0
+
+        # 综合得分（加权平均）
+        contrast = (
+            std_score * 0.25 +      # 标准差权重25%
+            diff_score * 0.35 +     # 差异大小权重35%（最重要）
+            range_score * 0.25 +    # 动态范围权重25%
+            completeness * 0.15     # 完整性权重15%
+        )
+
+        return contrast
 
     # ==================== 7. 主流程 ====================
 
@@ -1047,7 +1165,7 @@ def main():
     NEO4J_PASSWORD = "neuroxiv"  # 修改为你的密码
 
     # 输出配置
-    OUTPUT_DIR = "./fingerprint_results_v2"
+    OUTPUT_DIR = "./fingerprint_results_v3"
     TOP_N_REGIONS = 20
 
     print("\n" + "=" * 80)

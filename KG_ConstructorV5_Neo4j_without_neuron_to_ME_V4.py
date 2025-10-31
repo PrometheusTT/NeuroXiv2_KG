@@ -294,8 +294,8 @@ class NeuronDataLoader:
                     # 处理每个特征列
                     for col in self.axon_morph_df.columns:
                         if col not in ['ID', 'name', 'celltype', 'type']:
-                            # 创建特征名称（添加 axonal_ 前缀并清理）
-                            feature_name = f'axonal_{col}'.replace(' ', '_').replace('/', '_').replace('-', '_').lower()
+                            # ✅ 修复：使用 clean_feature_name 函数
+                            feature_name = clean_feature_name(f'axonal_{col}')
 
                             try:
                                 # 尝试转换为数值并取平均值（处理多行情况）
@@ -318,9 +318,8 @@ class NeuronDataLoader:
                     # 处理每个特征列
                     for col in self.dendrite_morph_df.columns:
                         if col not in ['ID', 'name', 'celltype', 'type']:
-                            # 创建特征名称（添加 dendritic_ 前缀并清理）
-                            feature_name = f'dendritic_{col}'.replace(' ', '_').replace('/', '_').replace('-',
-                                                                                                          '_').lower()
+                            # ✅ 修复：使用 clean_feature_name 函数
+                            feature_name = clean_feature_name(f'dendritic_{col}')
 
                             try:
                                 # 尝试转换为数值并取平均值（处理多行情况）
@@ -1819,9 +1818,9 @@ def main(data_dir: str = "../data",
             builder.insert_neuron_locate_at_relationships(neuron_loader)
 
         # ⭐ 修复3: 去重的neighbouring关系
-        if neuron_loader:
-            logger.info("\n⭐ 插入去重的neighbouring关系...")
-            builder.generate_and_insert_neuron_neighbouring_relationships(neuron_loader)
+        # if neuron_loader:
+        #     logger.info("\n⭐ 插入去重的neighbouring关系...")
+        #     builder.generate_and_insert_neuron_neighbouring_relationships(neuron_loader)
 
         # ⭐ 修复1: 统一属性的投射关系
         if projection_processor:

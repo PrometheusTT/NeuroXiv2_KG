@@ -182,7 +182,7 @@ class BrainRegionFingerprints:
         ]
 
         signature = np.array([record[feat] if record[feat] is not None else np.nan
-                             for feat in features])
+                              for feat in features])
         return signature
 
     def compute_all_morphology_signatures(self):
@@ -448,298 +448,6 @@ class BrainRegionFingerprints:
 
     # ==================== 6. 可视化 ====================
 
-    def visualize_mismatch_details(self, top_pairs: Dict, output_dir: str = "."):
-        """
-        为top mismatch pairs绘制详细对比图
-
-        Args:
-            top_pairs: _print_top_mismatch_pairs返回的字典
-            output_dir: 输出目录
-        """
-        import os
-        os.makedirs(output_dir, exist_ok=True)
-
-        print("\n" + "="*80)
-        print("绘制详细对比图...")
-        print("="*80)
-
-        # 1. 分子-形态 Mismatch 详细图（取top 3）
-        print("\n绘制分子-形态 Mismatch 详细对比图...")
-        for rank, (r1, r2, mismatch_val) in enumerate(top_pairs['mol_morph'][:3], 1):
-            self._plot_mol_morph_comparison(r1, r2, mismatch_val, rank, output_dir)
-
-        # 2. 分子-投射 Mismatch 详细图（取top 3）
-        print("\n绘制分子-投射 Mismatch 详细对比图...")
-        for rank, (r1, r2, mismatch_val) in enumerate(top_pairs['mol_proj'][:3], 1):
-            self._plot_mol_proj_comparison(r1, r2, mismatch_val, rank, output_dir)
-
-        print("\n✓ 所有详细对比图已保存")
-
-    def _plot_mol_morph_comparison(self, region1: str, region2: str,
-                                   mismatch: float, rank: int, output_dir: str):
-        """
-        绘制分子-形态 Mismatch 的详细对比图
-        包含：形态雷达图 + 分子组成柱状图
-        """
-        fig = plt.figure(figsize=(16, 6))
-        gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 1.2])
-
-        # === 1. 形态雷达图 ===
-        ax_radar = fig.add_subplot(gs[0], projection='polar')
-
-        # 获取形态特征（非z-score的原始值）
-        morph1_zscore = self.morph_signatures[region1]
-        morph2_zscore = self.morph_signatures[region2]
-
-        # 如果需要原始值，这里暂时用z-score值（因为我们已经标准化了）
-        # 创建雷达图的角度
-        feature_names = [
-            'Axon\nBifurc\nAngle',
-            'Axon\nLength',
-            'Axon\nBranches',
-            'Axon\nMax\nOrder',
-            'Dend\nBifurc\nAngle',
-            'Dend\nLength',
-            'Dend\nBranches',
-            'Dend\nMax\nOrder'
-        ]
-
-        n_features = len(feature_names)
-        angles = np.linspace(0, 2 * np.pi, n_features, endpoint=False).tolist()
-        angles += angles[:1]  # 闭合
-
-        # 准备数据（归一化到0-1以便可视化）
-        morph1_norm = (morph1_zscore - morph1_zscore.min()) / (morph1_zscore.max() - morph1_zscore.min() + 1e-9)
-        morph2_norm = (morph2_zscore - morph2_zscore.min()) / (morph2_zscore.max() - morph2_zscore.min() + 1e-9)
-
-        morph1_plot = morph1_norm.tolist() + [morph1_norm[0]]
-        morph2_plot = morph2_norm.tolist() + [morph2_norm[0]]
-
-        ax_radar.plot(angles, morph1_plot, 'o-', linewidth=2, label=region1, color='#E74C3C')
-        ax_radar.fill(angles, morph1_plot, alpha=0.25, color='#E74C3C')
-        ax_radar.plot(angles, morph2_plot, 's-', linewidth=2, label=region2, color='#3498DB')
-        ax_radar.fill(angles, morph2_plot, alpha=0.25, color='#3498DB')
-
-        ax_radar.set_xticks(angles[:-1])
-        ax_radar.set_xticklabels(feature_names, size=8)
-        ax_radar.set_ylim(0, 1)
-        ax_radar.set_title('Morphology Features\n(Normalized)', fontsize=11, fontweight='bold', pad=20)
-        ax_radar.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
-        ax_radar.grid(True)
-
-        # === 2. 分子组成对比 (Top 10 Subclasses) ===
-        ax_mol = fig.add_subplot(gs[1])
-
-        mol1 = self.mol_signatures[region1]
-        mol2 = self.mol_signatures[region2]
-
-        # 找到两个区域中占比最高的前10个subclass
-        top_indices = np.argsort(mol1 + mol2)[-10:][::-1]
-        top_subclasses = [self.all_subclasses[i] for i in top_indices]
-        top_subclasses_short = [s[:30] + '...' if len(s) > 30 else s for s in top_subclasses]
-
-        mol1_top = mol1[top_indices]
-        mol2_top = mol2[top_indices]
-
-        x = np.arange(len(top_subclasses))
-        width = 0.35
-
-        ax_mol.barh(x - width/2, mol1_top, width, label=region1, color='#E74C3C', alpha=0.8)
-        ax_mol.barh(x + width/2, mol2_top, width, label=region2, color='#3498DB', alpha=0.8)
-
-        ax_mol.set_yticks(x)
-        ax_mol.set_yticklabels(top_subclasses_short, fontsize=8)
-        ax_mol.set_xlabel('Cell Type Percentage (%)', fontsize=10)
-        ax_mol.set_title('Top 10 Cell Types', fontsize=11, fontweight='bold')
-        ax_mol.legend(fontsize=9)
-        ax_mol.grid(axis='x', alpha=0.3)
-
-        # === 3. 分子相似度和mismatch说明 ===
-        ax_info = fig.add_subplot(gs[2])
-        ax_info.axis('off')
-
-        # 计算分子和形态的相似度
-        mol_sim = 1 - (1 - cosine(mol1, mol2))
-        morph_dist = euclidean(morph1_zscore, morph2_zscore)
-
-        info_text = f"""
-Molecular-Morphology Mismatch Analysis
-{'='*45}
-
-Region Pair: {region1} ↔ {region2}
-Rank: #{rank}
-
-Mismatch Score: {mismatch:.4f}
-{'='*45}
-
-Molecular Similarity: {mol_sim:.4f}
-   → Cell type composition similarity
-
-Morphology Distance: {morph_dist:.4f}
-   → Euclidean distance of morphology features
-   
-{'='*45}
-
-Interpretation:
-{self._interpret_mol_morph_mismatch(mol_sim, morph_dist, mismatch)}
-        """
-
-        ax_info.text(0.1, 0.95, info_text, transform=ax_info.transAxes,
-                    fontsize=10, verticalalignment='top', family='monospace',
-                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
-
-        plt.suptitle(f'Mol-Morph Mismatch #{rank}: {region1} vs {region2}',
-                    fontsize=14, fontweight='bold', y=0.98)
-        plt.tight_layout()
-
-        filename = f"{output_dir}/detail_mol_morph_{rank}_{region1}_vs_{region2}.png"
-        plt.savefig(filename, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"  ✓ Saved: detail_mol_morph_{rank}_{region1}_vs_{region2}.png")
-
-    def _plot_mol_proj_comparison(self, region1: str, region2: str,
-                                  mismatch: float, rank: int, output_dir: str):
-        """
-        绘制分子-投射 Mismatch 的详细对比图
-        包含：投射分布柱状图 + 分子组成柱状图
-        """
-        fig = plt.figure(figsize=(16, 6))
-        gs = fig.add_gridspec(1, 3, width_ratios=[1.2, 1, 1])
-
-        # === 1. 投射分布对比 (Top 15 Targets) ===
-        ax_proj = fig.add_subplot(gs[0])
-
-        proj1 = self.proj_signatures[region1]
-        proj2 = self.proj_signatures[region2]
-
-        # 找到两个区域投射最强的前15个目标
-        top_indices = np.argsort(proj1 + proj2)[-15:][::-1]
-        top_targets = [self.all_target_subregions[i] for i in top_indices]
-
-        proj1_top = proj1[top_indices]
-        proj2_top = proj2[top_indices]
-
-        x = np.arange(len(top_targets))
-        width = 0.35
-
-        ax_proj.barh(x - width/2, proj1_top, width, label=region1, color='#E74C3C', alpha=0.8)
-        ax_proj.barh(x + width/2, proj2_top, width, label=region2, color='#3498DB', alpha=0.8)
-
-        ax_proj.set_yticks(x)
-        ax_proj.set_yticklabels(top_targets, fontsize=9)
-        ax_proj.set_xlabel('Projection Strength (Normalized)', fontsize=10)
-        ax_proj.set_title('Top 15 Projection Targets', fontsize=11, fontweight='bold')
-        ax_proj.legend(fontsize=9)
-        ax_proj.grid(axis='x', alpha=0.3)
-
-        # === 2. 分子组成对比 ===
-        ax_mol = fig.add_subplot(gs[1])
-
-        mol1 = self.mol_signatures[region1]
-        mol2 = self.mol_signatures[region2]
-
-        top_indices = np.argsort(mol1 + mol2)[-10:][::-1]
-        top_subclasses = [self.all_subclasses[i] for i in top_indices]
-        top_subclasses_short = [s[:25] + '...' if len(s) > 25 else s for s in top_subclasses]
-
-        mol1_top = mol1[top_indices]
-        mol2_top = mol2[top_indices]
-
-        x = np.arange(len(top_subclasses))
-        width = 0.35
-
-        ax_mol.barh(x - width/2, mol1_top, width, label=region1, color='#E74C3C', alpha=0.8)
-        ax_mol.barh(x + width/2, mol2_top, width, label=region2, color='#3498DB', alpha=0.8)
-
-        ax_mol.set_yticks(x)
-        ax_mol.set_yticklabels(top_subclasses_short, fontsize=8)
-        ax_mol.set_xlabel('Cell Type %', fontsize=10)
-        ax_mol.set_title('Top 10 Cell Types', fontsize=11, fontweight='bold')
-        ax_mol.legend(fontsize=9)
-        ax_mol.grid(axis='x', alpha=0.3)
-
-        # === 3. 说明文本 ===
-        ax_info = fig.add_subplot(gs[2])
-        ax_info.axis('off')
-
-        mol_sim = 1 - (1 - cosine(mol1, mol2))
-        proj_sim = 1 - (1 - cosine(proj1, proj2))
-
-        info_text = f"""
-Molecular-Projection Mismatch
-{'='*40}
-
-Region Pair: {region1} ↔ {region2}
-Rank: #{rank}
-
-Mismatch Score: {mismatch:.4f}
-{'='*40}
-
-Molecular Similarity: {mol_sim:.4f}
-   → Cell type composition
-
-Projection Similarity: {proj_sim:.4f}
-   → Output target pattern
-   
-{'='*40}
-
-Interpretation:
-{self._interpret_mol_proj_mismatch(mol_sim, proj_sim, mismatch)}
-        """
-
-        ax_info.text(0.1, 0.95, info_text, transform=ax_info.transAxes,
-                    fontsize=10, verticalalignment='top', family='monospace',
-                    bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.3))
-
-        plt.suptitle(f'Mol-Proj Mismatch #{rank}: {region1} vs {region2}',
-                    fontsize=14, fontweight='bold', y=0.98)
-        plt.tight_layout()
-
-        filename = f"{output_dir}/detail_mol_proj_{rank}_{region1}_vs_{region2}.png"
-        plt.savefig(filename, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"  ✓ Saved: detail_mol_proj_{rank}_{region1}_vs_{region2}.png")
-
-    def _interpret_mol_morph_mismatch(self, mol_sim: float, morph_dist: float,
-                                     mismatch: float) -> str:
-        """生成分子-形态mismatch的解释文本"""
-        if mol_sim > 0.7 and morph_dist > 2.0:
-            return """High mismatch: Similar molecular
-composition but very different
-morphology strategies.
-→ Same cell types, different
-  wiring patterns."""
-        elif mol_sim < 0.3 and morph_dist < 1.0:
-            return """High mismatch: Different molecular
-composition but similar morphology.
-→ Different cell types converge
-  to similar morphology."""
-        else:
-            return """Moderate mismatch: Partial
-disagreement between molecular
-and morphological organization."""
-
-    def _interpret_mol_proj_mismatch(self, mol_sim: float, proj_sim: float,
-                                    mismatch: float) -> str:
-        """生成分子-投射mismatch的解释文本"""
-        if mol_sim > 0.7 and proj_sim < 0.3:
-            return """High mismatch: Similar molecular
-composition but very different
-projection targets.
-→ Same cell types routed to
-  different network roles."""
-        elif mol_sim < 0.3 and proj_sim > 0.7:
-            return """High mismatch: Different molecular
-composition but similar projections.
-→ Different cell types serve
-  similar functional roles."""
-        else:
-            return """Moderate mismatch: Partial
-disagreement between molecular
-and projection patterns."""
-
-    # ==================== 7. 主流程 ====================
-
     def select_top_regions_by_neuron_count(self, n: int = 20) -> List[str]:
         """
         根据连接的神经元数量选择top N个脑区
@@ -771,7 +479,7 @@ and projection patterns."""
 
     def visualize_matrices(self, top_regions: List[str], output_dir: str = "."):
         """
-        可视化5个矩阵，并分别保存
+        可视化5个矩阵
 
         Args:
             top_regions: 要可视化的脑区列表
@@ -835,119 +543,72 @@ and projection patterns."""
             mol_dist_df, morph_dist_df, proj_dist_df
         )
 
-        # ========== 1. 保存组合图 ==========
+        # 创建5个子图
         fig, axes = plt.subplots(2, 3, figsize=(20, 13))
         fig.suptitle('Brain Region Similarity and Mismatch Analysis',
                      fontsize=16, fontweight='bold', y=0.98)
 
+        # 1. 分子相似矩阵
         sns.heatmap(mol_sim, ax=axes[0, 0], cmap='RdYlBu_r',
                     vmin=0, vmax=1, square=True, cbar_kws={'label': 'Similarity'},
                     xticklabels=True, yticklabels=True)
         axes[0, 0].set_title('Molecular Similarity', fontsize=12, fontweight='bold')
+        axes[0, 0].set_xlabel('Region')
+        axes[0, 0].set_ylabel('Region')
 
+        # 2. 形态相似矩阵
         sns.heatmap(morph_sim, ax=axes[0, 1], cmap='RdYlBu_r',
                     vmin=0, vmax=1, square=True, cbar_kws={'label': 'Similarity'},
                     xticklabels=True, yticklabels=True)
         axes[0, 1].set_title('Morphology Similarity', fontsize=12, fontweight='bold')
+        axes[0, 1].set_xlabel('Region')
+        axes[0, 1].set_ylabel('Region')
 
+        # 3. 投射相似矩阵
         sns.heatmap(proj_sim, ax=axes[0, 2], cmap='RdYlBu_r',
                     vmin=0, vmax=1, square=True, cbar_kws={'label': 'Similarity'},
                     xticklabels=True, yticklabels=True)
         axes[0, 2].set_title('Projection Similarity', fontsize=12, fontweight='bold')
+        axes[0, 2].set_xlabel('Region')
+        axes[0, 2].set_ylabel('Region')
 
+        # 4. 分子-形态 Mismatch
         sns.heatmap(mol_morph_mismatch, ax=axes[1, 0], cmap='YlOrRd',
                     vmin=0, vmax=1, square=True, cbar_kws={'label': 'Mismatch'},
                     xticklabels=True, yticklabels=True)
         axes[1, 0].set_title('Molecular-Morphology Mismatch', fontsize=12, fontweight='bold')
+        axes[1, 0].set_xlabel('Region')
+        axes[1, 0].set_ylabel('Region')
 
+        # 5. 分子-投射 Mismatch
         sns.heatmap(mol_proj_mismatch, ax=axes[1, 1], cmap='YlOrRd',
                     vmin=0, vmax=1, square=True, cbar_kws={'label': 'Mismatch'},
                     xticklabels=True, yticklabels=True)
         axes[1, 1].set_title('Molecular-Projection Mismatch', fontsize=12, fontweight='bold')
+        axes[1, 1].set_xlabel('Region')
+        axes[1, 1].set_ylabel('Region')
 
+        # 隐藏第6个子图
         axes[1, 2].axis('off')
+
+        # 调整布局
         plt.tight_layout()
 
-        combined_path = f"{output_dir}/all_matrices_combined.png"
-        plt.savefig(combined_path, dpi=300, bbox_inches='tight')
-        print(f"\n组合矩阵已保存: {combined_path}")
+        # 保存图片
+        output_path = f"{output_dir}/brain_region_similarity_mismatch_matrices.png"
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"\n矩阵可视化已保存: {output_path}")
+
         plt.close()
 
-        # ========== 2. 分别保存每个矩阵 ==========
-        print("\n分别保存各个矩阵...")
-
-        # 分子相似性
-        fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(mol_sim, ax=ax, cmap='RdYlBu_r', vmin=0, vmax=1,
-                   square=True, cbar_kws={'label': 'Similarity'},
-                   xticklabels=True, yticklabels=True, annot=False)
-        ax.set_title('Molecular Similarity', fontsize=14, fontweight='bold')
-        ax.set_xlabel('Region', fontsize=12)
-        ax.set_ylabel('Region', fontsize=12)
-        plt.tight_layout()
-        plt.savefig(f"{output_dir}/1_molecular_similarity.png", dpi=300, bbox_inches='tight')
-        plt.close()
-
-        # 形态相似性
-        fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(morph_sim, ax=ax, cmap='RdYlBu_r', vmin=0, vmax=1,
-                   square=True, cbar_kws={'label': 'Similarity'},
-                   xticklabels=True, yticklabels=True, annot=False)
-        ax.set_title('Morphology Similarity', fontsize=14, fontweight='bold')
-        ax.set_xlabel('Region', fontsize=12)
-        ax.set_ylabel('Region', fontsize=12)
-        plt.tight_layout()
-        plt.savefig(f"{output_dir}/2_morphology_similarity.png", dpi=300, bbox_inches='tight')
-        plt.close()
-
-        # 投射相似性
-        fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(proj_sim, ax=ax, cmap='RdYlBu_r', vmin=0, vmax=1,
-                   square=True, cbar_kws={'label': 'Similarity'},
-                   xticklabels=True, yticklabels=True, annot=False)
-        ax.set_title('Projection Similarity', fontsize=14, fontweight='bold')
-        ax.set_xlabel('Region', fontsize=12)
-        ax.set_ylabel('Region', fontsize=12)
-        plt.tight_layout()
-        plt.savefig(f"{output_dir}/3_projection_similarity.png", dpi=300, bbox_inches='tight')
-        plt.close()
-
-        # 分子-形态 Mismatch
-        fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(mol_morph_mismatch, ax=ax, cmap='YlOrRd', vmin=0, vmax=1,
-                   square=True, cbar_kws={'label': 'Mismatch'},
-                   xticklabels=True, yticklabels=True, annot=False)
-        ax.set_title('Molecular-Morphology Mismatch', fontsize=14, fontweight='bold')
-        ax.set_xlabel('Region', fontsize=12)
-        ax.set_ylabel('Region', fontsize=12)
-        plt.tight_layout()
-        plt.savefig(f"{output_dir}/4_mol_morph_mismatch.png", dpi=300, bbox_inches='tight')
-        plt.close()
-
-        # 分子-投射 Mismatch
-        fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(mol_proj_mismatch, ax=ax, cmap='YlOrRd', vmin=0, vmax=1,
-                   square=True, cbar_kws={'label': 'Mismatch'},
-                   xticklabels=True, yticklabels=True, annot=False)
-        ax.set_title('Molecular-Projection Mismatch', fontsize=14, fontweight='bold')
-        ax.set_xlabel('Region', fontsize=12)
-        ax.set_ylabel('Region', fontsize=12)
-        plt.tight_layout()
-        plt.savefig(f"{output_dir}/5_mol_proj_mismatch.png", dpi=300, bbox_inches='tight')
-        plt.close()
-
-        print("✓ 所有矩阵已单独保存")
-
-        # 找出top mismatch pairs并返回（用于后续详细可视化）
-        top_pairs = self._print_top_mismatch_pairs(mol_morph_mismatch, mol_proj_mismatch,
-                                                    valid_regions, n=10)
-
-        return top_pairs, mol_morph_mismatch, mol_proj_mismatch
+        # 找出top mismatch pairs
+        self._print_top_mismatch_pairs(mol_morph_mismatch, mol_proj_mismatch,
+                                       valid_regions, n=10)
 
     def _print_top_mismatch_pairs(self, mol_morph_mismatch: pd.DataFrame,
                                   mol_proj_mismatch: pd.DataFrame,
                                   regions: List[str], n: int = 10):
-        """打印top N的mismatch脑区对，并返回用于详细可视化"""
+        """打印top N的mismatch脑区对"""
         print("\n" + "=" * 80)
         print("Top Mismatch Region Pairs")
         print("=" * 80)
@@ -986,15 +647,9 @@ and projection patterns."""
 
         print("=" * 80 + "\n")
 
-        # 返回top pairs用于详细可视化
-        return {
-            'mol_morph': mm_values[:n],
-            'mol_proj': mp_values[:n]
-        }
-
     # ==================== 7. 主流程 ====================
 
-    def run_full_analysis(self, output_dir: str = "./fingerprint_results",
+    def run_full_analysis(self, output_dir: str = "./fingerprint_results_v2",
                           top_n_regions: int = 20):
         """
         运行完整分析流程
@@ -1022,13 +677,8 @@ and projection patterns."""
         # Step 4: 选择top N脑区
         top_regions = self.select_top_regions_by_neuron_count(top_n_regions)
 
-        # Step 5: 可视化矩阵（分别保存）
-        top_pairs, mol_morph_mismatch, mol_proj_mismatch = self.visualize_matrices(
-            top_regions, output_dir
-        )
-
-        # Step 6: 绘制详细对比图
-        self.visualize_mismatch_details(top_pairs, output_dir)
+        # Step 5: 可视化矩阵
+        self.visualize_matrices(top_regions, output_dir)
 
         print("\n" + "=" * 80)
         print("分析完成！")
@@ -1047,7 +697,7 @@ def main():
     NEO4J_PASSWORD = "neuroxiv"  # 修改为你的密码
 
     # 输出配置
-    OUTPUT_DIR = "./fingerprint_results_v2"
+    OUTPUT_DIR = "./fingerprint_results"
     TOP_N_REGIONS = 20
 
     print("\n" + "=" * 80)

@@ -2,7 +2,7 @@
 from typing import Dict, Any, List, Tuple
 import difflib
 
-from .schema_cache import SchemaCache
+from schema_cache import SchemaCache
 
 
 def suggest_prop(schema: SchemaCache, label: str, prop: str) -> str:

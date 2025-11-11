@@ -906,15 +906,15 @@ and projection patterns."""
                     xticklabels=True, yticklabels=True)
         axes[0, 2].set_title('Projection Similarity', fontsize=16, fontweight='bold')
 
-        sns.heatmap(mol_morph_mismatch, ax=axes[1, 0], cmap='YlOrRd',
+        sns.heatmap(mol_morph_mismatch, ax=axes[1, 0], cmap='RdYlBu_r',
                     vmin=0, vmax=1, square=True, cbar_kws={'label': 'Mismatch'},
                     xticklabels=True, yticklabels=True)
-        axes[1, 0].set_title('Molecular-Morphology Mismatch', fontsize=16, fontweight='bold')
+        # axes[1, 0].set_title('Molecular-Morphology Mismatch', fontsize=16, fontweight='bold')
 
-        sns.heatmap(mol_proj_mismatch, ax=axes[1, 1], cmap='YlOrRd',
+        sns.heatmap(mol_proj_mismatch, ax=axes[1, 1], cmap='RdYlBu_r',
                     vmin=0, vmax=1, square=True, cbar_kws={'label': 'Mismatch'},
                     xticklabels=True, yticklabels=True)
-        axes[1, 1].set_title('Molecular-Projection Mismatch', fontsize=16, fontweight='bold')
+        # axes[1, 1].set_title('Molecular-Projection Mismatch', fontsize=16, fontweight='bold')
 
         axes[1, 2].axis('off')
         plt.tight_layout()
@@ -971,10 +971,10 @@ and projection patterns."""
 
         # 分子-形态 Mismatch
         fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(mol_morph_mismatch, ax=ax, cmap='YlOrRd', vmin=0, vmax=1,
-                    square=True, cbar_kws={'label': 'Mismatch'},
+        sns.heatmap(mol_morph_mismatch, ax=ax, cmap='RdYlBu_r', vmin=0, vmax=1,
+                    square=True,
                     xticklabels=True, yticklabels=True, annot=False)
-        ax.set_title('Molecular-Morphology Mismatch', fontsize=20, fontweight='bold')
+        # ax.set_title('Molecular-Morphology Mismatch', fontsize=20, fontweight='bold')
         ax.set_xticklabels(ax.get_xticklabels(), fontsize=16)
         ax.set_yticklabels(ax.get_yticklabels(), fontsize=16)
         ax.set_xlabel('Region', fontsize=20,fontweight='bold')
@@ -985,10 +985,9 @@ and projection patterns."""
 
         # 分子-投射 Mismatch
         fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(mol_proj_mismatch, ax=ax, cmap='YlOrRd', vmin=0, vmax=1,
-                    square=True, cbar_kws={'label': 'Mismatch'},
-                    xticklabels=True, yticklabels=True, annot=False)
-        ax.set_title('Molecular-Projection Mismatch', fontsize=20, fontweight='bold')
+        sns.heatmap(mol_proj_mismatch, ax=ax, cmap='RdYlBu_r', vmin=0, vmax=1,
+                    square=True,xticklabels=True, yticklabels=True, annot=False)
+        # ax.set_title('Molecular-Projection Mismatch', fontsize=20, fontweight='bold')
         ax.set_xticklabels(ax.get_xticklabels(), fontsize=16)
         ax.set_yticklabels(ax.get_yticklabels(), fontsize=16)
         ax.set_xlabel('Region', fontsize=20,fontweight='bold')
@@ -1132,6 +1131,59 @@ and projection patterns."""
 
         return contrast
 
+        # python
+    def visualize_specific_pairs(
+                self,
+                mol_morph_pairs=None,
+                mol_proj_pairs=None,
+                output_dir=".",
+                mol_morph_mismatch_df=None,
+                mol_proj_mismatch_df=None
+        ):
+            """
+            Manually visualize specified region pairs.
+
+            Args:
+                mol_morph_pairs: list of (r1, r2) or (r1, r2, mismatch) for molecular-morphology comparison.
+                mol_proj_pairs: list of (r1, r2) or (r1, r2, mismatch) for molecular-projection comparison.
+                output_dir: directory to save figures.
+                mol_morph_mismatch_df: optional DataFrame produced earlier (mol_morph_mismatch).
+                mol_proj_mismatch_df: optional DataFrame produced earlier (mol_proj_mismatch).
+            """
+            import os
+            os.makedirs(output_dir, exist_ok=True)
+
+            if mol_morph_pairs:
+                print("\nManual Molecular-Morphology comparisons:")
+                for rank, pair in enumerate(mol_morph_pairs, 1):
+                    if len(pair) == 3:
+                        r1, r2, mismatch = pair
+                    else:
+                        r1, r2 = pair
+                        mismatch = np.nan
+                        if mol_morph_mismatch_df is not None:
+                            # Try both index orders
+                            if r1 in mol_morph_mismatch_df.index and r2 in mol_morph_mismatch_df.columns:
+                                mismatch = mol_morph_mismatch_df.loc[r1, r2]
+                            elif r2 in mol_morph_mismatch_df.index and r1 in mol_morph_mismatch_df.columns:
+                                mismatch = mol_morph_mismatch_df.loc[r2, r1]
+                    self._plot_mol_morph_comparison(r1, r2, mismatch, rank, output_dir)
+
+            if mol_proj_pairs:
+                print("\nManual Molecular-Projection comparisons:")
+                for rank, pair in enumerate(mol_proj_pairs, 1):
+                    if len(pair) == 3:
+                        r1, r2, mismatch = pair
+                    else:
+                        r1, r2 = pair
+                        mismatch = np.nan
+                        if mol_proj_mismatch_df is not None:
+                            if r1 in mol_proj_mismatch_df.index and r2 in mol_proj_mismatch_df.columns:
+                                mismatch = mol_proj_mismatch_df.loc[r1, r2]
+                            elif r2 in mol_proj_mismatch_df.index and r1 in mol_proj_mismatch_df.columns:
+                                mismatch = mol_proj_mismatch_df.loc[r2, r1]
+                    self._plot_mol_proj_comparison(r1, r2, mismatch, rank, output_dir)
+
     # ==================== 7. 主流程 ====================
 
     def run_full_analysis(self, output_dir: str = "./fingerprint_results",
@@ -1168,7 +1220,17 @@ and projection patterns."""
         )
 
         # Step 6: 绘制详细对比图
-        self.visualize_mismatch_details(top_pairs, output_dir)
+        # self.visualize_mismatch_details(top_pairs, output_dir)
+        manual_mol_morph = [("CA3", "MOs"),("CA3", "ACAd"), ("CA3", "SUB")]
+        manual_mol_proj = [ ("CA3", "MOs"),("CA3", "ACAd"), ("CA3", "SUB")]
+
+        self.visualize_specific_pairs(
+            mol_morph_pairs=manual_mol_morph,
+            mol_proj_pairs=manual_mol_proj,
+            output_dir=output_dir,
+            mol_morph_mismatch_df=mol_morph_mismatch,
+            mol_proj_mismatch_df=mol_proj_mismatch
+        )
 
         print("\n" + "=" * 80)
         print("分析完成！")
@@ -1187,8 +1249,8 @@ def main():
     NEO4J_PASSWORD = "neuroxiv"  # 修改为你的密码
 
     # 输出配置
-    OUTPUT_DIR = "./fingerprint_results_v4"
-    TOP_N_REGIONS = 20
+    OUTPUT_DIR = "./fingerprint_results_v4_RdYlBu_r"
+    TOP_N_REGIONS = 30
 
     print("\n" + "=" * 80)
     print("脑区指纹计算与可视化")

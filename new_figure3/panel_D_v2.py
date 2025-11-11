@@ -64,7 +64,7 @@ class CLAProjectionAnalyzerImproved:
         self.anatomical_groups = {
             'Prefrontal/Motor': {
                 'regions': [
-                    'ACAd5', 'ACAd6a', 'ACAd6b',
+                    'ACAd1','ACAd5', 'ACAd6a', 'ACAd6b',
                     'MOs5', 'MOs6a', 'MOs6b',
                     'MOp5', 'MOp6a', 'MOp6b'
                 ],
@@ -83,7 +83,7 @@ class CLAProjectionAnalyzerImproved:
             },
             'Entorhinal/Retrosplenial': {
                 'regions': [
-                    'ENTl6a', 'ENTm6',
+                    'ENTl6a', 'ENTm1','ENTm6',
                     'RSPv5', 'RSPd5', 'RSPd6a'
                 ],
                 'order': 3,
@@ -288,7 +288,8 @@ class CLAProjectionAnalyzerImproved:
     def identify_main_targets(
             self,
             top_n_regions: int = 5,
-            threshold_percentile: float = 75
+            threshold_percentile: float = 75,
+            exclude_regions: List[str] = None
     ) -> List[str]:
         """识别主要投射目标"""
         logger.info("=" * 80)
@@ -306,6 +307,12 @@ class CLAProjectionAnalyzerImproved:
                     region_projections[parent_region] = 0.0
 
                 region_projections[parent_region] += length
+
+        if exclude_regions:
+            for ex in exclude_regions:
+                if ex in region_projections:
+                    logger.info(f"  - Excluding region from ranking: {ex}")
+                    region_projections.pop(ex, None)
 
         # Step 2: 找出top N regions
         sorted_regions = sorted(
@@ -363,12 +370,11 @@ class CLAProjectionAnalyzerImproved:
         """按照解剖学分组顺序排序targets"""
         # 定义区域顺序（与堆叠柱状图一致）
         region_order = [
-            "ACAd2/3", "ACAd5", "ACAd6a", "ACAv2/3", "ACAv5",
+            "ACAd1","ACAd2/3", "ACAd5", "ACAd6a", "ACAv2/3", "ACAv5",
             "MOs2/3", "MOs5", "MOs6a", "MOp6a",
             "AId6a", "AIp6a",
-            "CP", "EPd", "SNr",
-            "ENTl2", "ENTl3", "ENTl5", "ENTl6a",
-            "RSPv5", "CLA"
+            "ENTl2", "ENTl3", "ENTl5", "ENTl6a","ENTm1",
+            "EPd", "CLA","RSPv5"
         ]
 
         # 创建顺序映射
@@ -644,7 +650,8 @@ class CLAProjectionAnalyzerImproved:
             self,
             output_path: Path,
             top_n_regions: int = 5,
-            threshold_percentile: float = 75
+            threshold_percentile: float = 75,
+            exclude_regions: List[str] = None
     ) -> bool:
         """运行完整分析流程"""
         logger.info("=" * 80)
@@ -664,7 +671,7 @@ class CLAProjectionAnalyzerImproved:
             return False
 
         # Step 4: 识别主要投射目标
-        self.identify_main_targets(top_n_regions, threshold_percentile)
+        self.identify_main_targets(top_n_regions, threshold_percentile,exclude_regions)
 
         # Step 5: 构建投射矩阵（自动按解剖学排序）
         self.build_projection_matrix()
@@ -696,7 +703,8 @@ def main():
     success = analyzer.run_full_analysis(
         output_path=output_path,
         top_n_regions=20,
-        threshold_percentile=75
+        threshold_percentile=75,
+        exclude_regions=['CP', 'SNr']
     )
 
     if success:

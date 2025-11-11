@@ -59,7 +59,7 @@ ANATOMICAL_GROUPS = {
     },
     'Striatal/Basal_Ganglia': {
         'distance': 4,  # 最远
-        'regions': ['CP', 'ACB', 'SNr', 'PALd'],
+        'regions': ['ACB', 'PALd'],
         'color': '#3498DB',  # 蓝色
         'description': 'Farthest: striatal and basal ganglia structures'
     }
@@ -904,14 +904,12 @@ def main():
     #                 target_subregions.append(f"{region}{layer}")
 
     target_subregions = [
-        "CP",
         "CLA",
         "ENTl5",
         "MOs5",
         "MOs2/3",
         "MOs6a",
         "ACAd5",
-        "SNr",
         "ENTl3",
         "AId6a",
         "ACAd2/3",
@@ -923,7 +921,9 @@ def main():
         "RSPv5",
         "ACAv5",
         "ACAv2/3",
-        "AIp6a"
+        "AIp6a",
+        "ENTm1",
+        "ACAd1"
     ]
     try:
         # 创建分析器

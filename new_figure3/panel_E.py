@@ -327,12 +327,12 @@ class CompleteMERFISHAnalyzer:
 
         # 定义区域顺序（与堆叠柱状图一致）
         region_order = [
-            "ACAd2/3", "ACAd5", "ACAd6a", "ACAv2/3", "ACAv5",
+            "ACAd1","ACAd2/3", "ACAd5", "ACAd6a", "ACAv2/3", "ACAv5",
             "MOs2/3", "MOs5", "MOs6a", "MOp6a",
             "AId6a", "AIp6a",
-            "CP", "EPd", "SNr",
-            "ENTl2", "ENTl3", "ENTl5", "ENTl6a",
-            "RSPv5", "CLA"
+            "EPd",
+            "ENTl2", "ENTl3", "ENTl5", "ENTl6a","ENTm1"
+            "RSPv5","CLA"
         ]
 
         # 为每个区域选择top N的subclass
@@ -460,9 +460,8 @@ class CompleteMERFISHAnalyzer:
             "ACAd2/3", "ACAd5", "ACAd6a", "ACAv2/3", "ACAv5",
             "MOs2/3", "MOs5", "MOs6a", "MOp6a",
             "AId6a", "AIp6a",
-            "CP", "EPd", "SNr",
-            "ENTl2", "ENTl3", "ENTl5", "ENTl6a",
-            "RSPv5", "CLA"
+            "ENTl2", "ENTl3", "ENTl5", "ENTl6a","ENTm1"
+             "EPd","CLA","RSPv5"
         ]
 
         # 选择top N的subclass
@@ -628,14 +627,12 @@ def main():
 
         # 定义目标区域
         target_regions = [
-            "CP",
             "CLA",
             "ENTl5",
             "MOs5",
             "MOs2/3",
             "MOs6a",
             "ACAd5",
-            "SNr",
             "ENTl3",
             "AId6a",
             "ACAd2/3",
@@ -647,7 +644,9 @@ def main():
             "RSPv5",
             "ACAv5",
             "ACAv2/3",
-            "AIp6a"
+            "AIp6a",
+            "ENTm1",
+            "ACAd1"
         ]
 
         logger.info(f"\n目标区域: {target_regions}")

@@ -37,7 +37,6 @@ from scipy import stats
 from scipy.spatial.distance import cosine as cosine_distance
 
 from neo4j_exec import Neo4jExec
-from operators import validate_and_fix_cypher
 
 logger = logging.getLogger(__name__)
 
@@ -1050,22 +1049,95 @@ Write any valid Cypher query. Always include LIMIT.""",
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
-    def _llm_refine_plan(self, initial_steps: List[Dict], state: AgentState) -> List[ReasoningStep]:
-        # [Same as before, simplified for length]
-        steps = []
-        for i, s in enumerate(initial_steps):
-            step = ReasoningStep(
-                step_number=s.get('step', i+1),
-                purpose=s.get('purpose', ''),
-                action='execute_cypher',
-                rationale=s.get('rationale', ''),
-                expected_result="Data matching criteria",
-                query_or_params={'query': s.get('query', '')},
-                modality=s.get('modality'),
-                depends_on=s.get('depends_on', [])
-            )
-            steps.append(step)
-        return steps
+    def _llm_refine_plan(self, initial_chain: List[Dict],
+                             state: AgentState) -> List[ReasoningStep]:
+            """
+            LLM reviews schema-generated plan and adds:
+            - Expected results
+            - Explicit reasoning
+            - Better queries
+            """
+            prompt = f"""You are refining a reasoning plan for neuroscience knowledge graph analysis.
+
+    **Question:** {state.question}
+
+    **Recognized Entities:** {', '.join([e['text'] for e in state.entities])}
+
+    **Initial Reasoning Chain:**
+    {json.dumps(initial_chain, indent=2)}
+
+    Your task:
+    1. Review each step in the reasoning chain
+    2. For each step, add:
+       - **Expected Result**: What data pattern you expect to see
+       - **Rationale Enhancement**: Why this step is necessary (be specific!)
+       - **Query Review**: Check if the query is correct, fix if needed
+
+    Return a JSON array of steps with this format:
+    [
+      {{
+        "step_number": 1,
+        "purpose": "...",
+        "action": "execute_cypher" or "compute_stat" or "compute_fingerprint",
+        "rationale": "Detailed explanation of WHY this step",
+        "expected_result": "What pattern/values we expect to find",
+        "query_or_params": {{...}},
+        "modality": "molecular/morphological/projection" or null,
+        "depends_on": [previous step numbers]
+      }},
+      ...
+    ]
+
+    **Important**: 
+    - Make rationale SPECIFIC to the question
+    - Expected results should be CONCRETE predictions
+    - Ensure queries are syntactically correct Cypher
+    """
+
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": "You are an expert neuroscientist and Cypher query expert."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.2
+                )
+
+                result = json.loads(response.choices[0].message.content)
+
+                # Convert to ReasoningStep objects
+                steps = []
+                for step_dict in result.get('steps', result.get('reasoning_plan', [])):
+                    step = ReasoningStep(
+                        step_number=step_dict.get('step_number', len(steps) + 1),
+                        purpose=step_dict['purpose'],
+                        action=step_dict['action'],
+                        rationale=step_dict['rationale'],
+                        expected_result=step_dict['expected_result'],
+                        query_or_params=step_dict.get('query_or_params', {}),
+                        modality=step_dict.get('modality'),
+                        depends_on=step_dict.get('depends_on', [])
+                    )
+                    steps.append(step)
+
+                return steps
+
+            except Exception as e:
+                logger.error(f"LLM plan refinement failed: {e}")
+                # Fallback: convert initial_chain to ReasoningStep
+                return [
+                    ReasoningStep(
+                        step_number=s.get('step', i + 1),
+                        purpose=s.get('purpose', 'Query execution'),
+                        action='execute_cypher',
+                        rationale=s.get('rationale', 'Execute planned query'),
+                        expected_result="Data matching query criteria",
+                        query_or_params={'query': s.get('query', '')}
+                    )
+                    for i, s in enumerate(initial_chain)
+                ]
 
     # ==================== EXECUTION ====================
 
@@ -1108,8 +1180,52 @@ Write any valid Cypher query. Always include LIMIT.""",
     # ==================== REFLECTION ====================
 
     def _reflect_on_step(self, step: ReasoningStep, state: AgentState) -> str:
-        # [Simplified for length]
-        return f"Executed {step.purpose}, got {len(step.actual_result.get('data', []))} results"
+        """
+        LLM reflects on step result:
+        1. Did results match expectations?
+        2. What did we learn?
+        3. Should we adjust the plan?
+        """
+        prompt = f"""Reflect on this reasoning step:
+
+    **Step {step.step_number}: {step.purpose}**
+
+    **Rationale:** {step.rationale}
+
+    **Expected Result:** {step.expected_result}
+
+    **Actual Result:** {json.dumps(step.actual_result.get('data', [])[:5], indent=2)}
+    (showing first 5 rows)
+
+    **Row Count:** {len(step.actual_result.get('data', []))} rows
+
+    **Questions for reflection:**
+    1. Did the actual results match your expectations?
+    2. If not, what surprised you?
+    3. What new insights did this step provide?
+    4. Should we adjust subsequent steps based on this?
+
+    Provide a 2-3 sentence reflection."""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are reflecting on neuroscience data analysis results."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=200
+            )
+
+            reflection = response.choices[0].message.content.strip()
+            state.reflections.append(f"Step {step.step_number}: {reflection}")
+
+            return reflection
+
+        except Exception as e:
+            logger.error(f"Reflection failed: {e}")
+            return "Reflection unavailable"
 
     def _validate_step_result(self, step: ReasoningStep, state: AgentState) -> Dict[str, Any]:
         result = step.actual_result
@@ -1195,23 +1311,129 @@ Return JSON array of steps."""
     # ==================== SYNTHESIS ====================
 
     def _synthesize_answer(self, state: AgentState) -> str:
-        # [Simplified for length]
-        executed_summary = f"Executed {len(state.executed_steps)} steps"
-        return f"Based on analysis: {executed_summary}. (Full synthesis would go here)"
+            """
+            Generate final answer with full reasoning trace
+            """
+            # Prepare evidence summary
+            evidence_summary = []
+            for step in state.executed_steps:
+                if step.actual_result and step.actual_result.get('success'):
+                    data_count = len(step.actual_result.get('data', []))
+                    evidence_summary.append(
+                        f"- Step {step.step_number} ({step.purpose}): {data_count} results"
+                    )
+
+            evidence_text = "\n".join(evidence_summary)
+
+            # Prepare key findings
+            key_data = {}
+            for step in state.executed_steps:
+                if step.actual_result and step.actual_result.get('success'):
+                    data = step.actual_result.get('data', [])
+                    if data:
+                        key_data[f"step_{step.step_number}"] = data[:10]  # Top 10
+
+            prompt = f"""Synthesize a comprehensive answer based on the reasoning trace.
+
+    **Original Question:** {state.question}
+
+    **Reasoning Plan Executed:**
+    {chr(10).join([f"{i + 1}. {s.purpose}" for i, s in enumerate(state.executed_steps)])}
+
+    **Evidence Collected:**
+    {evidence_text}
+
+    **Key Findings:**
+    {json.dumps(key_data, indent=2, default=str)[:3000]}
+
+    **Reflections:**
+    {chr(10).join(state.reflections[-5:])}
+
+    **Your Task:**
+    Write a comprehensive, scientifically rigorous answer that:
+    1. Directly answers the original question
+    2. Cites specific quantitative findings
+    3. Explains the reasoning process briefly
+    4. Acknowledges any limitations or uncertainties
+    5. Is written for a neuroscience audience
+
+    Make it publication-quality but accessible.
+    """
+
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": "You are a neuroscience writer synthesizing analysis results."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=800
+                )
+
+                answer = response.choices[0].message.content.strip()
+                state.final_answer = answer
+
+                # Estimate confidence
+                state.confidence_score = self._estimate_confidence(state)
+
+                return answer
+
+            except Exception as e:
+                logger.error(f"Synthesis failed: {e}")
+                return f"Analysis completed with {len(state.executed_steps)} steps, but synthesis failed."
 
     # ==================== UTILITIES ====================
 
     def _step_to_dict(self, step: ReasoningStep) -> Dict:
+        """Convert ReasoningStep to dict for output"""
         return {
             'step_number': step.step_number,
             'purpose': step.purpose,
-            'validation_passed': step.validation_passed
+            'action': step.action,
+            'rationale': step.rationale,
+            'expected_result': step.expected_result,
+            'actual_result_summary': {
+                'success': step.actual_result.get('success') if step.actual_result else False,
+                'row_count': len(step.actual_result.get('data', [])) if step.actual_result else 0
+            },
+            'reflection': step.reflection,
+            'validation_passed': step.validation_passed,
+            'execution_time': step.execution_time
         }
 
+    def _compute_validation_rate(self, state: AgentState) -> float:
+        """Compute what fraction of steps passed validation"""
+        if not state.executed_steps:
+            return 0.0
+        passed = sum(1 for s in state.executed_steps if s.validation_passed)
+        return passed / len(state.executed_steps)
+
+    def _estimate_confidence(self, state: AgentState) -> float:
+        """Estimate confidence in final answer"""
+        score = 0.8  # Base score
+
+        # Factor 1: Validation rate
+        val_rate = self._compute_validation_rate(state)
+        score *= (0.5 + 0.5 * val_rate)
+
+        # Factor 2: Replanning penalty
+        score *= (0.95 ** state.replanning_count)
+
+        # Factor 3: Step completion
+        planned_steps = len(state.reasoning_plan)
+        executed_steps = len(state.executed_steps)
+        completion_rate = executed_steps / planned_steps if planned_steps > 0 else 0
+        score *= (0.7 + 0.3 * completion_rate)
+
+        return min(1.0, max(0.0, score))
+
     def _build_error_response(self, question: str, error: str, start_time: float) -> Dict:
+        """Build error response"""
         return {
             'question': question,
-            'answer': f"Error: {error}",
+            'answer': f"Analysis failed: {error}",
+            'error': error,
             'execution_time': time.time() - start_time,
             'success': False
         }
@@ -1233,7 +1455,7 @@ def test_complete_fig3():
         neo4j_pwd=os.getenv("NEO4J_PASSWORD", "neuroxiv"),
         database=os.getenv("NEO4J_DATABASE", "neo4j"),
         schema_json_path="./schema_output/schema.json",
-        openai_api_key=os.getenv("OPENAI_API_KEY",""),
+        openai_api_key=os.getenv("OPENAI_API_KEY"),
         model="gpt-4o"
     )
 
@@ -1247,7 +1469,7 @@ def test_complete_fig3():
     print(f"  Confidence: {result['confidence_score']:.2f}")
     print(f"  Time: {result['execution_time']:.1f}s")
 
-    print(f"\n💡 Answer:\n{result['answer'][:300]}...\n")
+    print(f"\n💡 Answer:\n{result['answer']}...\n")
 
     return result
 

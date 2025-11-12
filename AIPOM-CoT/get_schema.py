@@ -364,7 +364,7 @@ class Neo4jSchemaExtractor:
 
         print("\n" + "=" * 80)
 
-    def export_to_json(self, output_file: str = "neuroxiv_schema.json"):
+    def export_to_json(self, output_file: str = "schema.json"):
         """导出schema到JSON文件"""
         logger.info(f"导出Schema到 {output_file}...")
 
@@ -512,7 +512,7 @@ def main():
         extractor.print_schema_report()
 
         # 导出文件
-        extractor.export_to_json(output_dir / "neuroxiv_schema.json")
+        extractor.export_to_json(output_dir / "schema.json")
         extractor.export_to_markdown(output_dir / "neuroxiv_schema.md")
         extractor.generate_cypher_visualization(output_dir / "schema_visualization.cypher")
 

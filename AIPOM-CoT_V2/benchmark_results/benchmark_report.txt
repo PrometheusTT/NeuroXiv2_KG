@@ -1,0 +1,20 @@
+================================================================================
+AIPOM-CoT Benchmark Report
+================================================================================
+
+Total Questions: 2
+Successful: 2 (100.0%)
+Average Accuracy: 1.000
+Average Execution Time: 20.38s
+Average Reasoning Steps: 2.0
+Average Confidence: 0.775
+
+Performance by Complexity Level:
+----------------------------------------
+  simple_factual      : 1.000 (2 questions)
+
+Performance by Domain:
+----------------------------------------
+  molecular           : 1.000 (2 questions)
+
+================================================================================

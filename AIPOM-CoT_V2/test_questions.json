@@ -1,0 +1,1945 @@
+[
+  {
+    "id": "L1-G01",
+    "question": "Tell me about Car3+ neurons",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [
+      "Car3"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Car3",
+        "cluster",
+        "region"
+      ],
+      "should_mention": [
+        "marker",
+        "expression"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G02",
+    "question": "Which regions express Pvalb?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [
+      "Pvalb"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Pvalb",
+        "region"
+      ],
+      "should_have_regions": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G03",
+    "question": "What are Sst positive neurons?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [
+      "Sst"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Sst",
+        "interneuron"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G04",
+    "question": "Find cells expressing Vip",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [
+      "Vip"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Vip",
+        "cell"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G05",
+    "question": "Where is Gad1 expressed?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [
+      "Gad1"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Gad1",
+        "express"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-R01",
+    "question": "Tell me about the claustrum",
+    "complexity": "simple_factual",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "CLA"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "claustrum",
+        "CLA"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-R02",
+    "question": "What is MOs?",
+    "complexity": "simple_factual",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "MOs"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "MOs",
+        "motor",
+        "cortex"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-R03",
+    "question": "Describe the primary somatosensory cortex",
+    "complexity": "simple_factual",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "SSp"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "somatosensory",
+        "SSp"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-R04",
+    "question": "What cells are in ACAd?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [
+      "ACAd"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "ACAd",
+        "cell"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-R05",
+    "question": "Tell me about the piriform cortex",
+    "complexity": "simple_factual",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "PIR"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "piriform",
+        "PIR"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-M01",
+    "question": "What is axonal length?",
+    "complexity": "simple_factual",
+    "domain": "morphological",
+    "expected_entities": [
+      "axonal_length"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "axon",
+        "length"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-M02",
+    "question": "Explain dendritic branching",
+    "complexity": "simple_factual",
+    "domain": "morphological",
+    "expected_entities": [
+      "dendritic_branches"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "dendrite",
+        "branch"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-M03",
+    "question": "What are morphological features of neurons?",
+    "complexity": "simple_factual",
+    "domain": "morphological",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_mention": [
+        "axon",
+        "dendrite",
+        "soma"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-P01",
+    "question": "What are projection patterns?",
+    "complexity": "simple_factual",
+    "domain": "projection",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "project",
+        "target"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-P02",
+    "question": "Explain cortical connectivity",
+    "complexity": "simple_factual",
+    "domain": "projection",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "connect",
+        "cortex"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G06",
+    "question": "What are the characteristics of gene marker 6?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G07",
+    "question": "What are the characteristics of gene marker 7?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G08",
+    "question": "What are the characteristics of gene marker 8?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G09",
+    "question": "What are the characteristics of gene marker 9?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G10",
+    "question": "What are the characteristics of gene marker 10?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G11",
+    "question": "What are the characteristics of gene marker 11?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G12",
+    "question": "What are the characteristics of gene marker 12?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G13",
+    "question": "What are the characteristics of gene marker 13?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G14",
+    "question": "What are the characteristics of gene marker 14?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G15",
+    "question": "What are the characteristics of gene marker 15?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G16",
+    "question": "What are the characteristics of gene marker 16?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G17",
+    "question": "What are the characteristics of gene marker 17?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G18",
+    "question": "What are the characteristics of gene marker 18?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L1-G19",
+    "question": "What are the characteristics of gene marker 19?",
+    "complexity": "simple_factual",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-001",
+    "question": "What is the relationship between Car3 and MOs?",
+    "complexity": "multi_entity",
+    "domain": "molecular",
+    "expected_entities": [
+      "Car3",
+      "MOs"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Car3",
+        "MOs"
+      ],
+      "should_mention": [
+        "express",
+        "cluster"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-002",
+    "question": "How do Pvalb neurons relate to SSp?",
+    "complexity": "multi_entity",
+    "domain": "molecular",
+    "expected_entities": [
+      "Pvalb",
+      "SSp"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Pvalb",
+        "SSp"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-003",
+    "question": "Analyze Sst expression in claustrum",
+    "complexity": "multi_entity",
+    "domain": "molecular",
+    "expected_entities": [
+      "Sst",
+      "CLA"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Sst",
+        "claustrum"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-004",
+    "question": "What is the projection from MOs to SSp?",
+    "complexity": "multi_entity",
+    "domain": "projection",
+    "expected_entities": [
+      "MOs",
+      "SSp"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "MOs",
+        "SSp",
+        "project"
+      ],
+      "should_have_projection_data": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-005",
+    "question": "Describe the connectivity between ACAd and MOs",
+    "complexity": "multi_entity",
+    "domain": "projection",
+    "expected_entities": [
+      "ACAd",
+      "MOs"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "ACAd",
+        "MOs",
+        "connect"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-006",
+    "question": "What is the relationship between CLA and MOs?",
+    "complexity": "multi_entity",
+    "domain": "projection",
+    "expected_entities": [
+      "CLA",
+      "MOs"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "CLA",
+        "MOs"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-007",
+    "question": "What is the relationship between SSp and MOs?",
+    "complexity": "multi_entity",
+    "domain": "projection",
+    "expected_entities": [
+      "SSp",
+      "MOs"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "SSp",
+        "MOs"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-008",
+    "question": "What is the relationship between ACAd and SSp?",
+    "complexity": "multi_entity",
+    "domain": "projection",
+    "expected_entities": [
+      "ACAd",
+      "SSp"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "ACAd",
+        "SSp"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-009",
+    "question": "What is the relationship between PIR and CLA?",
+    "complexity": "multi_entity",
+    "domain": "projection",
+    "expected_entities": [
+      "PIR",
+      "CLA"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "PIR",
+        "CLA"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-010",
+    "question": "What is the relationship between MOp and MOs?",
+    "complexity": "multi_entity",
+    "domain": "projection",
+    "expected_entities": [
+      "MOp",
+      "MOs"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "MOp",
+        "MOs"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-011",
+    "question": "What is the relationship between AI and PIR?",
+    "complexity": "multi_entity",
+    "domain": "projection",
+    "expected_entities": [
+      "AI",
+      "PIR"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "AI",
+        "PIR"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-012",
+    "question": "Analyze Car3+ neurons in MOs",
+    "complexity": "multi_entity",
+    "domain": "molecular",
+    "expected_entities": [
+      "Car3",
+      "MOs"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Car3",
+        "MOs"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-013",
+    "question": "Analyze Pvalb+ neurons in SSp",
+    "complexity": "multi_entity",
+    "domain": "molecular",
+    "expected_entities": [
+      "Pvalb",
+      "SSp"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Pvalb",
+        "SSp"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-014",
+    "question": "Analyze Sst+ neurons in CLA",
+    "complexity": "multi_entity",
+    "domain": "molecular",
+    "expected_entities": [
+      "Sst",
+      "CLA"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Sst",
+        "CLA"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-015",
+    "question": "Analyze Vip+ neurons in MOs",
+    "complexity": "multi_entity",
+    "domain": "molecular",
+    "expected_entities": [
+      "Vip",
+      "MOs"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Vip",
+        "MOs"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-016",
+    "question": "Analyze Gad1+ neurons in ACAd",
+    "complexity": "multi_entity",
+    "domain": "molecular",
+    "expected_entities": [
+      "Gad1",
+      "ACAd"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Gad1",
+        "ACAd"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-017",
+    "question": "Multi-entity query 17",
+    "complexity": "multi_entity",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "neuron"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-018",
+    "question": "Multi-entity query 18",
+    "complexity": "multi_entity",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "neuron"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-019",
+    "question": "Multi-entity query 19",
+    "complexity": "multi_entity",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "neuron"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-020",
+    "question": "Multi-entity query 20",
+    "complexity": "multi_entity",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "neuron"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-021",
+    "question": "Multi-entity query 21",
+    "complexity": "multi_entity",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "neuron"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-022",
+    "question": "Multi-entity query 22",
+    "complexity": "multi_entity",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "neuron"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-023",
+    "question": "Multi-entity query 23",
+    "complexity": "multi_entity",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "neuron"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-024",
+    "question": "Multi-entity query 24",
+    "complexity": "multi_entity",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "neuron"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-025",
+    "question": "Multi-entity query 25",
+    "complexity": "multi_entity",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "neuron"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-026",
+    "question": "Multi-entity query 26",
+    "complexity": "multi_entity",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "neuron"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-027",
+    "question": "Multi-entity query 27",
+    "complexity": "multi_entity",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "neuron"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L2-028",
+    "question": "Multi-entity query 28",
+    "complexity": "multi_entity",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "neuron"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-001",
+    "question": "Compare Pvalb and Sst interneurons",
+    "complexity": "comparative",
+    "domain": "molecular",
+    "expected_entities": [
+      "Pvalb",
+      "Sst"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Pvalb",
+        "Sst",
+        "compare",
+        "difference"
+      ],
+      "should_have_comparison": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-002",
+    "question": "What are the differences between MOs and MOp?",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "MOs",
+      "MOp"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "MOs",
+        "MOp",
+        "difference"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-003",
+    "question": "Compare claustrum and piriform cortex connectivity",
+    "complexity": "comparative",
+    "domain": "projection",
+    "expected_entities": [
+      "CLA",
+      "PIR"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "claustrum",
+        "piriform",
+        "connect"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-004",
+    "question": "Contrast axonal vs dendritic features in SSp",
+    "complexity": "comparative",
+    "domain": "morphological",
+    "expected_entities": [
+      "SSp",
+      "axonal",
+      "dendritic"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "axon",
+        "dendrite",
+        "SSp"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-005",
+    "question": "Compare excitatory and inhibitory neurons in MOs",
+    "complexity": "comparative",
+    "domain": "molecular",
+    "expected_entities": [
+      "MOs",
+      "excitatory",
+      "inhibitory"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "excitatory",
+        "inhibitory",
+        "MOs"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-006",
+    "question": "Compare Car3 and Pvalb expression patterns",
+    "complexity": "comparative",
+    "domain": "molecular",
+    "expected_entities": [
+      "Car3",
+      "Pvalb"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Car3",
+        "Pvalb",
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-007",
+    "question": "Compare Sst and Vip expression patterns",
+    "complexity": "comparative",
+    "domain": "molecular",
+    "expected_entities": [
+      "Sst",
+      "Vip"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Sst",
+        "Vip",
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-008",
+    "question": "Compare Gad1 and Gad2 expression patterns",
+    "complexity": "comparative",
+    "domain": "molecular",
+    "expected_entities": [
+      "Gad1",
+      "Gad2"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Gad1",
+        "Gad2",
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-009",
+    "question": "Compare Car3 and Sst expression patterns",
+    "complexity": "comparative",
+    "domain": "molecular",
+    "expected_entities": [
+      "Car3",
+      "Sst"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Car3",
+        "Sst",
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-010",
+    "question": "Compare Pvalb and Vip expression patterns",
+    "complexity": "comparative",
+    "domain": "molecular",
+    "expected_entities": [
+      "Pvalb",
+      "Vip"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Pvalb",
+        "Vip",
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-011",
+    "question": "What are the differences between CLA and AI?",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "CLA",
+      "AI"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "CLA",
+        "AI",
+        "difference"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-012",
+    "question": "What are the differences between SSp and ACAd?",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "SSp",
+      "ACAd"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "SSp",
+        "ACAd",
+        "difference"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-013",
+    "question": "What are the differences between MOs and SSp?",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "MOs",
+      "SSp"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "MOs",
+        "SSp",
+        "difference"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-014",
+    "question": "What are the differences between PIR and ENTl?",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "PIR",
+      "ENTl"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "PIR",
+        "ENTl",
+        "difference"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-015",
+    "question": "What are the differences between MOp and SSp?",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "MOp",
+      "SSp"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "MOp",
+        "SSp",
+        "difference"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-016",
+    "question": "Compare axonal and dendritic branching patterns",
+    "complexity": "comparative",
+    "domain": "morphological",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "morpholog",
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-017",
+    "question": "Contrast pyramidal vs interneuron morphology",
+    "complexity": "comparative",
+    "domain": "morphological",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "morpholog",
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-018",
+    "question": "Compare IT and ET neuron features",
+    "complexity": "comparative",
+    "domain": "morphological",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "morpholog",
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-019",
+    "question": "Analyze morphological differences across cortical layers",
+    "complexity": "comparative",
+    "domain": "morphological",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "morpholog",
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-020",
+    "question": "Comparative analysis 20",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-021",
+    "question": "Comparative analysis 21",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-022",
+    "question": "Comparative analysis 22",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-023",
+    "question": "Comparative analysis 23",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-024",
+    "question": "Comparative analysis 24",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-025",
+    "question": "Comparative analysis 25",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-026",
+    "question": "Comparative analysis 26",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-027",
+    "question": "Comparative analysis 27",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-028",
+    "question": "Comparative analysis 28",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-029",
+    "question": "Comparative analysis 29",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-030",
+    "question": "Comparative analysis 30",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L3-031",
+    "question": "Comparative analysis 31",
+    "complexity": "comparative",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "compare"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-001",
+    "question": "Why do Pvalb neurons have distinct morphology?",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "Pvalb"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Pvalb",
+        "morphology"
+      ],
+      "should_explain": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-002",
+    "question": "Explain the functional significance of claustrum connectivity",
+    "complexity": "explanatory",
+    "domain": "projection",
+    "expected_entities": [
+      "CLA"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "claustrum",
+        "function",
+        "connect"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-003",
+    "question": "What determines regional cell type composition?",
+    "complexity": "explanatory",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_mention": [
+        "cell type",
+        "region",
+        "determine"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-004",
+    "question": "Why do motor regions have unique projection patterns?",
+    "complexity": "explanatory",
+    "domain": "projection",
+    "expected_entities": [
+      "MOs",
+      "MOp"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "motor",
+        "project"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-005",
+    "question": "Explain the relationship between gene expression and morphology",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "morphology",
+        "relationship"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-006",
+    "question": "What mechanisms underlie cortical layer formation?",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_explain": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-007",
+    "question": "Explain how molecular markers define cell types",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_explain": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-008",
+    "question": "Why are some regions more densely connected?",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_explain": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-009",
+    "question": "What drives neuronal morphological diversity?",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_explain": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-010",
+    "question": "Explain the role of interneurons in cortical circuits",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_explain": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-011",
+    "question": "How do projection patterns relate to function?",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_explain": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-012",
+    "question": "What determines axonal targeting specificity?",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_explain": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-013",
+    "question": "Explain regional heterogeneity in cell composition",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_explain": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-014",
+    "question": "Why do certain genes cluster spatially?",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_explain": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-015",
+    "question": "What is the significance of dendritic branching complexity?",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_explain": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-016",
+    "question": "Explain mechanism 16",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "explain"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-017",
+    "question": "Explain mechanism 17",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "explain"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-018",
+    "question": "Explain mechanism 18",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "explain"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-019",
+    "question": "Explain mechanism 19",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "explain"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-020",
+    "question": "Explain mechanism 20",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "explain"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-021",
+    "question": "Explain mechanism 21",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "explain"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-022",
+    "question": "Explain mechanism 22",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "explain"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-023",
+    "question": "Explain mechanism 23",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "explain"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L4-024",
+    "question": "Explain mechanism 24",
+    "complexity": "explanatory",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "explain"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L5-001",
+    "question": "Provide a comprehensive analysis of the claustrum",
+    "complexity": "open_ended",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "CLA"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "claustrum"
+      ],
+      "should_cover_modalities": [
+        "molecular",
+        "morphological",
+        "projection"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L5-002",
+    "question": "Give me everything about Pvalb interneurons",
+    "complexity": "open_ended",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "Pvalb"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "Pvalb",
+        "interneuron"
+      ],
+      "should_be_comprehensive": true
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L5-003",
+    "question": "Analyze the motor cortex from all perspectives",
+    "complexity": "open_ended",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "MOs",
+      "MOp"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "motor",
+        "cortex"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L5-004",
+    "question": "Tell me everything about cortical cell type diversity",
+    "complexity": "open_ended",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_mention": [
+        "cell type",
+        "diversity",
+        "cortex"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L5-005",
+    "question": "Comprehensive overview of brain connectivity patterns",
+    "complexity": "open_ended",
+    "domain": "projection",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "connectivity",
+        "pattern"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L5-006",
+    "question": "Describe the complete landscape of gene marker expression",
+    "complexity": "open_ended",
+    "domain": "molecular",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "gene",
+        "marker",
+        "expression"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L5-007",
+    "question": "Full morphological characterization of cortical neurons",
+    "complexity": "open_ended",
+    "domain": "morphological",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "morpholog",
+        "neuron",
+        "cortex"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L5-008",
+    "question": "Comprehensive analysis of somatosensory system",
+    "complexity": "open_ended",
+    "domain": "multi-modal",
+    "expected_entities": [
+      "SSp"
+    ],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "must_mention": [
+        "somatosensory"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L5-009",
+    "question": "Explore the relationship between molecular, morphological, and projection features",
+    "complexity": "open_ended",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_cover_modalities": [
+        "molecular",
+        "morphological",
+        "projection"
+      ]
+    },
+    "metadata": {}
+  },
+  {
+    "id": "L5-010",
+    "question": "What can you tell me about the entire brain knowledge graph?",
+    "complexity": "open_ended",
+    "domain": "multi-modal",
+    "expected_entities": [],
+    "gold_answer": null,
+    "evaluation_criteria": {
+      "should_be_comprehensive": true
+    },
+    "metadata": {}
+  }
+]

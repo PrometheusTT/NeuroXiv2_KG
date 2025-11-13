@@ -217,42 +217,75 @@ class IntelligentEntityRecognizer:
 
     def recognize_entities(self, question: str) -> List[EntityMatch]:
         """
-        主入口: 识别问题中的所有实体
+        识别实体 (修复版 - 不依赖缺失的方法)
 
-        返回按confidence排序的匹配列表
+        🔧 修复:
+        1. 移除对 _match_neurons 的调用
+        2. 添加调试日志
+        3. 简化流程
         """
         logger.info(f"🔍 Recognizing entities in: {question}")
 
-        # Step 1: Extract tokens
+        all_matches = []
+
+        # Extract tokens
         tokens = self._extract_tokens(question)
-        logger.debug(f"  Tokens: {tokens}")
+        logger.debug(f"   Tokens extracted: {tokens[:10]}")
 
-        # Step 2: Match against indices
-        matches = []
+        # 1. Gene markers
+        try:
+            gene_matches = self._match_gene_markers(tokens, question)
+            all_matches.extend(gene_matches)
+            if gene_matches:
+                logger.debug(f"   Found {len(gene_matches)} gene markers")
+        except Exception as e:
+            logger.error(f"   Error matching gene markers: {e}")
 
-        # Gene markers
-        gene_matches = self._match_gene_markers(tokens, question)
-        matches.extend(gene_matches)
+        # 2. Regions (最重要!)
+        try:
+            region_matches = self._match_regions(tokens, question)
+            all_matches.extend(region_matches)
+            if region_matches:
+                logger.debug(f"   Found {len(region_matches)} regions")
+        except Exception as e:
+            logger.error(f"   Error matching regions: {e}")
+            import traceback
+            traceback.print_exc()
 
-        # Regions
-        region_matches = self._match_regions(tokens, question)
-        matches.extend(region_matches)
+        # 3. Cell types
+        try:
+            cell_type_matches = self._match_cell_types(tokens, question)
+            all_matches.extend(cell_type_matches)
+            if cell_type_matches:
+                logger.debug(f"   Found {len(cell_type_matches)} cell types")
+        except Exception as e:
+            logger.error(f"   Error matching cell types: {e}")
 
-        # Cell types
-        celltype_matches = self._match_cell_types(tokens, question)
-        matches.extend(celltype_matches)
+        # 🔧 移除对 _match_neurons 的调用 (因为该方法不存在)
+        # neuron_matches = self._match_neurons(tokens, question)
+        # all_matches.extend(neuron_matches)
 
-        # Step 3: Deduplicate
-        matches = self._deduplicate(matches)
+        # Report results
+        if all_matches:
+            logger.info(f"   ✅ Found {len(all_matches)} entities")
+            for m in all_matches[:5]:
+                logger.debug(f"      • {m.text} ({m.entity_type}) via {m.context.get('source', 'unknown')}")
+        else:
+            logger.warning(f"   ⚠️ No entities found in: {question}")
 
-        # Step 4: Filter by confidence
-        matches = [m for m in matches if m.confidence > 0.6]
+        # Deduplicate
+        seen = set()
+        unique_matches = []
+        for match in all_matches:
+            key = (match.entity_id, match.entity_type)
+            if key not in seen:
+                seen.add(key)
+                unique_matches.append(match)
 
-        # Step 5: Sort by confidence
-        matches.sort(key=lambda m: m.confidence, reverse=True)
+        # Sort by confidence
+        unique_matches.sort(key=lambda x: x.confidence, reverse=True)
 
-        logger.info(f"  ✅ Found {len(matches)} entities")
-        return matches[:20]  # Top 20
+        return unique_matches
 
     def _extract_tokens(self, text: str) -> List[str]:
         """
@@ -340,59 +373,116 @@ class IntelligentEntityRecognizer:
         return matches
 
     def _match_regions(self, tokens: List[str], full_text: str) -> List[EntityMatch]:
-        """匹配脑区"""
+        """匹配regions (带停用词过滤)"""
         matches = []
 
-        regions = self.indexer.indices['regions']
+        # 🔧 停用词列表 (避免误匹配常见词)
+        STOPWORDS = {
+            'ME', 'US', 'IT', 'IS', 'IN', 'ON', 'AT', 'TO', 'OF', 'AND', 'OR',
+            'THE', 'A', 'AN', 'FOR', 'WITH', 'AS', 'BY', 'FROM', 'UP', 'OUT'
+        }
 
+        # 获取或重建region index
+        region_acronyms = self.indexer.indices.get('region_acronyms', {})
+
+        if not region_acronyms:
+            logger.warning("   Region index empty, rebuilding...")
+            try:
+                query = "MATCH (r:Region) RETURN r.acronym AS acronym LIMIT 500"
+                result = self.indexer.db.run(query)
+                if result['success'] and result['data']:
+                    region_acronyms = {row['acronym']: row['acronym'] for row in result['data'] if row.get('acronym')}
+                    self.indexer.indices['region_acronyms'] = region_acronyms
+                    logger.info(f"   Rebuilt region index: {len(region_acronyms)} regions")
+            except Exception as e:
+                logger.error(f"   Failed to rebuild region index: {e}")
+                return matches
+
+        import re
+
+        # Strategy 1: Direct token matching (with stopword filter)
         for token in tokens:
-            token_upper = token.upper()
+            token_upper = token.strip('.,!?;: ').upper()
 
-            # Exact acronym match
-            if token_upper in regions:
-                region_info = regions[token_upper]
-                matches.append(EntityMatch(
-                    text=token,
-                    entity_id=region_info['id'],
-                    entity_type='Region',
-                    match_type='acronym',
-                    confidence=0.95,
-                    context={
-                        'acronym': token_upper,
-                        'name': region_info['name'],
-                        'full_name': region_info['full_name']
-                    }
-                ))
-            else:
-                # Fuzzy match against region names
-                region_names = {
-                    acronym: info['name']
-                    for acronym, info in regions.items()
-                    if info['name']
-                }
+            # 🔧 跳过停用词
+            if token_upper in STOPWORDS:
+                continue
 
-                best_matches = process.extract(
-                    token.lower(),
-                    {name.lower(): acr for acr, name in region_names.items()},
-                    scorer=fuzz.ratio,
-                    limit=2,
-                    score_cutoff=75
-                )
-
-                for name_lower, score, acr in best_matches:
-                    region_info = regions[acr]
+            if token_upper in region_acronyms:
+                if not any(m.entity_id == token_upper for m in matches):
                     matches.append(EntityMatch(
-                        text=token,
-                        entity_id=region_info['id'],
+                        text=token_upper,
+                        entity_id=token_upper,
                         entity_type='Region',
-                        match_type='fuzzy_name',
-                        confidence=score / 100.0 * 0.85,
-                        context={
-                            'acronym': acr,
-                            'name': region_info['name'],
-                            'full_name': region_info['full_name']
-                        }
+                        match_type='exact',
+                        confidence=0.95,
+                        context={'source': 'token'}
                     ))
+
+        # Strategy 2: "Compare A and B" pattern
+        pattern = r'compare\s+(\w+)\s+and\s+(\w+)'
+        for m in re.finditer(pattern, full_text, re.IGNORECASE):
+            for idx in [1, 2]:
+                entity = m.group(idx).upper()
+
+                # 🔧 跳过停用词
+                if entity in STOPWORDS:
+                    continue
+
+                if entity in region_acronyms:
+                    if not any(match.entity_id == entity for match in matches):
+                        matches.append(EntityMatch(
+                            text=entity,
+                            entity_id=entity,
+                            entity_type='Region',
+                            match_type='pattern',
+                            confidence=0.95,
+                            context={'source': 'compare'}
+                        ))
+
+        # Strategy 3: "A vs B" pattern
+        pattern = r'(\w+)\s+vs\.?\s+(\w+)'
+        for m in re.finditer(pattern, full_text, re.IGNORECASE):
+            for idx in [1, 2]:
+                entity = m.group(idx).upper()
+
+                # 🔧 跳过停用词
+                if entity in STOPWORDS:
+                    continue
+
+                if entity in region_acronyms:
+                    if not any(match.entity_id == entity for match in matches):
+                        matches.append(EntityMatch(
+                            text=entity,
+                            entity_id=entity,
+                            entity_type='Region',
+                            match_type='pattern',
+                            confidence=0.95,
+                            context={'source': 'vs'}
+                        ))
+
+        # Strategy 4: Word-by-word fallback (with stopword filter)
+        if not matches:
+            for word in re.findall(r'\b\w+\b', full_text):
+                word_upper = word.upper()
+
+                # 🔧 跳过停用词
+                if word_upper in STOPWORDS:
+                    continue
+
+                if word_upper in region_acronyms:
+                    if not any(m.entity_id == word_upper for m in matches):
+                        matches.append(EntityMatch(
+                            text=word_upper,
+                            entity_id=word_upper,
+                            entity_type='Region',
+                            match_type='exact',
+                            confidence=0.90,
+                            context={'source': 'fallback'}
+                        ))
+
+        if matches:
+            logger.info(f"   Matched regions: {[m.entity_id for m in matches]}")
 
         return matches
 

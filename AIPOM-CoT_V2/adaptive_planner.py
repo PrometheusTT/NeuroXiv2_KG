@@ -689,33 +689,55 @@ Return JSON: {{"continue": true/false, "reason": "..."}}
 
 def determine_analysis_depth(question: str) -> AnalysisDepth:
     """
-    根据问题确定分析深度
+    根据问题确定分析深度 (修复版)
 
-    关键词检测:
-    - DEEP: comprehensive, detailed, everything, complete, full, in-depth
-    - SHALLOW: simple, basic, quick, briefly, overview
-    - MEDIUM: default
+    🔧 策略: 更aggressive的DEEP判断
+
+    Args:
+        question: 用户问题
+
+    Returns:
+        AnalysisDepth enum
     """
     question_lower = question.lower()
 
-    # Deep keywords
-    deep_keywords = [
-        'comprehensive', 'detailed', 'everything', 'complete',
-        'full', 'in-depth', 'thorough', 'extensive'
-    ]
-    if any(kw in question_lower for kw in deep_keywords):
-        return AnalysisDepth.DEEP
-
-    # Shallow keywords
+    # 🔹 Shallow keywords (明确要求简单)
     shallow_keywords = [
-        'simple', 'basic', 'quick', 'briefly', 'overview',
-        'summarize', 'short', 'concise'
+        'briefly', 'quick', 'summary', 'overview',
+        'simple', 'short', 'just tell', 'in brief',
+        'one sentence', 'tldr', 'concise'
     ]
     if any(kw in question_lower for kw in shallow_keywords):
+        logger.info(f"   Detected SHALLOW depth")
         return AnalysisDepth.SHALLOW
 
-    # Default
-    return AnalysisDepth.MEDIUM
+    # 🔹 Deep keywords (深度分析)
+    deep_keywords = [
+        'comprehensive', 'detailed', 'analyze', 'analysis',
+        'compare', 'characterize', 'investigate', 'explore',
+        'everything', 'all', 'complete', 'in-depth', 'thorough'
+    ]
+
+    # 优先检查deep
+    if any(kw in question_lower for kw in deep_keywords):
+        matched = [kw for kw in deep_keywords if kw in question_lower]
+        logger.info(f"   Detected DEEP depth: {matched}")
+        return AnalysisDepth.DEEP
+
+    # 🔧 "tell me about" / "about" 默认DEEP
+    if 'tell me about' in question_lower or ' about ' in question_lower:
+        logger.info(f"   'tell me about' question → DEEP")
+        return AnalysisDepth.DEEP
+
+    # 🔹 Medium keywords
+    medium_keywords = ['what is', 'describe', 'explain']
+    if any(kw in question_lower for kw in medium_keywords):
+        logger.info(f"   Detected MEDIUM depth")
+        return AnalysisDepth.MEDIUM
+
+    # 🔧 默认: DEEP (更aggressive)
+    logger.info(f"   Default to DEEP depth")
+    return AnalysisDepth.DEEP
 
 
 # ==================== Test ====================

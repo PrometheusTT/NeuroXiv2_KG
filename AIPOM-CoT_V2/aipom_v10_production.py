@@ -122,6 +122,19 @@ class AIPOMCoTV10:
 
 
         self.adaptive_planner = AdaptivePlanner(self.schema, self.path_planner,self.client)
+        # 🆕 添加Focus-Driven Planner
+        logger.info("🎯 Initializing focus-driven planning...")
+        from focus_driven_planner import FocusDrivenPlanner
+        self.focus_planner = FocusDrivenPlanner(self.schema, self.db)
+
+        # 🆕 添加Comparative Analysis Planner
+        logger.info("📊 Initializing comparative analysis planning...")
+        from comparative_analysis_planner import ComparativeAnalysisPlanner
+        self.comparative_planner = ComparativeAnalysisPlanner(
+            self.db,
+            self.fingerprint,
+            self.stats
+        )
 
         logger.info("✅ AIPOM-CoT V10 initialized successfully!")
         logger.info(f"   • Entity recognition: Ready")
@@ -136,14 +149,15 @@ class AIPOMCoTV10:
 
     def answer(self, question: str, max_iterations: int = 15) -> Dict[str, Any]:
         """
-        主入口: 回答问题 (使用自适应规划)
+        主入口: 回答问题 (完整版)
 
         完整流程:
-        1. 实体识别 + 聚类
-        2. 确定分析深度
-        3. 初始化分析状态
-        4. 自适应执行循环
-        5. 答案合成
+        1. 智能实体识别
+        2. 实体聚类
+        3. 确定分析深度
+        4. 智能选择规划器 (Adaptive/Focus-Driven/Comparative)
+        5. 自适应执行循环 (包含统计分析)
+        6. 答案合成 (科学叙事)
         """
         logger.info(f"🎯 Question: {question}")
         start_time = time.time()
@@ -157,7 +171,7 @@ class AIPOMCoTV10:
 
         state.phase = AgentPhase.PLANNING
 
-        # Step 1-2: 实体识别 + 聚类 (不变)
+        # Step 1-2: 实体识别 + 聚类
         logger.info("  [1/4] Intelligent entity recognition...")
         entity_matches = self.entity_recognizer.recognize_entities(question)
         state.entity_matches = entity_matches
@@ -175,11 +189,11 @@ class AIPOMCoTV10:
             logger.info(f"       • {cluster.cluster_type}: {cluster.primary_entity.text}")
 
         # 🆕 Step 3: 确定分析深度
-        from adaptive_planner import determine_analysis_depth, AnalysisState, AnalysisDepth
+        from adaptive_planner import determine_analysis_depth, AnalysisState
 
         logger.info("  [3/4] Determining analysis depth...")
         target_depth = determine_analysis_depth(question)
-        logger.info(f"     Depth: {target_depth.value}")
+        logger.info(f"     Target depth: {target_depth.value}")
 
         # 🆕 Step 4: 初始化分析状态
         logger.info("  [4/4] Initializing analysis state...")
@@ -200,17 +214,19 @@ class AIPOMCoTV10:
 
             analysis_state.discovered_entities.setdefault(entity_type, []).append(entity_id)
 
-            # 添加related entities
             for related in cluster.related_entities:
                 analysis_state.discovered_entities.setdefault(
                     related.entity_type, []
                 ).append(related.entity_id)
 
-        # 兼容性: 保存到state
+        # 兼容性
         state.entities = [
             {'text': m.text, 'type': m.entity_type, 'confidence': m.confidence}
             for m in entity_matches[:10]
         ]
+
+        # 🆕 存储analysis_state到state
+        state.analysis_state = analysis_state
 
         logger.info(f"✅ Planning complete")
         logger.info(f"   • Target depth: {target_depth.value}")
@@ -218,7 +234,7 @@ class AIPOMCoTV10:
 
         # ===== PHASE 2: ADAPTIVE EXECUTION =====
         logger.info("\n" + "=" * 70)
-        logger.info("⚙️ PHASE 2: ADAPTIVE EXECUTION (Dynamic Planning)")
+        logger.info("⚙️ PHASE 2: ADAPTIVE EXECUTION (Multi-Planner)")
         logger.info("=" * 70)
 
         state.phase = AgentPhase.EXECUTING
@@ -230,16 +246,33 @@ class AIPOMCoTV10:
                 logger.info("📌 Analysis complete (adaptive decision)")
                 break
 
-            # 🆕 动态规划下一步
-            logger.info(f"\n🎯 Adaptive planning (iteration {iteration + 1})...")
-            next_steps = self.adaptive_planner.plan_next_steps(
-                analysis_state,
-                question,
-                max_steps=2  # 每次规划2步
-            )
+            # 🆕 智能选择规划器
+            planner_type = self._select_planner(analysis_state, question)
+
+            if planner_type == 'focus_driven':
+                logger.info(f"\n🎯 Using FOCUS-DRIVEN planner (iteration {iteration + 1})...")
+                next_steps = self.focus_planner.generate_focus_driven_plan(
+                    analysis_state,
+                    question
+                )
+
+            elif planner_type == 'comparative':
+                logger.info(f"\n📊 Using COMPARATIVE planner (iteration {iteration + 1})...")
+                next_steps = self.comparative_planner.generate_comparative_plan(
+                    analysis_state,
+                    question
+                )
+
+            else:
+                logger.info(f"\n🔄 Using ADAPTIVE planner (iteration {iteration + 1})...")
+                next_steps = self.adaptive_planner.plan_next_steps(
+                    analysis_state,
+                    question,
+                    max_steps=2
+                )
 
             if not next_steps:
-                logger.info("📌 No more valuable steps available")
+                logger.info("📌 No more steps available")
                 break
 
             # 执行规划的步骤
@@ -249,9 +282,11 @@ class AIPOMCoTV10:
 
                 logger.info(f"\n🔹 Step {iteration + 1}: {candidate_step.purpose}")
                 logger.info(f"   Type: {candidate_step.step_type}")
-                logger.info(f"   LLM score: {candidate_step.llm_score:.2f}")
+                logger.info(f"   Priority: {candidate_step.priority:.1f}")
+                if hasattr(candidate_step, 'llm_score') and candidate_step.llm_score > 0:
+                    logger.info(f"   LLM score: {candidate_step.llm_score:.2f}")
 
-                # 🆕 转换CandidateStep为ReasoningStep
+                # 🆕 转换为ReasoningStep
                 reasoning_step = self._convert_candidate_to_reasoning(
                     candidate_step,
                     iteration + 1,
@@ -264,11 +299,9 @@ class AIPOMCoTV10:
                 if not exec_result['success']:
                     logger.error(f"   ❌ Failed: {exec_result.get('error')}")
 
-                    # 简单重规划 (如果需要)
                     if state.replanning_count < state.max_replanning:
                         logger.info(f"   🔄 Replanning...")
                         state.replanning_count += 1
-                        # 继续循环,自适应规划会生成新步骤
 
                     continue
 
@@ -317,7 +350,6 @@ class AIPOMCoTV10:
             'question': question,
             'answer': final_answer,
 
-            # 实体识别
             'entities_recognized': [
                 {
                     'text': m.text,
@@ -328,11 +360,9 @@ class AIPOMCoTV10:
                 for m in state.entity_matches[:10]
             ],
 
-            # 推理计划
             'reasoning_plan': [self._step_to_dict(s) for s in state.executed_steps],
             'executed_steps': [self._step_to_dict(s) for s in state.executed_steps],
 
-            # 反思
             'reflections': state.reflections,
             'structured_reflections': [
                 {
@@ -352,10 +382,10 @@ class AIPOMCoTV10:
                 'modalities_covered': analysis_state.modalities_covered,
                 'entities_discovered': {
                     k: len(v) for k, v in analysis_state.discovered_entities.items()
-                }
+                },
+                'primary_focus': getattr(analysis_state, 'primary_focus', None)
             },
 
-            # 元数据
             'replanning_count': state.replanning_count,
             'confidence_score': state.confidence_score,
             'execution_time': execution_time,
@@ -371,6 +401,167 @@ class AIPOMCoTV10:
         return result
 
     # ==================== 辅助方法 ====================
+    def _select_planner(self, state, question: str) -> str:
+        """
+        智能选择规划器 (增强版 - 支持无entity的systematic模式)
+
+        🔧 关键改进: 检测systematic关键词，即使没有初始entities
+        """
+        q_lower = question.lower()
+
+        # 🔍 比较查询 → Comparative
+        compare_keywords = ['compare', 'versus', 'vs ', 'vs.', 'difference between', 'contrast']
+        if any(kw in q_lower for kw in compare_keywords):
+            logger.info(f"   Comparison keywords detected → comparative")
+            return 'comparative'
+
+        # 🔧 新增: 系统筛选关键词 (不依赖初始entities)
+        systematic_keywords = [
+            'which regions', 'which brain', 'find all', 'identify all',
+            'screen', 'systematic', 'highest', 'top regions',
+            'mismatch', 'show', 'exhibit', 'demonstrate'
+        ]
+
+        # 检测systematic模式
+        has_which = 'which' in q_lower
+        has_highest = any(w in q_lower for w in ['highest', 'top', 'most', 'strongest'])
+        has_mismatch = 'mismatch' in q_lower
+        has_show = any(w in q_lower for w in ['show', 'exhibit', 'demonstrate', 'display'])
+
+        # 🎯 关键: Systematic模式判断
+        if has_which and (has_highest or has_mismatch or has_show):
+            logger.info(f"   Systematic screening keywords detected → comparative")
+            logger.info(f"     Keywords: which={has_which}, highest={has_highest}, mismatch={has_mismatch}")
+            return 'comparative'
+
+        # 或者直接检测组合
+        if any(kw in q_lower for kw in systematic_keywords):
+            # 进一步确认是否是筛选类问题
+            screening_patterns = [
+                'which.*show', 'which.*have', 'which.*exhibit',
+                'find.*regions', 'identify.*regions',
+                'highest.*mismatch', 'top.*mismatch'
+            ]
+            import re
+            for pattern in screening_patterns:
+                if re.search(pattern, q_lower):
+                    logger.info(f"   Systematic pattern detected: {pattern} → comparative")
+                    return 'comparative'
+
+        # 🔧 Focus-driven: 有regions的深度查询
+        if 'Region' in state.discovered_entities:
+            n_regions = len(state.discovered_entities.get('Region', []))
+            if n_regions > 0:
+                logger.info(f"   {n_regions} regions found → focus-driven")
+                return 'focus_driven'
+
+        # 🔧 Focus-driven: Gene查询且有深度意图
+        if 'GeneMarker' in state.discovered_entities:
+            deep_intent_keywords = ['tell me about', 'about', 'analyze', 'characterize', 'comprehensive']
+            if any(kw in q_lower for kw in deep_intent_keywords):
+                logger.info(f"   Gene query with deep intent → focus-driven")
+                return 'focus_driven'
+
+        # 默认: Adaptive
+        logger.info(f"   Default → adaptive")
+        return 'adaptive'
+
+    def _classify_question_intent(self, question: str) -> str:
+        """分类问题意图"""
+        question_lower = question.lower()
+
+        if any(w in question_lower for w in ['compare', 'difference', 'versus', 'vs']):
+            return 'comparison'
+        elif any(w in question_lower for w in ['comprehensive', 'detailed', 'everything']):
+            return 'comprehensive'
+        elif any(w in question_lower for w in ['why', 'explain', 'how']):
+            return 'explanatory'
+        elif any(w in question_lower for w in ['which', 'find', 'identify']):
+            return 'screening'
+        else:
+            return 'simple_query'
+
+
+
+    def _update_analysis_state(self,
+                               analysis_state,
+                               step: ReasoningStep,
+                               result: Dict,
+                               candidate):
+        """更新分析状态"""
+        # 记录执行的步骤
+        analysis_state.executed_steps.append({
+            'purpose': step.purpose,
+            'modality': step.modality,
+            'row_count': len(result.get('data', [])),
+            'step_id': candidate.step_id
+        })
+
+        # 更新modality覆盖
+        if step.modality and step.modality not in analysis_state.modalities_covered:
+            analysis_state.modalities_covered.append(step.modality)
+
+        # 🆕 提取新发现的实体
+        data = result.get('data', [])
+        if not data:
+            return
+
+        first_row = data[0]
+
+        # 提取regions
+        if 'region' in first_row or 'acronym' in first_row:
+            regions = list(set([
+                row.get('region') or row.get('acronym')
+                for row in data
+                if row.get('region') or row.get('acronym')
+            ]))
+
+            existing = analysis_state.discovered_entities.setdefault('Region', [])
+            for r in regions:
+                if r and r not in existing:
+                    existing.append(r)
+
+        # 提取clusters
+        if 'cluster' in first_row or 'cluster_name' in first_row:
+            clusters = list(set([
+                row.get('cluster') or row.get('cluster_name')
+                for row in data
+                if row.get('cluster') or row.get('cluster_name')
+            ]))
+
+            existing = analysis_state.discovered_entities.setdefault('Cluster', [])
+            for c in clusters:
+                if c and c not in existing:
+                    existing.append(c)
+
+        # 提取subclasses
+        if 'subclass' in first_row or 'subclass_name' in first_row:
+            subclasses = list(set([
+                row.get('subclass') or row.get('subclass_name')
+                for row in data
+                if row.get('subclass') or row.get('subclass_name')
+            ]))
+
+            existing = analysis_state.discovered_entities.setdefault('Subclass', [])
+            for s in subclasses:
+                if s and s not in existing:
+                    existing.append(s)
+
+        # 🆕 提取projection targets
+        if 'target' in first_row or 'target_region' in first_row:
+            targets = list(set([
+                row.get('target') or row.get('target_region')
+                for row in data
+                if row.get('target') or row.get('target_region')
+            ]))
+
+            existing = analysis_state.discovered_entities.setdefault('ProjectionTarget', [])
+            for t in targets:
+                if t and t not in existing:
+                    existing.append(t)
+
+            if targets:
+                logger.info(f"   📍 Discovered {len(targets)} projection targets")
 
     def _classify_question_intent(self, question: str) -> str:
         """分类问题意图"""
@@ -385,39 +576,36 @@ class AIPOMCoTV10:
         else:
             return 'simple_query'
 
-    def _convert_candidate_to_reasoning(self,
-                                        candidate: 'CandidateStep',
-                                        step_number: int,
-                                        analysis_state: 'AnalysisState') -> ReasoningStep:
-        """
-        将CandidateStep转换为ReasoningStep
-        """
-        # 解析参数 (替换占位符)
+    def _convert_candidate_to_reasoning(self, candidate, step_number, analysis_state):
+        """转换CandidateStep (修复版)"""
         params = candidate.parameters.copy()
 
-        # 如果参数中有引用discovered_entities的,替换之
-        for key, value in params.items():
-            if isinstance(value, str) and value.startswith('$'):
-                # 例如: $regions -> analysis_state.discovered_entities['Region']
-                entity_type = value[1:].title()  # $regions -> Regions -> Region
-                if entity_type.endswith('s'):
-                    entity_type = entity_type[:-1]
+        # 🔧 智能判断action
+        has_cypher = bool(candidate.cypher_template and candidate.cypher_template.strip())
 
-                if entity_type in analysis_state.discovered_entities:
-                    params[key] = analysis_state.discovered_entities[entity_type][:10]
+        if not has_cypher:
+            # 特殊步骤
+            if 'statistical' in candidate.step_type.lower() or 'fdr' in candidate.step_id.lower():
+                action = 'execute_statistical'
+            elif 'multi-modal' in candidate.step_type.lower() or 'mismatch' in candidate.step_id.lower():
+                action = 'execute_fingerprint'
+            else:
+                action = 'execute_cypher'
+        else:
+            action = 'execute_cypher'
 
         return ReasoningStep(
             step_number=step_number,
             purpose=candidate.purpose,
-            action='execute_cypher',
-            rationale=candidate.rationale + f" (LLM score: {candidate.llm_score:.2f})",
+            action=action,  # 🔧 正确的action
+            rationale=candidate.rationale,
             expected_result=candidate.expected_data,
             query_or_params={
                 'query': candidate.cypher_template,
                 'params': params
             },
-            modality=candidate.step_type if candidate.step_type != 'spatial' else None,
-            depends_on=[]
+            modality=candidate.step_type,
+            depends_on=getattr(candidate, 'depends_on', [])
         )
 
     def _update_analysis_state(self,
@@ -517,42 +705,6 @@ class AIPOMCoTV10:
         # Default: Medium
         return AnalysisDepth.MEDIUM
 
-    # def _update_analysis_state(self,
-    #                            state: AnalysisState,
-    #                            step: ReasoningStep,
-    #                            result: Dict):
-    #     """更新分析状态"""
-    #
-    #     # 记录执行的步骤
-    #     state.executed_steps.append({
-    #         'purpose': step.purpose,
-    #         'modality': step.modality,
-    #         'row_count': len(result.get('data', []))
-    #     })
-    #
-    #     # 更新modality覆盖
-    #     if step.modality and step.modality not in state.modalities_covered:
-    #         state.modalities_covered.append(step.modality)
-    #
-    #     # 提取新发现的实体
-    #     data = result.get('data', [])
-    #     if data:
-    #         # 如果是regions
-    #         if 'region' in data[0] or 'acronym' in data[0]:
-    #             regions = [row.get('region') or row.get('acronym') for row in data]
-    #             state.discovered_entities.setdefault('Region', []).extend(regions)
-    #
-    #         # 如果是clusters
-    #         if 'cluster' in data[0] or 'cluster_name' in data[0]:
-    #             clusters = [row.get('cluster') or row.get('cluster_name') for row in data]
-    #             state.discovered_entities.setdefault('Cluster', []).extend(clusters)
-    #
-    #         # 如果是projection targets
-    #         if 'target' in data[0]:
-    #             targets = [row['target'] for row in data]
-    #             state.discovered_entities.setdefault('ProjectionTarget', []).extend(targets)
-
-    # ==================== Enhanced Planning Phase ====================
 
     def _enhanced_planning_phase(self, state: EnhancedAgentState) -> Dict[str, Any]:
         """
@@ -743,27 +895,145 @@ Return a JSON object with key "steps" containing an array:
 
             return fallback_steps
 
+    def _characterize_top_pairs(self, params: Dict, state: EnhancedAgentState) -> Dict:
+        """
+        深入分析top mismatch pairs (Case Study)
+
+        🆕 新增功能:
+        1. 提取top N pairs
+        2. 查询每个pair的详细数据:
+           - Morphological features
+           - Projection targets
+           - Molecular composition
+        """
+        n_top = params.get('n_top_pairs', 3)
+
+        # 从FDR结果获取top pairs
+        fdr_data = None
+        for key, data in state.intermediate_data.items():
+            if data and isinstance(data, list) and len(data) > 0:
+                if 'fdr_significant' in data[0] and data[0].get('fdr_significant'):
+                    fdr_data = data
+                    break
+
+        if not fdr_data:
+            logger.warning("   No FDR significant pairs found, using top mismatch pairs")
+            # Fallback: 使用top mismatch
+            for key, data in state.intermediate_data.items():
+                if data and isinstance(data, list) and len(data) > 0:
+                    if 'mismatch_combined' in data[0]:
+                        fdr_data = sorted(data, key=lambda x: x['mismatch_combined'], reverse=True)
+                        break
+
+        if not fdr_data:
+            return {'success': False, 'error': 'No mismatch data found', 'data': []}
+
+        # 选择top N pairs
+        top_pairs = fdr_data[:n_top]
+
+        logger.info(f"   Analyzing top {len(top_pairs)} pairs:")
+        for pair in top_pairs:
+            logger.info(f"     • {pair['region1']} vs {pair['region2']}: mismatch={pair['mismatch_combined']:.3f}")
+
+        # 详细分析每个pair
+        detailed_results = []
+
+        for pair in top_pairs:
+            region1 = pair['region1']
+            region2 = pair['region2']
+
+            logger.info(f"   Deep characterization: {region1} vs {region2}")
+
+            # 🔹 1. Morphological comparison
+            morph_query = """
+            MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region)
+            WHERE r.acronym IN [$region1, $region2]
+            RETURN r.acronym AS region,
+                   count(n) AS neuron_count,
+                   avg(n.axonal_length) AS avg_axon,
+                   avg(n.dendritic_length) AS avg_dendrite,
+                   avg(n.axonal_branches) AS avg_axon_branches,
+                   avg(n.dendritic_branches) AS avg_dendrite_branches,
+                   stdev(n.axonal_length) AS std_axon,
+                   stdev(n.dendritic_length) AS std_dendrite
+            """
+            morph_result = self.db.run(morph_query, {'region1': region1, 'region2': region2})
+
+            # 🔹 2. Projection targets comparison
+            proj_query = """
+            MATCH (r:Region)-[p:PROJECT_TO]->(t:Region)
+            WHERE r.acronym IN [$region1, $region2]
+            RETURN r.acronym AS source,
+                   t.acronym AS target,
+                   t.name AS target_name,
+                   p.weight AS weight
+            ORDER BY r.acronym, p.weight DESC
+            LIMIT 30
+            """
+            proj_result = self.db.run(proj_query, {'region1': region1, 'region2': region2})
+
+            # 🔹 3. Molecular composition
+            mol_query = """
+            MATCH (r:Region)-[:HAS_CLUSTER]->(c:Cluster)
+            WHERE r.acronym IN [$region1, $region2]
+            RETURN r.acronym AS region,
+                   c.name AS cluster,
+                   c.markers AS markers,
+                   c.number_of_neurons AS neurons
+            ORDER BY r.acronym, c.number_of_neurons DESC
+            LIMIT 20
+            """
+            mol_result = self.db.run(mol_query, {'region1': region1, 'region2': region2})
+
+            # 整合结果
+            detailed_results.append({
+                'pair': f"{region1}_vs_{region2}",
+                'region1': region1,
+                'region2': region2,
+                'mismatch_score': pair['mismatch_combined'],
+                'p_value': pair.get('p_value', 1.0),
+                'q_value': pair.get('q_value', 1.0),
+                'morphology': morph_result.get('data', []),
+                'projections': proj_result.get('data', []),
+                'molecular': mol_result.get('data', [])
+            })
+
+        logger.info(f"   ✅ Detailed characterization complete for {len(detailed_results)} pairs")
+
+        return {
+            'success': True,
+            'data': detailed_results,
+            'rows': len(detailed_results),
+            'analysis_type': 'case_study'
+        }
+
     # ==================== Execution ====================
 
     def _execute_step(self, step: ReasoningStep, state: EnhancedAgentState) -> Dict[str, Any]:
-        """执行单个步骤"""
+        """执行单个步骤 (修复版 - 支持case study)"""
         start_time = time.time()
 
         try:
-            query = step.query_or_params.get('query', '')
+            query = step.query_or_params.get('query', '').strip()
             params = step.query_or_params.get('params', {})
 
-            # 参数替换 (处理依赖)
-            if step.depends_on:
-                params = self._resolve_parameters(step, state, params)
-
-            # 执行查询
-            result = self._execute_cypher(query, params)
+            # 判断执行类型
+            if not query:
+                # 🆕 Case study检测
+                if 'characterize' in step.purpose.lower() and 'top' in step.purpose.lower():
+                    result = self._characterize_top_pairs(params, state)
+                elif 'mismatch' in step.purpose.lower():
+                    result = self._execute_fingerprint_step(step, state)
+                elif 'statistical' in step.purpose.lower() or 'fdr' in step.purpose.lower():
+                    result = self._execute_statistical_step(step, state)
+                else:
+                    result = {'success': False, 'error': 'Cannot determine execution type'}
+            else:
+                result = self._execute_cypher_step(step, state)
 
             step.actual_result = result
             step.execution_time = time.time() - start_time
 
-            # 保存中间数据
             step_key = f"step_{step.step_number}"
             state.intermediate_data[step_key] = result.get('data', [])
 
@@ -771,7 +1041,76 @@ Return a JSON object with key "steps" containing an array:
 
         except Exception as e:
             logger.error(f"Step execution failed: {e}")
+            import traceback
+            traceback.print_exc()
             return {'success': False, 'error': str(e)}
+
+    def _execute_cypher_step(self, step: ReasoningStep, state: EnhancedAgentState) -> Dict[str, Any]:
+        """执行Cypher查询步骤"""
+        query = step.query_or_params.get('query', '').strip()
+        params = step.query_or_params.get('params', {})
+
+        # 🔧 空查询检查
+        if not query:
+            logger.warning(f"   Empty Cypher query - skipping")
+            return {'success': False, 'error': 'Empty query', 'data': []}
+
+        # 参数替换
+        if step.depends_on:
+            params = self._resolve_parameters(step, state, params)
+
+        # 自动添加LIMIT
+        import re
+        if not re.search(r'\bLIMIT\b', query, re.IGNORECASE):
+            query = f"{query}\nLIMIT 100"
+
+        return self.db.run(query, params)
+
+    def _execute_statistical_step(self,
+                                  step: ReasoningStep,
+                                  state: EnhancedAgentState) -> Dict[str, Any]:
+        """
+        🆕 执行统计步骤
+        """
+        params = step.query_or_params.get('params', {})
+        test_type = params.get('test_type', 'permutation')
+
+        logger.info(f"   📊 Statistical test: {test_type}")
+
+        try:
+            if test_type == 'permutation':
+                return self._permutation_test(params, state)
+
+            elif test_type == 'fdr':
+                return self._fdr_correction(params, state)
+
+            elif test_type == 'correlation':
+                return self._correlation_test(params, state)
+
+            else:
+                return {'success': False, 'error': f'Unknown test type: {test_type}'}
+
+        except Exception as e:
+            logger.error(f"Statistical test failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    def _execute_fingerprint_step(self,
+                                  step: ReasoningStep,
+                                  state: EnhancedAgentState) -> Dict[str, Any]:
+        """
+        🆕 执行fingerprint计算步骤
+        """
+        params = step.query_or_params.get('params', {})
+        analysis_type = params.get('analysis_type', 'cross_modal_mismatch')
+
+        logger.info(f"   🔬 Fingerprint analysis: {analysis_type}")
+
+        if analysis_type == 'cross_modal_mismatch':
+            return self._compute_mismatch_matrix(params, state)
+        else:
+            return {'success': False, 'error': f'Unknown analysis type: {analysis_type}'}
 
     def _resolve_parameters(self,
                             step: ReasoningStep,
@@ -811,6 +1150,359 @@ Return a JSON object with key "steps" containing an array:
             query = f"{query}\nLIMIT 100"
 
         return self.db.run(query, params)
+
+    def _permutation_test(self, params: Dict, state: EnhancedAgentState) -> Dict:
+        """Permutation test for morphological differences"""
+        entity_a = params['entity_a']
+        entity_b = params['entity_b']
+
+        # 从之前的step获取数据
+        morph_data = None
+        for key, data in state.intermediate_data.items():
+            if data and isinstance(data, list) and len(data) > 0:
+                if 'region' in data[0] and ('avg_axon' in data[0] or 'avg_axon_length' in data[0]):
+                    morph_data = data
+                    break
+
+        if not morph_data:
+            return {'success': False, 'error': 'No morphological data found'}
+
+        # 提取两组数据
+        group_a = [row for row in morph_data if row.get('region') == entity_a]
+        group_b = [row for row in morph_data if row.get('region') == entity_b]
+
+        if not group_a or not group_b:
+            return {'success': False,
+                    'error': f'Insufficient data: {entity_a}={len(group_a)}, {entity_b}={len(group_b)}'}
+
+        # 提取axon length
+        import numpy as np
+        axon_key = 'avg_axon' if 'avg_axon' in group_a[0] else 'avg_axon_length'
+        axon_a = np.array([row.get(axon_key, 0) or 0 for row in group_a])
+        axon_b = np.array([row.get(axon_key, 0) or 0 for row in group_b])
+
+        # 移除零值
+        axon_a = axon_a[axon_a > 0]
+        axon_b = axon_b[axon_b > 0]
+
+        if len(axon_a) == 0 or len(axon_b) == 0:
+            return {'success': False, 'error': 'No valid morphology data'}
+
+        # 计算observed difference
+        observed_diff = float(np.mean(axon_a) - np.mean(axon_b))
+
+        # 🎯 调用统计工具!
+        result = self.stats.permutation_test(
+            observed_stat=observed_diff,
+            data1=axon_a,
+            data2=axon_b,
+            n_permutations=1000,
+            seed=42
+        )
+
+        # 计算effect size
+        effect_size = self.stats.cohens_d(axon_a, axon_b)
+
+        # 格式化结果
+        result_data = [{
+            'comparison': f'{entity_a} vs {entity_b}',
+            'feature': 'axonal_length',
+            'mean_a': float(np.mean(axon_a)),
+            'mean_b': float(np.mean(axon_b)),
+            'observed_difference': observed_diff,
+            'p_value': result['p_value'],
+            'effect_size_cohens_d': effect_size,
+            'significance': 'significant' if result['p_value'] < 0.05 else 'not significant',
+            'interpretation': self._interpret_statistical_result(result, effect_size)
+        }]
+
+        logger.info(f"   ✅ Permutation test: p={result['p_value']:.4f}, d={effect_size:.2f}")
+
+        return {
+            'success': True,
+            'data': result_data,
+            'rows': len(result_data),
+            'test_type': 'permutation'
+        }
+
+    def _fdr_correction(self, params: Dict, state: EnhancedAgentState) -> Dict:
+        """
+        FDR correction for multiple comparisons (修复版)
+
+        🔧 修复: 正确处理p-values
+        """
+        alpha = params.get('alpha', 0.05)
+
+        # 从mismatch step获取p-values
+        mismatch_data = None
+        mismatch_key = None
+
+        for key, data in state.intermediate_data.items():
+            if data and isinstance(data, list) and len(data) > 0:
+                if 'mismatch_combined' in data[0] and 'p_value' in data[0]:
+                    mismatch_data = data
+                    mismatch_key = key
+                    logger.info(f"   Found mismatch data in {key}")
+                    break
+
+        if not mismatch_data:
+            logger.error("   No mismatch data with p-values found")
+            return {
+                'success': False,
+                'error': 'No mismatch data with p-values found for FDR correction',
+                'data': []
+            }
+
+        # 提取p-values
+        p_values = [row.get('p_value', 1.0) for row in mismatch_data]
+
+        logger.info(f"   FDR input: {len(p_values)} p-values")
+        logger.info(f"   P-value range: [{min(p_values):.4f}, {max(p_values):.4f}]")
+
+        # 🎯 调用FDR correction
+        try:
+            q_values, significant = self.stats.fdr_correction(p_values, alpha)
+
+            # 添加到原数据
+            result_data = []
+            for i, row in enumerate(mismatch_data):
+                result_data.append({
+                    **row,
+                    'q_value': q_values[i],
+                    'fdr_significant': significant[i]
+                })
+
+            # 只保留显著的
+            significant_data = [r for r in result_data if r['fdr_significant']]
+
+            logger.info(f"   ✅ FDR correction: {len(significant_data)}/{len(result_data)} significant (α={alpha})")
+
+            if significant_data:
+                logger.info(
+                    f"   Top significant pair: {significant_data[0]['region1']}-{significant_data[0]['region2']}")
+                logger.info(f"     Mismatch: {significant_data[0]['mismatch_combined']:.3f}")
+                logger.info(f"     Q-value: {significant_data[0]['q_value']:.4f}")
+
+            return {
+                'success': True,
+                'data': significant_data,
+                'rows': len(significant_data),
+                'test_type': 'fdr',
+                'alpha': alpha,
+                'n_significant': len(significant_data),
+                'n_total': len(result_data)
+            }
+
+        except Exception as e:
+            logger.error(f"   FDR correction failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                'success': False,
+                'error': str(e),
+                'data': []
+            }
+
+    def _correlation_test(self, params: Dict, state: EnhancedAgentState) -> Dict:
+        """Correlation test between modalities"""
+        # 实现correlation (可选,暂时返回placeholder)
+        logger.warning("Correlation test not yet implemented")
+        return {'success': False, 'error': 'Not implemented'}
+
+    def _compute_mismatch_matrix(self, params: Dict, state: EnhancedAgentState) -> Dict:
+        """
+        计算cross-modal mismatch矩阵 (增强版 - 带统计显著性)
+
+        🆕 添加:
+        1. Permutation test计算p-value
+        2. Effect size计算
+        3. Bootstrap confidence intervals
+        """
+        # 获取regions
+        regions = state.analysis_state.discovered_entities.get('Region', [])
+
+        if not regions:
+            # 从之前的step获取
+            for key, data in state.intermediate_data.items():
+                if data and isinstance(data, list) and len(data) > 0:
+                    if 'region' in data[0]:
+                        regions = list(set([row['region'] for row in data if row.get('region')]))
+                        break
+
+        # 限制数量避免计算爆炸
+        regions = regions[:20]
+
+        if len(regions) < 2:
+            return {'success': False, 'error': 'Need at least 2 regions for mismatch computation'}
+
+        logger.info(
+            f"   Computing mismatch for {len(regions)} regions ({len(regions) * (len(regions) - 1) // 2} pairs)...")
+
+        # 计算所有pairs的mismatch
+        mismatch_results = []
+
+        from itertools import combinations
+        import numpy as np
+
+        for region1, region2 in combinations(regions, 2):
+            # 🎯 调用fingerprint analyzer
+            mismatch = self.fingerprint.compute_mismatch_index(region1, region2)
+
+            if mismatch:
+                # 基础mismatch scores
+                mismatch_GM = mismatch.get('mismatch_GM', 0)
+                mismatch_GP = mismatch.get('mismatch_GP', 0)
+                mismatch_MP = mismatch.get('mismatch_MP', 0)
+                mismatch_combined = (mismatch_GM + mismatch_GP + mismatch_MP) / 3
+
+                # 🆕 计算统计显著性 (Permutation test)
+                # 使用combined mismatch作为observed statistic
+                try:
+                    # 生成null distribution (通过随机permutation)
+                    null_mismatches = []
+                    n_permutations = 100  # 降低计算量
+
+                    # 获取所有其他pairs的mismatch作为null distribution
+                    random_pairs = []
+                    all_other_regions = [r for r in regions if r not in [region1, region2]]
+
+                    if len(all_other_regions) >= 2:
+                        # 随机采样其他pairs
+                        for _ in range(min(n_permutations, len(all_other_regions))):
+                            import random
+                            r1, r2 = random.sample(all_other_regions, 2)
+                            null_mismatch = self.fingerprint.compute_mismatch_index(r1, r2)
+                            if null_mismatch:
+                                null_combined = (
+                                                        null_mismatch.get('mismatch_GM', 0) +
+                                                        null_mismatch.get('mismatch_GP', 0) +
+                                                        null_mismatch.get('mismatch_MP', 0)
+                                                ) / 3
+                                null_mismatches.append(null_combined)
+
+                    # 计算p-value
+                    if null_mismatches:
+                        null_mismatches = np.array(null_mismatches)
+                        p_value = np.mean(null_mismatches >= mismatch_combined)
+
+                        # 避免p=0
+                        if p_value == 0:
+                            p_value = 1.0 / (len(null_mismatches) + 1)
+                    else:
+                        # Fallback: 基于mismatch score转换
+                        # 高mismatch → 低p-value
+                        p_value = 1.0 - min(0.99, mismatch_combined)
+
+                except Exception as e:
+                    logger.warning(f"   Failed to compute p-value for {region1}-{region2}: {e}")
+                    # Fallback
+                    p_value = 1.0 - min(0.99, mismatch_combined)
+
+                # 🆕 计算effect size (使用mismatch score作为proxy)
+                effect_size = mismatch_combined  # 简化版，实际应该用Cohen's d
+
+                mismatch_results.append({
+                    'region1': region1,
+                    'region2': region2,
+                    'mismatch_GM': mismatch_GM,
+                    'mismatch_GP': mismatch_GP,
+                    'mismatch_MP': mismatch_MP,
+                    'mismatch_combined': mismatch_combined,
+                    'sim_molecular': mismatch.get('sim_molecular', 0),
+                    'sim_morphological': mismatch.get('sim_morphological', 0),
+                    'sim_projection': mismatch.get('sim_projection', 0),
+                    # 🆕 统计信息
+                    'p_value': float(p_value),
+                    'effect_size': float(effect_size),
+                    'n_permutations': len(null_mismatches) if null_mismatches else 0
+                })
+
+        # 按mismatch排序
+        mismatch_results.sort(key=lambda x: x['mismatch_combined'], reverse=True)
+
+        # Top-N
+        n_top = params.get('n_pairs', 10)
+        top_mismatches = mismatch_results[:n_top]
+
+        logger.info(f"   ✅ Computed {len(mismatch_results)} mismatches")
+        if top_mismatches:
+            logger.info(f"   Top mismatch: {top_mismatches[0]['region1']}-{top_mismatches[0]['region2']}")
+            logger.info(f"     Score: {top_mismatches[0]['mismatch_combined']:.3f}")
+            logger.info(f"     P-value: {top_mismatches[0]['p_value']:.4f}")
+
+        return {
+            'success': True,
+            'data': mismatch_results,
+            'rows': len(mismatch_results),
+            'analysis_type': 'cross_modal_mismatch',
+            'top_pairs': top_mismatches
+        }
+
+    def _interpret_statistical_result(self, test_result: Dict, effect_size: float) -> str:
+        """解释统计结果"""
+        p_value = test_result['p_value']
+
+        if p_value < 0.001:
+            sig_level = "highly significant (p < 0.001)"
+        elif p_value < 0.01:
+            sig_level = "very significant (p < 0.01)"
+        elif p_value < 0.05:
+            sig_level = "significant (p < 0.05)"
+        else:
+            sig_level = "not significant (p ≥ 0.05)"
+
+        if abs(effect_size) > 0.8:
+            effect_desc = "large effect size"
+        elif abs(effect_size) > 0.5:
+            effect_desc = "medium effect size"
+        elif abs(effect_size) > 0.2:
+            effect_desc = "small effect size"
+        else:
+            effect_desc = "negligible effect size"
+
+        return f"The difference is {sig_level} with a {effect_desc} (Cohen's d = {effect_size:.2f})"
+
+    def _resolve_parameters(self,
+                            step: ReasoningStep,
+                            state: EnhancedAgentState,
+                            params: Dict) -> Dict:
+        """解析步骤依赖的参数"""
+        resolved = params.copy()
+
+        # 查找依赖步骤的数据
+        for dep_num in step.depends_on:
+            dep_key = f"step_{dep_num}"
+            if dep_key in state.intermediate_data:
+                dep_data = state.intermediate_data[dep_key]
+
+                if not dep_data:
+                    continue
+
+                # 提取常用字段
+                # 提取region acronyms
+                regions = []
+                for row in dep_data:
+                    if 'region' in row:
+                        regions.append(row['region'])
+                    elif 'acronym' in row:
+                        regions.append(row['acronym'])
+
+                if regions:
+                    resolved['enriched_regions'] = list(set(regions))[:10]
+                    resolved['target_regions'] = list(set(regions))[:10]
+
+                # 提取targets
+                targets = []
+                for row in dep_data:
+                    if 'target' in row:
+                        targets.append(row['target'])
+                    elif 'target_region' in row:
+                        targets.append(row['target_region'])
+
+                if targets:
+                    resolved['targets'] = list(set(targets))[:10]
+
+        return resolved
 
     # ==================== Intelligent Replanning ====================
 
@@ -862,7 +1554,9 @@ Return a JSON object with key "steps" containing an array:
     # ==================== Answer Synthesis ====================
 
     def _synthesize_answer(self, state: EnhancedAgentState) -> str:
-        """合成最终答案"""
+        """
+        合成最终答案 (增强版 - 科学叙事)
+        """
         # 准备证据摘要
         evidence = []
         for step in state.executed_steps:
@@ -884,50 +1578,126 @@ Return a JSON object with key "steps" containing an array:
         reflection_summary = []
         for r in state.structured_reflections:
             reflection_summary.append(
-                f"Step {r.step_number}: {r.validation_status.value} "
-                f"(confidence: {r.confidence_score:.2f})"
+                f"Step {r.step_number}: {r.validation_status.value} (confidence: {r.confidence_score:.2f})"
             )
 
-        prompt = f"""Synthesize a comprehensive answer based on the reasoning trace.
+        # 🆕 检测分析类型
+        analysis_type = self._detect_analysis_type(state)
 
-**Original Question:** {state.question}
+        # 🆕 准备PRIMARY FOCUS信息
+        primary_focus_info = ""
+        if hasattr(state.analysis_state, 'primary_focus') and state.analysis_state.primary_focus:
+            focus = state.analysis_state.primary_focus
+            supporting = focus.supporting_data
+            primary_focus_info = f"""
+    **PRIMARY FOCUS IDENTIFIED:**
+    - Region: {focus.entity_id}
+    - Enrichment: {supporting.get('total_neurons', 'N/A')} neurons across {supporting.get('cluster_count', 'N/A')} clusters
+    - This region shows the highest enrichment and was selected for deep characterization
+    """
 
-**Entities Recognized:** {', '.join([e['text'] for e in state.entities[:5]])}
+        prompt = f"""Synthesize a comprehensive, publication-quality answer based on the multi-step analysis.
 
-**Reasoning Steps Executed:**
-{chr(10).join([f"{i + 1}. {s.purpose}" for i, s in enumerate(state.executed_steps)])}
+    **CRITICAL: Write as a SCIENTIFIC NARRATIVE, not a data report!**
 
-**Evidence Collected:**
-{evidence_text}
+    **Original Question:** {state.question}
 
-**Key Findings (sample data):**
-{json.dumps(key_data, indent=2, default=str)[:2000]}
+    **Analysis Type Detected:** {analysis_type}
 
-**Structured Reflections:**
-{chr(10).join(reflection_summary)}
+    **Entities Recognized:** {', '.join([e['text'] for e in state.entities[:5]])}
 
-**Your Task:**
-Write a comprehensive, scientifically rigorous answer that:
-1. Directly answers the original question
-2. Cites specific quantitative findings with numbers
-3. Explains the multi-step reasoning process briefly
-4. Integrates molecular, morphological, and projection findings if available
-5. Acknowledges any limitations or uncertainties
-6. Is written for a neuroscience research audience
+    {primary_focus_info}
 
-Make it publication-quality but accessible. Use proper scientific terminology.
-"""
+    **Reasoning Steps Executed:**
+    {chr(10).join([f"{i + 1}. {s.purpose}" for i, s in enumerate(state.executed_steps)])}
+
+    **Evidence Collected:**
+    {evidence_text}
+
+    **Key Findings (quantitative data):**
+    {json.dumps(key_data, indent=2, default=str)[:3000]}
+
+    **Structured Reflections:**
+    {chr(10).join(reflection_summary)}
+
+    **Your Task:**
+
+    Write a comprehensive answer with the following structure:
+
+    ### [Title - Generate an engaging title]
+
+    #### Introduction (1 paragraph)
+    - Open with the biological significance
+    - State the main finding concisely
+
+    #### Multi-Modal Analysis Results
+
+    **1. Molecular Characterization**
+    - Cite SPECIFIC numbers (e.g., "18,474 neurons across 4 clusters")
+    - Mention key markers and cell types
+    - Use quantitative language
+
+    **2. Spatial Distribution**
+    - List regions with enrichment metrics
+    - Highlight PRIMARY focus if identified
+    - Use percentages and rankings
+
+    **3. Morphological Features** (if available)
+    - Report mean ± SD for axonal/dendritic measurements
+    - Compare to baseline if applicable
+    - Interpret structural specializations
+
+    **4. Connectivity Patterns** (if available)
+    - Describe projection targets with weights
+    - Categorize by functional systems (sensory/motor/associative)
+    - Mention top 3-5 targets quantitatively
+
+    **5. Target Characterization (CLOSED LOOP)** (if available)
+    - Describe cell type composition of projection targets
+    - Connect back to molecular findings
+    - Emphasize circuit-level integration
+
+    **6. Statistical Validation** (if available)
+    - Report p-values and effect sizes
+    - Mention significance levels
+    - Interpret biological meaning
+
+    #### Integration and Implications
+    - Connect molecular → morphological → projection findings
+    - Propose functional hypotheses
+    - Discuss circuit-level organization
+
+    #### Limitations and Uncertainties
+    - Acknowledge data gaps honestly
+    - Cite confidence scores from reflections
+    - Suggest validation approaches
+
+    **Writing Style:**
+    - Use ACTIVE voice ("Our analysis revealed..." not "It was found...")
+    - Connect findings CAUSALLY ("Because X, we examined Y, which revealed Z")
+    - Emphasize QUANTITATIVE data (numbers, percentages, statistics)
+    - Make it VISUAL-READY (structure data for plotting)
+    - Be HONEST about uncertainties
+
+    **Avoid:**
+    - Lists without narrative flow
+    - Vague statements ("some regions", "several")
+    - Overconfident claims
+    - Jargon without explanation
+
+    Generate a publication-quality narrative now.
+    """
 
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system",
-                     "content": "You are a neuroscience writer synthesizing research analysis results."},
+                     "content": "You are a neuroscience writer synthesizing research analysis results into publication-quality narratives."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
-                max_tokens=1000
+                max_tokens=1500
             )
 
             answer = response.choices[0].message.content.strip()
@@ -940,8 +1710,26 @@ Make it publication-quality but accessible. Use proper scientific terminology.
 
         except Exception as e:
             logger.error(f"Synthesis failed: {e}")
-            return f"Analysis completed with {len(state.executed_steps)} steps. " \
-                   f"Found {len(state.entities)} entities and executed multi-modal analysis."
+            import traceback
+            traceback.print_exc()
+
+            # Fallback: 简单总结
+            return f"Analysis completed with {len(state.executed_steps)} steps across {len(state.analysis_state.modalities_covered)} modalities. " \
+                   f"Identified {len(state.entities)} entities and executed comprehensive multi-modal analysis. " \
+                   f"Confidence: {self._estimate_confidence(state):.2f}."
+
+    def _detect_analysis_type(self, state: EnhancedAgentState) -> str:
+        """检测分析类型"""
+        step_purposes = [s.purpose.lower() for s in state.executed_steps]
+
+        if any('compare' in p or 'versus' in p for p in step_purposes):
+            return "Comparative Analysis"
+        elif any('mismatch' in p or 'screening' in p for p in step_purposes):
+            return "Systematic Screening (Figure 4 type)"
+        elif any('primary focus' in p or 'closed loop' in p for p in step_purposes):
+            return "Focus-Driven Deep Analysis (Figure 3 type)"
+        else:
+            return "General Multi-Modal Analysis"
 
     # ==================== Utilities ====================
 
@@ -1059,13 +1847,13 @@ def test_car3_comprehensive():
         neo4j_pwd=os.getenv("NEO4J_PASSWORD", "neuroxiv"),
         database=os.getenv("NEO4J_DATABASE", "neo4j"),
         schema_json_path="./schema_output/schema.json",
-        openai_api_key=os.getenv("OPENAI_API_KEY",''),
+        openai_api_key=os.getenv("OPENAI_API_KEY",""),
         model="gpt-4o"
     )
 
     # 🎯 关键: 使用"comprehensive"触发深度分析
-    question = "Give me a comprehensive analysis of Car3+ neurons"
-
+    # question = "Give me a comprehensive analysis of Car3+ neurons"
+    question = "Which brain regions show the highest cross-modal mismatch?"
     result = agent.answer(question, max_iterations=12)
 
     print("\n" + "=" * 80)

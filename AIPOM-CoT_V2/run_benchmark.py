@@ -49,7 +49,7 @@ def main():
                         help='Neo4j database name')
     parser.add_argument('--schema-json', type=str, default='./schema_output/schema.json',
                         help='Path to schema.json')
-    parser.add_argument('--openai-api-key', type=str, default=None,
+    parser.add_argument('--openai-api-key', type=str, default="",
                         help='OpenAI API key (or set OPENAI_API_KEY env var)')
     parser.add_argument('--model', type=str, default='gpt-4o',
                         help='OpenAI model name')

@@ -251,6 +251,81 @@ class StatisticalTools:
 
         return (float(lower), float(upper))
 
+    @staticmethod
+    def correlation_test(x: np.ndarray,
+                         y: np.ndarray,
+                         method: str = 'pearson') -> Dict[str, float]:
+        """
+        Correlation test with p-value and confidence interval
+
+        Args:
+            x: First variable (array-like)
+            y: Second variable (array-like)
+            method: 'pearson' or 'spearman'
+
+        Returns:
+            {
+                'correlation': float,
+                'p_value': float,
+                'method': str,
+                'ci_lower': float,
+                'ci_upper': float
+            }
+        """
+        from scipy import stats as scipy_stats
+
+        x = np.asarray(x)
+        y = np.asarray(y)
+
+        # Remove NaN values
+        mask = ~(np.isnan(x) | np.isnan(y))
+        x = x[mask]
+        y = y[mask]
+
+        if len(x) < 3:
+            return {
+                'correlation': np.nan,
+                'p_value': 1.0,
+                'method': method,
+                'ci_lower': np.nan,
+                'ci_upper': np.nan,
+                'error': 'Insufficient data (n < 3)'
+            }
+
+        # Compute correlation
+        if method == 'pearson':
+            r, p_value = scipy_stats.pearsonr(x, y)
+        elif method == 'spearman':
+            r, p_value = scipy_stats.spearmanr(x, y)
+        else:
+            raise ValueError(f"Unknown method: {method}. Use 'pearson' or 'spearman'")
+
+        # Compute confidence interval using Fisher's z-transformation
+        n = len(x)
+        if method == 'pearson':
+            z = np.arctanh(r)
+            se = 1 / np.sqrt(n - 3)
+            ci_lower_z = z - 1.96 * se
+            ci_upper_z = z + 1.96 * se
+            ci_lower = np.tanh(ci_lower_z)
+            ci_upper = np.tanh(ci_upper_z)
+        else:
+            # Spearman: use bootstrap
+            ci_lower, ci_upper = StatisticalTools.bootstrap_ci(
+                np.column_stack([x, y]),
+                statistic_func=lambda data: scipy_stats.spearmanr(data[:, 0], data[:, 1])[0],
+                n_bootstrap=1000
+            )
+
+        return {
+            'correlation': float(r),
+            'p_value': float(p_value),
+            'method': method,
+            'ci_lower': float(ci_lower),
+            'ci_upper': float(ci_upper),
+            'n': int(n)
+        }
+
 
 # ==================== Fingerprint Analyzer with REAL Schema ====================
 

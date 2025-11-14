@@ -26,13 +26,12 @@ import re
 from pathlib import Path
 
 import numpy as np
-
+from scipy import stats
 from neo4j_exec import Neo4jExec
 from adaptive_planner import AdaptivePlanner, AnalysisDepth, AnalysisState
 from aipom_cot_true_agent_v2 import (
     RealSchemaCache,
     StatisticalTools,
-    RealFingerprintAnalyzer,
     AgentPhase,
     AgentState,
     ReasoningStep
@@ -66,7 +65,275 @@ class EnhancedAgentState(AgentState):
     structured_reflections: List = field(default_factory=list)  # StructuredReflection列表
     schema_paths_used: List = field(default_factory=list)  # 使用的schema路径
 
+class RealFingerprintAnalyzer:
+    """
+    Multi-modal fingerprint analysis adapted to REAL schema
 
+    Key changes from V8:
+    - Molecular: Use Cluster nodes and HAS_CLUSTER relationships
+    - Morphological: Aggregate from Neuron nodes via LOCATE_AT
+    - Projection: Use PROJECT_TO (unchanged, but verify properties)
+    """
+
+    def __init__(self, db: Neo4jExec, schema: RealSchemaCache):
+        self.db = db
+        self.schema = schema
+        self._cluster_cache = None
+        self._target_cache = None
+
+    def compute_region_fingerprint(self, region: str) -> Optional[Dict[str, np.ndarray]]:
+        """
+        Compute tri-modal fingerprint for a region
+
+        Returns:
+            {
+                'molecular': np.ndarray,    # Cluster composition
+                'morphological': np.ndarray, # Aggregated neuron features
+                'projection': np.ndarray     # Target distribution
+            }
+        """
+        fingerprint = {}
+
+        # Molecular fingerprint
+        mol_fp = self._compute_molecular_fingerprint(region)
+        if mol_fp is not None:
+            fingerprint['molecular'] = mol_fp
+
+        # Morphological fingerprint
+        mor_fp = self._compute_morphological_fingerprint(region)
+        if mor_fp is not None:
+            fingerprint['morphological'] = mor_fp
+
+        # Projection fingerprint
+        proj_fp = self._compute_projection_fingerprint(region)
+        if proj_fp is not None:
+            fingerprint['projection'] = proj_fp
+
+        return fingerprint if len(fingerprint) > 0 else None
+
+    def compute_molecular_fingerprint(self, region: str) -> Optional[np.ndarray]:
+        """
+        Molecular fingerprint = cluster composition
+
+        Uses REAL schema:
+        MATCH (r:Region {acronym: $region})-[h:HAS_CLUSTER]->(c:Cluster)
+        """
+        query = """
+        MATCH (r:Region {acronym: $acronym})-[h:HAS_CLUSTER]->(c:Cluster)
+        RETURN c.name AS cluster_name,
+               c.markers AS markers,
+               c.number_of_neurons AS neuron_count
+        ORDER BY c.name
+        """
+
+        result = self.db.run(query, {'acronym': region})
+
+        if not result['success'] or not result['data']:
+            return None
+
+        # Get all clusters
+        all_clusters = self._get_all_clusters()
+
+        # Build vector: neuron count for each cluster
+        cluster_dict = {
+            row['cluster_name']: row['neuron_count'] or 0
+            for row in result['data']
+        }
+
+        vector = np.array([cluster_dict.get(c, 0.0) for c in all_clusters])
+
+        # Normalize
+        total = np.sum(vector)
+        if total > 0:
+            vector = vector / total
+
+        return vector
+
+    def compute_morphological_fingerprint(self, region: str) -> Optional[np.ndarray]:
+        """
+        Morphological fingerprint = aggregated neuron features
+
+        Uses REAL schema:
+        MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region {acronym: $region})
+        RETURN avg(n.axonal_length), avg(n.dendritic_length), ...
+        """
+        query = """
+        MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region {acronym: $acronym})
+        RETURN 
+            avg(n.axonal_length) AS avg_axon_len,
+            avg(n.dendritic_length) AS avg_dend_len,
+            avg(n.axonal_surface) AS avg_axon_surf,
+            avg(n.dendritic_surface) AS avg_dend_surf,
+            avg(n.number_of_stems) AS avg_stems,
+            avg(n.soma_surface) AS avg_soma
+        """
+
+        result = self.db.run(query, {'acronym': region})
+
+        if not result['success'] or not result['data'] or not result['data'][0]:
+            return None
+
+        data = result['data'][0]
+
+        # Build feature vector
+        vector = np.array([
+            data.get('avg_axon_len') or 0.0,
+            data.get('avg_dend_len') or 0.0,
+            data.get('avg_axon_surf') or 0.0,
+            data.get('avg_dend_surf') or 0.0,
+            data.get('avg_stems') or 0.0,
+            data.get('avg_soma') or 0.0
+        ], dtype=float)
+
+        # L2 normalize
+        norm = np.linalg.norm(vector)
+        if norm > 0:
+            vector = vector / norm
+
+        return vector
+
+    def compute_projection_fingerprint(self, region: str) -> Optional[np.ndarray]:
+        """
+        Projection fingerprint = target distribution
+
+        Uses PROJECT_TO relationship (same as before)
+        """
+        query = """
+        MATCH (r:Region {acronym: $acronym})-[p:PROJECT_TO]->(t:Region)
+        RETURN t.acronym AS target, p.weight AS weight
+        ORDER BY t.acronym
+        """
+
+        result = self.db.run(query, {'acronym': region})
+
+        if not result['success'] or not result['data']:
+            return None
+
+        all_targets = self._get_all_targets()
+
+        target_dict = {row['target']: row['weight'] or 0.0 for row in result['data']}
+        vector = np.array([target_dict.get(t, 0.0) for t in all_targets])
+
+        # Normalize
+        total = np.sum(vector)
+        if total > 0:
+            vector = vector / total
+
+        return vector
+
+    def compute_similarity(self, fp1: np.ndarray, fp2: np.ndarray,
+                          metric: str = 'cosine') -> float:
+        """Compute similarity between fingerprints"""
+        if metric == 'cosine':
+            norm1, norm2 = np.linalg.norm(fp1), np.linalg.norm(fp2)
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            return float(np.dot(fp1, fp2) / (norm1 * norm2))
+        elif metric == 'correlation':
+            if len(fp1) < 2:
+                return 0.0
+            r, _ = stats.pearsonr(fp1, fp2)
+            return float(r)
+        else:
+            return 0.0
+
+    def compute_mismatch_index(self, region1: str, region2: str) -> Optional[Dict[str, float]]:
+        """
+        Compute cross-modal mismatch (Figure 4 metric)
+
+        MM_GM = |sim_molecular - sim_morphological|
+        MM_GP = |sim_molecular - sim_projection|
+        """
+        fp1 = self.compute_region_fingerprint(region1)
+        fp2 = self.compute_region_fingerprint(region2)
+
+        if fp1 is None or fp2 is None:
+            return None
+
+        sim_mol = self.compute_similarity(fp1['molecular'], fp2['molecular'])
+        sim_mor = self.compute_similarity(fp1['morphological'], fp2['morphological'])
+        sim_proj = self.compute_similarity(fp1['projection'], fp2['projection'])
+
+        return {
+            'sim_molecular': sim_mol,
+            'sim_morphological': sim_mor,
+            'sim_projection': sim_proj,
+            'mismatch_GM': abs(sim_mol - sim_mor),
+            'mismatch_GP': abs(sim_mol - sim_proj),
+            'mismatch_MP': abs(sim_mor - sim_proj)
+        }
+
+    def _get_all_clusters(self) -> List[str]:
+        """Get all cluster names for consistent dimensions"""
+        if self._cluster_cache is not None:
+            return self._cluster_cache
+
+        query = "MATCH (c:Cluster) RETURN c.name AS name ORDER BY c.name LIMIT 100"
+        result = self.db.run(query)
+
+        if result['success'] and result['data']:
+            self._cluster_cache = [row['name'] for row in result['data']]
+        else:
+            self._cluster_cache = []
+
+        return self._cluster_cache
+
+    def _get_all_targets(self) -> List[str]:
+        """Get all projection targets"""
+        if self._target_cache is not None:
+            return self._target_cache
+
+        query = """
+        MATCH ()-[:PROJECT_TO]->(t:Region)
+        RETURN DISTINCT t.acronym AS target
+        ORDER BY target
+        LIMIT 100
+        """
+        result = self.db.run(query)
+
+        if result['success'] and result['data']:
+            self._target_cache = [row['target'] for row in result['data']]
+        else:
+            self._target_cache = []
+
+        return self._target_cache
+
+    def get_region_fingerprint(self, region: str) -> Dict:
+        """
+        获取单个region的完整fingerprint
+
+        🆕 新增方法 - 支持高性能版本的批量计算
+
+        Args:
+            region: 脑区acronym
+
+        Returns:
+            {
+                'molecular': [array],
+                'morphological': [array],
+                'projection': [array]
+            }
+        """
+        try:
+            # 计算三种fingerprint
+            molecular = self._compute_molecular_fingerprint(region)
+            morphological = self._compute_morphological_fingerprint(region)
+            projection = self._compute_projection_fingerprint(region)
+
+            # 验证
+            if molecular is None or morphological is None or projection is None:
+                return None
+
+            # 转换为list (确保JSON可序列化)
+            return {
+                'molecular': molecular.tolist() if hasattr(molecular, 'tolist') else list(molecular),
+                'morphological': morphological.tolist() if hasattr(morphological, 'tolist') else list(morphological),
+                'projection': projection.tolist() if hasattr(projection, 'tolist') else list(projection)
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to get fingerprint for {region}: {e}")
+            return None
 # ==================== Production Agent V10 ====================
 
 class AIPOMCoTV10:
@@ -1227,61 +1494,132 @@ Return a JSON object with key "steps" containing an array:
 
     def _fdr_correction(self, params: Dict, state: EnhancedAgentState) -> Dict:
         """
-        FDR correction for multiple comparisons (修复版)
+        FDR correction (超强调试版)
 
-        🔧 修复: 正确处理p-values
+        🔧 全面调试和容错
         """
         alpha = params.get('alpha', 0.05)
 
-        # 从mismatch step获取p-values
+        logger.info(f"   === FDR Correction Debug ===")
+        logger.info(f"   Available data keys: {list(state.intermediate_data.keys())}")
+
+        # 🔧 增强数据查找
         mismatch_data = None
         mismatch_key = None
 
+        # 策略1: 查找包含'mismatch_combined'和'p_value'的数据
         for key, data in state.intermediate_data.items():
-            if data and isinstance(data, list) and len(data) > 0:
-                if 'mismatch_combined' in data[0] and 'p_value' in data[0]:
+            logger.debug(f"   Checking {key}: type={type(data)}, len={len(data) if isinstance(data, list) else 'N/A'}")
+
+            if not data:
+                continue
+
+            if isinstance(data, list) and len(data) > 0:
+                first_row = data[0]
+                logger.debug(
+                    f"     First row keys: {first_row.keys() if isinstance(first_row, dict) else 'Not a dict'}")
+
+                # 检查必需字段
+                has_mismatch = 'mismatch_combined' in first_row if isinstance(first_row, dict) else False
+                has_pvalue = 'p_value' in first_row if isinstance(first_row, dict) else False
+
+                logger.debug(f"     has_mismatch={has_mismatch}, has_pvalue={has_pvalue}")
+
+                if has_mismatch and has_pvalue:
                     mismatch_data = data
                     mismatch_key = key
-                    logger.info(f"   Found mismatch data in {key}")
+                    logger.info(f"   ✓ Found mismatch data in {key} ({len(data)} rows)")
                     break
 
+        # 策略2: 如果没找到，尝试从最近的step获取
         if not mismatch_data:
-            logger.error("   No mismatch data with p-values found")
+            logger.warning("   Strategy 1 failed, trying strategy 2...")
+
+            # 按key排序，找最近的step
+            sorted_keys = sorted([k for k in state.intermediate_data.keys() if k.startswith('step_')],
+                                 key=lambda x: int(x.split('_')[1]) if len(x.split('_')) > 1 and x.split('_')[
+                                     1].isdigit() else 0,
+                                 reverse=True)
+
+            logger.debug(f"   Sorted keys: {sorted_keys}")
+
+            for key in sorted_keys:
+                data = state.intermediate_data[key]
+                if data and isinstance(data, list) and len(data) > 0:
+                    first_row = data[0]
+                    if isinstance(first_row, dict) and 'mismatch_combined' in first_row:
+                        logger.info(f"   ✓ Found mismatch data in {key} (strategy 2)")
+                        mismatch_data = data
+                        mismatch_key = key
+
+                        # 🔧 如果没有p_value，添加默认值
+                        if 'p_value' not in first_row:
+                            logger.warning(f"   Adding default p_values")
+                            for row in mismatch_data:
+                                if 'p_value' not in row:
+                                    row['p_value'] = 1.0 - min(0.99, row.get('mismatch_combined', 0))
+
+                        break
+
+        # 最终检查
+        if not mismatch_data:
+            logger.error("   ✗ No mismatch data found!")
+            logger.error(f"   Available keys: {list(state.intermediate_data.keys())}")
+
+            # 打印所有数据的样本
+            for key, data in state.intermediate_data.items():
+                if data and isinstance(data, list) and len(data) > 0:
+                    logger.error(
+                        f"   {key} sample: {list(data[0].keys()) if isinstance(data[0], dict) else type(data[0])}")
+
             return {
                 'success': False,
-                'error': 'No mismatch data with p-values found for FDR correction',
+                'error': 'No mismatch data with p-values found',
                 'data': []
             }
 
         # 提取p-values
-        p_values = [row.get('p_value', 1.0) for row in mismatch_data]
+        p_values = []
+        for row in mismatch_data:
+            pval = row.get('p_value', None)
+            if pval is not None:
+                p_values.append(float(pval))
+            else:
+                logger.warning(
+                    f"   Row missing p_value: {row.get('region1', 'unknown')}-{row.get('region2', 'unknown')}")
+                p_values.append(1.0)
 
         logger.info(f"   FDR input: {len(p_values)} p-values")
         logger.info(f"   P-value range: [{min(p_values):.4f}, {max(p_values):.4f}]")
+        logger.info(f"   P-values < 0.05: {sum(1 for p in p_values if p < 0.05)}")
 
-        # 🎯 调用FDR correction
+        # 🎯 执行FDR correction
         try:
             q_values, significant = self.stats.fdr_correction(p_values, alpha)
 
-            # 添加到原数据
+            # 整合结果
             result_data = []
             for i, row in enumerate(mismatch_data):
                 result_data.append({
                     **row,
-                    'q_value': q_values[i],
-                    'fdr_significant': significant[i]
+                    'q_value': float(q_values[i]),
+                    'fdr_significant': bool(significant[i])
                 })
 
-            # 只保留显著的
+            # 筛选显著的
             significant_data = [r for r in result_data if r['fdr_significant']]
 
-            logger.info(f"   ✅ FDR correction: {len(significant_data)}/{len(result_data)} significant (α={alpha})")
+            logger.info(f"   ✅ FDR: {len(significant_data)}/{len(result_data)} significant (α={alpha})")
 
             if significant_data:
-                logger.info(
-                    f"   Top significant pair: {significant_data[0]['region1']}-{significant_data[0]['region2']}")
-                logger.info(f"     Mismatch: {significant_data[0]['mismatch_combined']:.3f}")
-                logger.info(f"     Q-value: {significant_data[0]['q_value']:.4f}")
+                top = significant_data[0]
+                logger.info(f"   Top: {top['region1']}-{top['region2']}")
+                logger.info(f"     Mismatch: {top['mismatch_combined']:.3f}")
+                logger.info(f"     Q-value: {top['q_value']:.4f}")
+            else:
+                logger.warning(f"   No significant pairs after FDR correction")
+                logger.warning(f"   Smallest q-value: {min(q_values):.4f}")
+                logger.warning(f"   Consider: alpha={alpha} may be too stringent")
 
             return {
                 'success': True,
@@ -1290,7 +1628,9 @@ Return a JSON object with key "steps" containing an array:
                 'test_type': 'fdr',
                 'alpha': alpha,
                 'n_significant': len(significant_data),
-                'n_total': len(result_data)
+                'n_total': len(result_data),
+                'min_q_value': float(min(q_values)),
+                'max_q_value': float(max(q_values))
             }
 
         except Exception as e:
@@ -1311,132 +1651,281 @@ Return a JSON object with key "steps" containing an array:
 
     def _compute_mismatch_matrix(self, params: Dict, state: EnhancedAgentState) -> Dict:
         """
-        计算cross-modal mismatch矩阵 (增强版 - 带统计显著性)
+        计算cross-modal mismatch矩阵 (对齐Figure 4方法)
 
-        🆕 添加:
-        1. Permutation test计算p-value
-        2. Effect size计算
-        3. Bootstrap confidence intervals
+        🎯 关键修复:
+        1. 先计算所有pairs的距离矩阵
+        2. 全局Min-Max归一化
+        3. 然后计算mismatch
         """
+        import time
+        start_time = time.time()
+
         # 获取regions
         regions = state.analysis_state.discovered_entities.get('Region', [])
 
         if not regions:
-            # 从之前的step获取
             for key, data in state.intermediate_data.items():
                 if data and isinstance(data, list) and len(data) > 0:
                     if 'region' in data[0]:
                         regions = list(set([row['region'] for row in data if row.get('region')]))
                         break
 
-        # 限制数量避免计算爆炸
-        regions = regions[:20]
+        max_regions = params.get('max_regions', 15)
+        regions = regions[:max_regions]
 
         if len(regions) < 2:
-            return {'success': False, 'error': 'Need at least 2 regions for mismatch computation'}
+            return {'success': False, 'error': 'Need at least 2 regions'}
 
-        logger.info(
-            f"   Computing mismatch for {len(regions)} regions ({len(regions) * (len(regions) - 1) // 2} pairs)...")
+        n = len(regions)
+        logger.info(f"   🚀 Computing mismatch (Figure 4 method) for {n} regions...")
 
-        # 计算所有pairs的mismatch
+        # 🚀 Step 1: 批量获取fingerprints
+        logger.info(f"   📊 Step 1/4: Batch fetching fingerprints...")
+
+        fingerprints = {}
+        failed_regions = []
+
+        for region in regions:
+            try:
+                mol = self.fingerprint.compute_molecular_fingerprint(region)
+                morph = self.fingerprint.compute_morphological_fingerprint(region)
+                proj = self.fingerprint.compute_projection_fingerprint(region)
+
+                if mol is not None and morph is not None and proj is not None:
+                    fingerprints[region] = {
+                        'molecular': mol,
+                        'morphological': morph,
+                        'projection': proj
+                    }
+                else:
+                    failed_regions.append(region)
+
+            except Exception as e:
+                logger.warning(f"      Failed {region}: {e}")
+                failed_regions.append(region)
+
+        valid_regions = [r for r in regions if r not in failed_regions]
+        n_valid = len(valid_regions)
+
+        logger.info(f"      ✓ Got fingerprints: {len(fingerprints)}/{n}")
+
+        if n_valid < 2:
+            return {'success': False, 'error': 'Insufficient valid regions'}
+
+        # 🚀 Step 2: 构建距离矩阵 (NxN)
+        logger.info(f"   📏 Step 2/4: Building distance matrices...")
+
+        import numpy as np
+        from scipy.spatial.distance import cosine, euclidean
+
+        mol_dist_matrix = np.zeros((n_valid, n_valid))
+        morph_dist_matrix = np.zeros((n_valid, n_valid))
+        proj_dist_matrix = np.zeros((n_valid, n_valid))
+
+        for i, region_a in enumerate(valid_regions):
+            for j, region_b in enumerate(valid_regions):
+                if i == j:
+                    continue
+
+                fp_a = fingerprints[region_a]
+                fp_b = fingerprints[region_b]
+
+                # 分子距离: 1 - cosine_similarity
+                try:
+                    mol_dist_matrix[i, j] = cosine(fp_a['molecular'], fp_b['molecular'])
+                except:
+                    mol_dist_matrix[i, j] = np.nan
+
+                # 形态距离: Euclidean
+                try:
+                    morph_a = fp_a['morphological']
+                    morph_b = fp_b['morphological']
+
+                    # 处理NaN
+                    valid_mask = ~(np.isnan(morph_a) | np.isnan(morph_b))
+                    if valid_mask.sum() > 0:
+                        morph_dist_matrix[i, j] = euclidean(
+                            morph_a[valid_mask],
+                            morph_b[valid_mask]
+                        )
+                    else:
+                        morph_dist_matrix[i, j] = np.nan
+                except:
+                    morph_dist_matrix[i, j] = np.nan
+
+                # 投射距离: 1 - cosine_similarity
+                try:
+                    proj_dist_matrix[i, j] = cosine(fp_a['projection'], fp_b['projection'])
+                except:
+                    proj_dist_matrix[i, j] = np.nan
+
+        print(f"      ✓ Distance matrices built")
+        # 在 "✓ Distance matrices built" 后面添加
+        print(
+            f"      Molecular distance range: [{np.nanmin(mol_dist_matrix):.3f}, {np.nanmax(mol_dist_matrix):.3f}]")
+        print(
+            f"      Morphology distance range: [{np.nanmin(morph_dist_matrix):.3f}, {np.nanmax(morph_dist_matrix):.3f}]")
+        print(
+            f"      Projection distance range: [{np.nanmin(proj_dist_matrix):.3f}, {np.nanmax(proj_dist_matrix):.3f}]")
+
+        # 统计NaN数量
+        n_total = mol_dist_matrix.size
+        n_mol_nan = np.isnan(mol_dist_matrix).sum()
+        n_morph_nan = np.isnan(morph_dist_matrix).sum()
+        n_proj_nan = np.isnan(proj_dist_matrix).sum()
+
+        print(
+            f"      NaN counts: mol={n_mol_nan}/{n_total}, morph={n_morph_nan}/{n_total}, proj={n_proj_nan}/{n_total}")
+
+        # 🚀 Step 3: Min-Max归一化 (全局)
+        print(f"   🔧 Step 3/4: Normalizing distance matrices...")
+
+        def minmax_normalize(matrix):
+            """Min-Max归一化到[0,1]"""
+            valid = ~np.isnan(matrix)
+            if valid.sum() == 0:
+                return matrix
+
+            vmin = matrix[valid].min()
+            vmax = matrix[valid].max()
+
+            if vmax - vmin < 1e-9:
+                return np.zeros_like(matrix)
+
+            normalized = (matrix - vmin) / (vmax - vmin)
+            return normalized
+
+        mol_norm = minmax_normalize(mol_dist_matrix)
+        morph_norm = minmax_normalize(morph_dist_matrix)
+        proj_norm = minmax_normalize(proj_dist_matrix)
+
+        print(f"      ✓ Normalization complete")
+        print(f"      Normalized molecular range: [{np.nanmin(mol_norm):.3f}, {np.nanmax(mol_norm):.3f}]")
+        print(f"      Normalized morphology range: [{np.nanmin(morph_norm):.3f}, {np.nanmax(morph_norm):.3f}]")
+        print(f"      Normalized projection range: [{np.nanmin(proj_norm):.3f}, {np.nanmax(proj_norm):.3f}]")
+
+        # 🚀 Step 4: 计算Mismatch (归一化距离的差异)
+        print(f"   🧮 Step 4/4: Computing mismatches...")
+
         mismatch_results = []
 
         from itertools import combinations
-        import numpy as np
 
-        for region1, region2 in combinations(regions, 2):
-            # 🎯 调用fingerprint analyzer
-            mismatch = self.fingerprint.compute_mismatch_index(region1, region2)
+        for i, region1 in enumerate(valid_regions):
+            for j, region2 in enumerate(valid_regions):
+                if i >= j:  # 只计算上三角
+                    continue
 
-            if mismatch:
-                # 基础mismatch scores
-                mismatch_GM = mismatch.get('mismatch_GM', 0)
-                mismatch_GP = mismatch.get('mismatch_GP', 0)
-                mismatch_MP = mismatch.get('mismatch_MP', 0)
+                # Mismatch = |normalized_distance_A - normalized_distance_B|
+                mismatch_GM = abs(mol_norm[i, j] - morph_norm[i, j])
+                mismatch_GP = abs(mol_norm[i, j] - proj_norm[i, j])
+                mismatch_MP = abs(morph_norm[i, j] - proj_norm[i, j])
+
                 mismatch_combined = (mismatch_GM + mismatch_GP + mismatch_MP) / 3
 
-                # 🆕 计算统计显著性 (Permutation test)
-                # 使用combined mismatch作为observed statistic
-                try:
-                    # 生成null distribution (通过随机permutation)
-                    null_mismatches = []
-                    n_permutations = 100  # 降低计算量
-
-                    # 获取所有其他pairs的mismatch作为null distribution
-                    random_pairs = []
-                    all_other_regions = [r for r in regions if r not in [region1, region2]]
-
-                    if len(all_other_regions) >= 2:
-                        # 随机采样其他pairs
-                        for _ in range(min(n_permutations, len(all_other_regions))):
-                            import random
-                            r1, r2 = random.sample(all_other_regions, 2)
-                            null_mismatch = self.fingerprint.compute_mismatch_index(r1, r2)
-                            if null_mismatch:
-                                null_combined = (
-                                                        null_mismatch.get('mismatch_GM', 0) +
-                                                        null_mismatch.get('mismatch_GP', 0) +
-                                                        null_mismatch.get('mismatch_MP', 0)
-                                                ) / 3
-                                null_mismatches.append(null_combined)
-
-                    # 计算p-value
-                    if null_mismatches:
-                        null_mismatches = np.array(null_mismatches)
-                        p_value = np.mean(null_mismatches >= mismatch_combined)
-
-                        # 避免p=0
-                        if p_value == 0:
-                            p_value = 1.0 / (len(null_mismatches) + 1)
-                    else:
-                        # Fallback: 基于mismatch score转换
-                        # 高mismatch → 低p-value
-                        p_value = 1.0 - min(0.99, mismatch_combined)
-
-                except Exception as e:
-                    logger.warning(f"   Failed to compute p-value for {region1}-{region2}: {e}")
-                    # Fallback
-                    p_value = 1.0 - min(0.99, mismatch_combined)
-
-                # 🆕 计算effect size (使用mismatch score作为proxy)
-                effect_size = mismatch_combined  # 简化版，实际应该用Cohen's d
+                # 相似度 (用于报告)
+                sim_molecular = 1 - mol_dist_matrix[i, j]
+                sim_morphological = 1 - morph_norm[i, j]  # 归一化后的
+                sim_projection = 1 - proj_dist_matrix[i, j]
 
                 mismatch_results.append({
                     'region1': region1,
                     'region2': region2,
-                    'mismatch_GM': mismatch_GM,
-                    'mismatch_GP': mismatch_GP,
-                    'mismatch_MP': mismatch_MP,
-                    'mismatch_combined': mismatch_combined,
-                    'sim_molecular': mismatch.get('sim_molecular', 0),
-                    'sim_morphological': mismatch.get('sim_morphological', 0),
-                    'sim_projection': mismatch.get('sim_projection', 0),
-                    # 🆕 统计信息
-                    'p_value': float(p_value),
-                    'effect_size': float(effect_size),
-                    'n_permutations': len(null_mismatches) if null_mismatches else 0
+                    'mismatch_GM': float(mismatch_GM),
+                    'mismatch_GP': float(mismatch_GP),
+                    'mismatch_MP': float(mismatch_MP),
+                    'mismatch_combined': float(mismatch_combined),
+                    'sim_molecular': float(sim_molecular),
+                    'sim_morphological': float(sim_morphological),
+                    'sim_projection': float(sim_projection),
+                    # 距离值 (调试用)
+                    'dist_molecular': float(mol_dist_matrix[i, j]),
+                    'dist_morphological': float(morph_dist_matrix[i, j]),
+                    'dist_projection': float(proj_dist_matrix[i, j])
                 })
 
-        # 按mismatch排序
+        # 统计检验
+        all_mismatches = [r['mismatch_combined'] for r in mismatch_results]
+        mean_m = np.mean(all_mismatches)
+        std_m = np.std(all_mismatches)
+
+        for result in mismatch_results:
+            m = result['mismatch_combined']
+
+            if std_m > 0:
+                z_score = (m - mean_m) / std_m
+                from scipy import stats
+                p_value = 2 * (1 - stats.norm.cdf(abs(z_score)))
+            else:
+                z_score = 0
+                p_value = 1.0
+
+            result['p_value'] = float(p_value)
+            result['z_score'] = float(z_score)
+            result['effect_size'] = float(m)
+            result['n_permutations'] = 0
+
         mismatch_results.sort(key=lambda x: x['mismatch_combined'], reverse=True)
 
-        # Top-N
-        n_top = params.get('n_pairs', 10)
-        top_mismatches = mismatch_results[:n_top]
+        elapsed = time.time() - start_time
 
-        logger.info(f"   ✅ Computed {len(mismatch_results)} mismatches")
-        if top_mismatches:
-            logger.info(f"   Top mismatch: {top_mismatches[0]['region1']}-{top_mismatches[0]['region2']}")
-            logger.info(f"     Score: {top_mismatches[0]['mismatch_combined']:.3f}")
-            logger.info(f"     P-value: {top_mismatches[0]['p_value']:.4f}")
+        print(f"   ✅ Completed in {elapsed:.1f}s")
+        print(f"      Total pairs: {len(mismatch_results)}")
+
+        if mismatch_results:
+            top = mismatch_results[0]
+            print(f"      Top: {top['region1']}-{top['region2']}")
+            print(f"        Mismatch: {top['mismatch_combined']:.3f}")
+            print(f"        P-value: {top['p_value']:.4f}")
+
+            # 🔍 显示top 5用于验证
+            print(f"      Top 5 pairs:")
+            for i, pair in enumerate(mismatch_results[:5], 1):
+                print(f"        {i}. {pair['region1']}-{pair['region2']}: {pair['mismatch_combined']:.3f}")
 
         return {
             'success': True,
             'data': mismatch_results,
             'rows': len(mismatch_results),
             'analysis_type': 'cross_modal_mismatch',
-            'top_pairs': top_mismatches
+            'computation_time': elapsed,
+            'method': 'figure4_compatible'
         }
+
+    def _compute_cosine_similarity(self, vec1, vec2):
+        """
+        快速计算余弦相似度
+
+        🚀 优化: 使用NumPy向量化操作
+        """
+        import numpy as np
+
+        if not vec1 or not vec2:
+            return 0.0
+
+        # 转换为NumPy数组
+        v1 = np.array(vec1, dtype=float)
+        v2 = np.array(vec2, dtype=float)
+
+        # 确保长度一致
+        if len(v1) != len(v2):
+            # Pad或truncate
+            max_len = max(len(v1), len(v2))
+            if len(v1) < max_len:
+                v1 = np.pad(v1, (0, max_len - len(v1)))
+            if len(v2) < max_len:
+                v2 = np.pad(v2, (0, max_len - len(v2)))
+
+        # 余弦相似度
+        dot_product = np.dot(v1, v2)
+        norm1 = np.linalg.norm(v1)
+        norm2 = np.linalg.norm(v2)
+
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+
+        return float(dot_product / (norm1 * norm2))
 
     def _interpret_statistical_result(self, test_result: Dict, effect_size: float) -> str:
         """解释统计结果"""
@@ -1847,13 +2336,13 @@ def test_car3_comprehensive():
         neo4j_pwd=os.getenv("NEO4J_PASSWORD", "neuroxiv"),
         database=os.getenv("NEO4J_DATABASE", "neo4j"),
         schema_json_path="./schema_output/schema.json",
-        openai_api_key=os.getenv("OPENAI_API_KEY",""),
+        openai_api_key=os.getenv("OPENAI_API_KEY"),
         model="gpt-4o"
     )
 
     # 🎯 关键: 使用"comprehensive"触发深度分析
     # question = "Give me a comprehensive analysis of Car3+ neurons"
-    question = "Which brain regions show the highest cross-modal mismatch?"
+    question = "Which brain region pairs show the highest cross-modal mismatch in the top 30 brain regions with most neurons?"
     result = agent.answer(question, max_iterations=12)
 
     print("\n" + "=" * 80)

@@ -222,32 +222,63 @@ class RealFingerprintAnalyzer:
 
     def compute_projection_fingerprint(self, region: str) -> Optional[np.ndarray]:
         """
-        Projection fingerprint = target distribution
+        计算投射指纹 (对齐Ground Truth - 使用Neuron->Subregion)
 
-        Uses PROJECT_TO relationship (same as before)
+        🔧 关键修复：
+        1. 从Neuron级别聚合
+        2. 投射目标是Subregion（不是Region）
+        3. 聚合三种location关系
         """
         query = """
-        MATCH (r:Region {acronym: $acronym})-[p:PROJECT_TO]->(t:Region)
-        RETURN t.acronym AS target, p.weight AS weight
-        ORDER BY t.acronym
+        MATCH (r:Region {acronym: $acronym})
+
+        // 找属于这个区域的神经元
+        OPTIONAL MATCH (n1:Neuron)-[:LOCATE_AT]->(r)
+        OPTIONAL MATCH (n2:Neuron)-[:LOCATE_AT_SUBREGION]->(r)
+        OPTIONAL MATCH (n3:Neuron)-[:LOCATE_AT_ME_SUBREGION]->(r)
+        WITH r, (COLLECT(DISTINCT n1) + COLLECT(DISTINCT n2) + COLLECT(DISTINCT n3)) AS ns
+        UNWIND ns AS n
+        WITH DISTINCT n
+        WHERE n IS NOT NULL
+
+        // 找这些神经元的投射到Subregion
+        MATCH (n)-[p:PROJECT_TO]->(t:Subregion)
+        WHERE p.weight IS NOT NULL AND p.weight > 0
+
+        WITH t.acronym AS tgt_subregion,
+             SUM(p.weight) AS total_weight_to_tgt
+        RETURN
+          tgt_subregion,
+          total_weight_to_tgt
+        ORDER BY total_weight_to_tgt DESC
         """
 
         result = self.db.run(query, {'acronym': region})
 
         if not result['success'] or not result['data']:
+            logger.warning(f"No projection data for {region}")
             return None
 
+        # 获取所有Subregion targets
         all_targets = self._get_all_targets()
 
-        target_dict = {row['target']: row['weight'] or 0.0 for row in result['data']}
-        vector = np.array([target_dict.get(t, 0.0) for t in all_targets])
+        # 构建原始权重向量
+        target_dict = {row['tgt_subregion']: row['total_weight_to_tgt']
+                       for row in result['data']}
 
-        # Normalize
-        total = np.sum(vector)
+        raw_values = np.array([target_dict.get(t, 0.0) for t in all_targets])
+
+        # Log稳定化（对齐Ground Truth）
+        log_values = np.log10(1 + raw_values)
+
+        # 归一化成概率分布
+        total = log_values.sum()
         if total > 0:
-            vector = vector / total
+            signature = log_values / (total + 1e-9)
+        else:
+            signature = log_values
 
-        return vector
+        return signature
 
     def compute_similarity(self, fp1: np.ndarray, fp2: np.ndarray,
                           metric: str = 'cosine') -> float:
@@ -318,22 +349,30 @@ class RealFingerprintAnalyzer:
         return self._cluster_cache
 
     def _get_all_targets(self) -> List[str]:
-        """Get all projection targets"""
+        """
+        获取所有投射目标Subregion (对齐Ground Truth)
+
+        🔧 修复：从Subregion获取，不是Region
+        """
         if self._target_cache is not None:
             return self._target_cache
 
         query = """
-        MATCH ()-[:PROJECT_TO]->(t:Region)
+        MATCH ()-[:PROJECT_TO]->(t:Subregion)
+        WHERE t.acronym IS NOT NULL
         RETURN DISTINCT t.acronym AS target
         ORDER BY target
-        LIMIT 100
+        LIMIT 500
         """
+
         result = self.db.run(query)
 
         if result['success'] and result['data']:
             self._target_cache = [row['target'] for row in result['data']]
+            logger.info(f"Found {len(self._target_cache)} Subregion projection targets")
         else:
             self._target_cache = []
+            logger.error("No Subregion targets found!")
 
         return self._target_cache
 

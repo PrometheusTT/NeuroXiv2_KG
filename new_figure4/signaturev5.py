@@ -1,10 +1,6 @@
 """
-脑区指纹计算与可视化 - 增强版本
+脑区指纹计算与可视化 - 修复版本
 根据知识图谱计算分子指纹、形态指纹和投射指纹，并分析区域间的mismatch
-
-新增功能：
-1. 形态-投射 mismatch矩阵
-2. 全脑区对的详细统计分析（相似/不相似模式）
 
 依赖：
 - neo4j
@@ -391,9 +387,9 @@ class BrainRegionFingerprints:
 
     def compute_mismatch_matrices(self, mol_dist_df: pd.DataFrame,
                                   morph_dist_df: pd.DataFrame,
-                                  proj_dist_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                                  proj_dist_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
-        计算mismatch矩阵（增强版：添加morph-proj mismatch）
+        计算mismatch矩阵
 
         Args:
             mol_dist_df: 分子距离矩阵
@@ -401,7 +397,7 @@ class BrainRegionFingerprints:
             proj_dist_df: 投射距离矩阵
 
         Returns:
-            (mol_morph_mismatch, mol_proj_mismatch, morph_proj_mismatch)
+            (mol_morph_mismatch, mol_proj_mismatch)
         """
 
         # Min-Max归一化到[0,1]
@@ -425,423 +421,11 @@ class BrainRegionFingerprints:
         morph_norm = minmax_normalize(morph_dist_df)
         proj_norm = minmax_normalize(proj_dist_df)
 
-        # 计算三种mismatch
+        # 计算mismatch
         mol_morph_mismatch = np.abs(mol_norm - morph_norm)
         mol_proj_mismatch = np.abs(mol_norm - proj_norm)
-        morph_proj_mismatch = np.abs(morph_norm - proj_norm)
 
-        return mol_morph_mismatch, mol_proj_mismatch, morph_proj_mismatch
-
-    # ==================== 新增：全脑区统计分析 ====================
-
-    def analyze_all_region_pairs(self,
-                                 mol_dist_df: pd.DataFrame,
-                                 morph_dist_df: pd.DataFrame,
-                                 proj_dist_df: pd.DataFrame,
-                                 output_dir: str = ".") -> Dict:
-        """
-        统计所有脑区对的相似/不相似模式
-
-        相似性定义：
-        - 分子相似性：cosine similarity > 0.7 (距离 < 0.3)
-        - 形态相似性：标准化后的距离 < 0.3
-        - 投射相似性：cosine similarity > 0.7 (距离 < 0.3)
-
-        Args:
-            mol_dist_df: 分子距离矩阵
-            morph_dist_df: 形态距离矩阵
-            proj_dist_df: 投射距离矩阵
-            output_dir: 输出目录
-
-        Returns:
-            统计结果字典
-        """
-        print("\n" + "=" * 80)
-        print("全脑区对统计分析")
-        print("=" * 80)
-
-        # 定义相似度阈值
-        MOL_SIMILAR_THRESHOLD = 0.3  # 分子距离 < 0.3 视为相似
-        PROJ_SIMILAR_THRESHOLD = 0.3  # 投射距离 < 0.3 视为相似
-
-        # 形态距离需要标准化（因为是欧氏距离）
-        morph_values = morph_dist_df.values
-        valid_morph = ~np.isnan(morph_values)
-        if valid_morph.sum() > 0:
-            morph_min = morph_values[valid_morph].min()
-            morph_max = morph_values[valid_morph].max()
-            morph_normalized = (morph_values - morph_min) / (morph_max - morph_min + 1e-9)
-        else:
-            morph_normalized = morph_values
-
-        #  0.3  # 标准化后形态距离 < 0.3 视为相似
-        MORPH_SIMILAR_THRESHOLD = np.percentile(morph_normalized[valid_morph], 20)
-        # 初始化计数器
-        stats = {
-            'total_pairs': 0,
-            'valid_pairs': 0,
-
-            # 分子 vs 形态
-            'mol_sim_morph_dissim': 0,  # 分子相似，形态不相似
-            'mol_dissim_morph_sim': 0,  # 分子不相似，形态相似
-            'mol_sim_morph_sim': 0,     # 都相似
-            'mol_dissim_morph_dissim': 0,  # 都不相似
-
-            # 分子 vs 投射
-            'mol_sim_proj_dissim': 0,   # 分子相似，投射不相似
-            'mol_dissim_proj_sim': 0,   # 分子不相似，投射相似
-            'mol_sim_proj_sim': 0,      # 都相似
-            'mol_dissim_proj_dissim': 0,  # 都不相似
-
-            # 形态 vs 投射
-            'morph_sim_proj_dissim': 0,  # 形态相似，投射不相似
-            'morph_dissim_proj_sim': 0,  # 形态不相似，投射相似
-            'morph_sim_proj_sim': 0,     # 都相似
-            'morph_dissim_proj_dissim': 0,  # 都不相似
-
-            # 存储每种模式的示例脑区对
-            'examples': {
-                'mol_sim_morph_dissim': [],
-                'mol_dissim_morph_sim': [],
-                'mol_sim_proj_dissim': [],
-                'mol_dissim_proj_sim': [],
-                'morph_sim_proj_dissim': [],
-                'morph_dissim_proj_sim': [],
-            }
-        }
-
-        # 遍历所有脑区对（只计算上三角，避免重复）
-        regions = mol_dist_df.index.tolist()
-        n = len(regions)
-
-        for i in range(n):
-            for j in range(i + 1, n):
-                region_a = regions[i]
-                region_b = regions[j]
-
-                stats['total_pairs'] += 1
-
-                # 获取距离值
-                mol_dist = mol_dist_df.iloc[i, j]
-                morph_dist_norm = morph_normalized[i, j]
-                proj_dist = proj_dist_df.iloc[i, j]
-
-                # 跳过包含NaN的对
-                if np.isnan(mol_dist) or np.isnan(morph_dist_norm) or np.isnan(proj_dist):
-                    continue
-
-                stats['valid_pairs'] += 1
-
-                # 判断相似性
-                mol_similar = mol_dist < MOL_SIMILAR_THRESHOLD
-                morph_similar = morph_dist_norm < MORPH_SIMILAR_THRESHOLD
-                proj_similar = proj_dist < PROJ_SIMILAR_THRESHOLD
-
-                # ========== 分子 vs 形态 ==========
-                if mol_similar and not morph_similar:
-                    stats['mol_sim_morph_dissim'] += 1
-                    if len(stats['examples']['mol_sim_morph_dissim']) < 10:
-                        stats['examples']['mol_sim_morph_dissim'].append(
-                            (region_a, region_b, mol_dist, morph_dist_norm)
-                        )
-                elif not mol_similar and morph_similar:
-                    stats['mol_dissim_morph_sim'] += 1
-                    if len(stats['examples']['mol_dissim_morph_sim']) < 10:
-                        stats['examples']['mol_dissim_morph_sim'].append(
-                            (region_a, region_b, mol_dist, morph_dist_norm)
-                        )
-                elif mol_similar and morph_similar:
-                    stats['mol_sim_morph_sim'] += 1
-                else:  # both dissimilar
-                    stats['mol_dissim_morph_dissim'] += 1
-
-                # ========== 分子 vs 投射 ==========
-                if mol_similar and not proj_similar:
-                    stats['mol_sim_proj_dissim'] += 1
-                    if len(stats['examples']['mol_sim_proj_dissim']) < 10:
-                        stats['examples']['mol_sim_proj_dissim'].append(
-                            (region_a, region_b, mol_dist, proj_dist)
-                        )
-                elif not mol_similar and proj_similar:
-                    stats['mol_dissim_proj_sim'] += 1
-                    if len(stats['examples']['mol_dissim_proj_sim']) < 10:
-                        stats['examples']['mol_dissim_proj_sim'].append(
-                            (region_a, region_b, mol_dist, proj_dist)
-                        )
-                elif mol_similar and proj_similar:
-                    stats['mol_sim_proj_sim'] += 1
-                else:
-                    stats['mol_dissim_proj_dissim'] += 1
-
-                # ========== 形态 vs 投射 ==========
-                if morph_similar and not proj_similar:
-                    stats['morph_sim_proj_dissim'] += 1
-                    if len(stats['examples']['morph_sim_proj_dissim']) < 10:
-                        stats['examples']['morph_sim_proj_dissim'].append(
-                            (region_a, region_b, morph_dist_norm, proj_dist)
-                        )
-                elif not morph_similar and proj_similar:
-                    stats['morph_dissim_proj_sim'] += 1
-                    if len(stats['examples']['morph_dissim_proj_sim']) < 10:
-                        stats['examples']['morph_dissim_proj_sim'].append(
-                            (region_a, region_b, morph_dist_norm, proj_dist)
-                        )
-                elif morph_similar and proj_similar:
-                    stats['morph_sim_proj_sim'] += 1
-                else:
-                    stats['morph_dissim_proj_dissim'] += 1
-
-        # ========== 打印统计结果 ==========
-        self._print_statistics(stats)
-
-        # ========== 保存详细报告 ==========
-        self._save_statistics_report(stats, output_dir)
-
-        # ========== 可视化统计结果 ==========
-        self._visualize_statistics(stats, output_dir)
-
-        return stats
-
-    def _print_statistics(self, stats: Dict):
-        """打印统计结果到控制台"""
-        print(f"\n总脑区对数: {stats['total_pairs']:,}")
-        print(f"有效脑区对数（无NaN）: {stats['valid_pairs']:,}")
-        print(f"数据完整性: {stats['valid_pairs']/stats['total_pairs']*100:.1f}%")
-
-        print("\n" + "=" * 80)
-        print("【分子 vs 形态】")
-        print("=" * 80)
-        print(f"分子相似 & 形态不相似:  {stats['mol_sim_morph_dissim']:6,}  "
-              f"({stats['mol_sim_morph_dissim']/stats['valid_pairs']*100:5.2f}%)")
-        print(f"分子不相似 & 形态相似:  {stats['mol_dissim_morph_sim']:6,}  "
-              f"({stats['mol_dissim_morph_sim']/stats['valid_pairs']*100:5.2f}%)")
-        print(f"都相似:                {stats['mol_sim_morph_sim']:6,}  "
-              f"({stats['mol_sim_morph_sim']/stats['valid_pairs']*100:5.2f}%)")
-        print(f"都不相似:              {stats['mol_dissim_morph_dissim']:6,}  "
-              f"({stats['mol_dissim_morph_dissim']/stats['valid_pairs']*100:5.2f}%)")
-
-        print("\n" + "=" * 80)
-        print("【分子 vs 投射】")
-        print("=" * 80)
-        print(f"分子相似 & 投射不相似:  {stats['mol_sim_proj_dissim']:6,}  "
-              f"({stats['mol_sim_proj_dissim']/stats['valid_pairs']*100:5.2f}%)")
-        print(f"分子不相似 & 投射相似:  {stats['mol_dissim_proj_sim']:6,}  "
-              f"({stats['mol_dissim_proj_sim']/stats['valid_pairs']*100:5.2f}%)")
-        print(f"都相似:                {stats['mol_sim_proj_sim']:6,}  "
-              f"({stats['mol_sim_proj_sim']/stats['valid_pairs']*100:5.2f}%)")
-        print(f"都不相似:              {stats['mol_dissim_proj_dissim']:6,}  "
-              f"({stats['mol_dissim_proj_dissim']/stats['valid_pairs']*100:5.2f}%)")
-
-        print("\n" + "=" * 80)
-        print("【形态 vs 投射】")
-        print("=" * 80)
-        print(f"形态相似 & 投射不相似:  {stats['morph_sim_proj_dissim']:6,}  "
-              f"({stats['morph_sim_proj_dissim']/stats['valid_pairs']*100:5.2f}%)")
-        print(f"形态不相似 & 投射相似:  {stats['morph_dissim_proj_sim']:6,}  "
-              f"({stats['morph_dissim_proj_sim']/stats['valid_pairs']*100:5.2f}%)")
-        print(f"都相似:                {stats['morph_sim_proj_sim']:6,}  "
-              f"({stats['morph_sim_proj_sim']/stats['valid_pairs']*100:5.2f}%)")
-        print(f"都不相似:              {stats['morph_dissim_proj_dissim']:6,}  "
-              f"({stats['morph_dissim_proj_dissim']/stats['valid_pairs']*100:5.2f}%)")
-
-        print("=" * 80 + "\n")
-
-    def _save_statistics_report(self, stats: Dict, output_dir: str):
-        """保存详细的统计报告到文本文件"""
-        import os
-        os.makedirs(output_dir, exist_ok=True)
-
-        report_path = f"{output_dir}/全脑区对统计报告.txt"
-
-        with open(report_path, 'w', encoding='utf-8') as f:
-            f.write("=" * 100 + "\n")
-            f.write("脑区指纹相似性/不相似性统计报告\n")
-            f.write("=" * 100 + "\n\n")
-
-            f.write(f"总脑区对数: {stats['total_pairs']:,}\n")
-            f.write(f"有效脑区对数（无NaN）: {stats['valid_pairs']:,}\n")
-            f.write(f"数据完整性: {stats['valid_pairs']/stats['total_pairs']*100:.1f}%\n\n")
-
-            # 分子 vs 形态
-            f.write("=" * 100 + "\n")
-            f.write("【分子 vs 形态】\n")
-            f.write("=" * 100 + "\n\n")
-
-            f.write(f"1. 分子相似 & 形态不相似:  {stats['mol_sim_morph_dissim']:,} 对 "
-                   f"({stats['mol_sim_morph_dissim']/stats['valid_pairs']*100:.2f}%)\n")
-            f.write("   含义：细胞类型组成相似，但神经元形态策略不同\n")
-            f.write("   示例（前10对）：\n")
-            for region_a, region_b, mol_d, morph_d in stats['examples']['mol_sim_morph_dissim']:
-                f.write(f"      {region_a} <-> {region_b}  "
-                       f"(mol_dist={mol_d:.3f}, morph_dist={morph_d:.3f})\n")
-
-            f.write(f"\n2. 分子不相似 & 形态相似:  {stats['mol_dissim_morph_sim']:,} 对 "
-                   f"({stats['mol_dissim_morph_sim']/stats['valid_pairs']*100:.2f}%)\n")
-            f.write("   含义：细胞类型组成不同，但神经元形态策略收敛\n")
-            f.write("   示例（前10对）：\n")
-            for region_a, region_b, mol_d, morph_d in stats['examples']['mol_dissim_morph_sim']:
-                f.write(f"      {region_a} <-> {region_b}  "
-                       f"(mol_dist={mol_d:.3f}, morph_dist={morph_d:.3f})\n")
-
-            f.write(f"\n3. 都相似:  {stats['mol_sim_morph_sim']:,} 对 "
-                   f"({stats['mol_sim_morph_sim']/stats['valid_pairs']*100:.2f}%)\n")
-            f.write(f"4. 都不相似:  {stats['mol_dissim_morph_dissim']:,} 对 "
-                   f"({stats['mol_dissim_morph_dissim']/stats['valid_pairs']*100:.2f}%)\n\n")
-
-            # 分子 vs 投射
-            f.write("=" * 100 + "\n")
-            f.write("【分子 vs 投射】\n")
-            f.write("=" * 100 + "\n\n")
-
-            f.write(f"1. 分子相似 & 投射不相似:  {stats['mol_sim_proj_dissim']:,} 对 "
-                   f"({stats['mol_sim_proj_dissim']/stats['valid_pairs']*100:.2f}%)\n")
-            f.write("   含义：细胞类型组成相似，但投射到不同的目标区域\n")
-            f.write("   示例（前10对）：\n")
-            for region_a, region_b, mol_d, proj_d in stats['examples']['mol_sim_proj_dissim']:
-                f.write(f"      {region_a} <-> {region_b}  "
-                       f"(mol_dist={mol_d:.3f}, proj_dist={proj_d:.3f})\n")
-
-            f.write(f"\n2. 分子不相似 & 投射相似:  {stats['mol_dissim_proj_sim']:,} 对 "
-                   f"({stats['mol_dissim_proj_sim']/stats['valid_pairs']*100:.2f}%)\n")
-            f.write("   含义：细胞类型组成不同，但投射模式相似（功能角色相似）\n")
-            f.write("   示例（前10对）：\n")
-            for region_a, region_b, mol_d, proj_d in stats['examples']['mol_dissim_proj_sim']:
-                f.write(f"      {region_a} <-> {region_b}  "
-                       f"(mol_dist={mol_d:.3f}, proj_dist={proj_d:.3f})\n")
-
-            f.write(f"\n3. 都相似:  {stats['mol_sim_proj_sim']:,} 对 "
-                   f"({stats['mol_sim_proj_sim']/stats['valid_pairs']*100:.2f}%)\n")
-            f.write(f"4. 都不相似:  {stats['mol_dissim_proj_dissim']:,} 对 "
-                   f"({stats['mol_dissim_proj_dissim']/stats['valid_pairs']*100:.2f}%)\n\n")
-
-            # 形态 vs 投射
-            f.write("=" * 100 + "\n")
-            f.write("【形态 vs 投射】\n")
-            f.write("=" * 100 + "\n\n")
-
-            f.write(f"1. 形态相似 & 投射不相似:  {stats['morph_sim_proj_dissim']:,} 对 "
-                   f"({stats['morph_sim_proj_dissim']/stats['valid_pairs']*100:.2f}%)\n")
-            f.write("   含义：神经元形态相似，但连接到不同的脑网络\n")
-            f.write("   示例（前10对）：\n")
-            for region_a, region_b, morph_d, proj_d in stats['examples']['morph_sim_proj_dissim']:
-                f.write(f"      {region_a} <-> {region_b}  "
-                       f"(morph_dist={morph_d:.3f}, proj_dist={proj_d:.3f})\n")
-
-            f.write(f"\n2. 形态不相似 & 投射相似:  {stats['morph_dissim_proj_sim']:,} 对 "
-                   f"({stats['morph_dissim_proj_sim']/stats['valid_pairs']*100:.2f}%)\n")
-            f.write("   含义：神经元形态不同，但投射到相似的目标（多样化实现相似功能）\n")
-            f.write("   示例（前10对）：\n")
-            for region_a, region_b, morph_d, proj_d in stats['examples']['morph_dissim_proj_sim']:
-                f.write(f"      {region_a} <-> {region_b}  "
-                       f"(morph_dist={morph_d:.3f}, proj_dist={proj_d:.3f})\n")
-
-            f.write(f"\n3. 都相似:  {stats['morph_sim_proj_sim']:,} 对 "
-                   f"({stats['morph_sim_proj_sim']/stats['valid_pairs']*100:.2f}%)\n")
-            f.write(f"4. 都不相似:  {stats['morph_dissim_proj_dissim']:,} 对 "
-                   f"({stats['morph_dissim_proj_dissim']/stats['valid_pairs']*100:.2f}%)\n\n")
-
-            f.write("=" * 100 + "\n")
-
-        print(f"\n详细统计报告已保存: {report_path}")
-
-    def _visualize_statistics(self, stats: Dict, output_dir: str):
-        """可视化统计结果"""
-        import os
-        os.makedirs(output_dir, exist_ok=True)
-
-        fig, axes = plt.subplots(1, 3, figsize=(20, 6))
-
-        # 定义颜色
-        colors = ['#E74C3C', '#3498DB', '#2ECC71', '#95A5A6']
-
-        # ========== 1. 分子 vs 形态 ==========
-        ax = axes[0]
-        categories = ['Mol-Sim\nMorph-Dissim', 'Mol-Dissim\nMorph-Sim',
-                     'Both Similar', 'Both Dissimilar']
-        values = [
-            stats['mol_sim_morph_dissim'],
-            stats['mol_dissim_morph_sim'],
-            stats['mol_sim_morph_sim'],
-            stats['mol_dissim_morph_dissim']
-        ]
-        percentages = [v/stats['valid_pairs']*100 for v in values]
-
-        bars = ax.bar(categories, values, color=colors, alpha=0.8, edgecolor='black', linewidth=1.5)
-        ax.set_ylabel('Number of Region Pairs', fontsize=14, fontweight='bold')
-        ax.set_title('Molecular vs Morphology', fontsize=16, fontweight='bold')
-        ax.set_ylim(0, max(values) * 1.15)
-
-        # 添加数值标签
-        for bar, val, pct in zip(bars, values, percentages):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{val:,}\n({pct:.1f}%)',
-                   ha='center', va='bottom', fontsize=11, fontweight='bold')
-
-        ax.grid(axis='y', alpha=0.3, linestyle='--')
-        ax.set_xticklabels(categories, fontsize=12)
-
-        # ========== 2. 分子 vs 投射 ==========
-        ax = axes[1]
-        categories = ['Mol-Sim\nProj-Dissim', 'Mol-Dissim\nProj-Sim',
-                     'Both Similar', 'Both Dissimilar']
-        values = [
-            stats['mol_sim_proj_dissim'],
-            stats['mol_dissim_proj_sim'],
-            stats['mol_sim_proj_sim'],
-            stats['mol_dissim_proj_dissim']
-        ]
-        percentages = [v/stats['valid_pairs']*100 for v in values]
-
-        bars = ax.bar(categories, values, color=colors, alpha=0.8, edgecolor='black', linewidth=1.5)
-        ax.set_ylabel('Number of Region Pairs', fontsize=14, fontweight='bold')
-        ax.set_title('Molecular vs Projection', fontsize=16, fontweight='bold')
-        ax.set_ylim(0, max(values) * 1.15)
-
-        for bar, val, pct in zip(bars, values, percentages):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{val:,}\n({pct:.1f}%)',
-                   ha='center', va='bottom', fontsize=11, fontweight='bold')
-
-        ax.grid(axis='y', alpha=0.3, linestyle='--')
-        ax.set_xticklabels(categories, fontsize=12)
-
-        # ========== 3. 形态 vs 投射 ==========
-        ax = axes[2]
-        categories = ['Morph-Sim\nProj-Dissim', 'Morph-Dissim\nProj-Sim',
-                     'Both Similar', 'Both Dissimilar']
-        values = [
-            stats['morph_sim_proj_dissim'],
-            stats['morph_dissim_proj_sim'],
-            stats['morph_sim_proj_sim'],
-            stats['morph_dissim_proj_dissim']
-        ]
-        percentages = [v/stats['valid_pairs']*100 for v in values]
-
-        bars = ax.bar(categories, values, color=colors, alpha=0.8, edgecolor='black', linewidth=1.5)
-        ax.set_ylabel('Number of Region Pairs', fontsize=14, fontweight='bold')
-        ax.set_title('Morphology vs Projection', fontsize=16, fontweight='bold')
-        ax.set_ylim(0, max(values) * 1.15)
-
-        for bar, val, pct in zip(bars, values, percentages):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{val:,}\n({pct:.1f}%)',
-                   ha='center', va='bottom', fontsize=11, fontweight='bold')
-
-        ax.grid(axis='y', alpha=0.3, linestyle='--')
-        ax.set_xticklabels(categories, fontsize=12)
-
-        plt.suptitle(f'Similarity/Dissimilarity Patterns Across All Brain Region Pairs (n={stats["valid_pairs"]:,})',
-                    fontsize=18, fontweight='bold', y=0.98)
-        plt.tight_layout()
-
-        output_path = f"{output_dir}/全脑区对统计可视化.png"
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close()
-
-        print(f"统计可视化已保存: {output_path}")
+        return mol_morph_mismatch, mol_proj_mismatch
 
     # ==================== 5. 数据保存 ====================
 
@@ -1238,7 +822,7 @@ and projection patterns."""
 
     def visualize_matrices(self, top_regions: List[str], output_dir: str = "."):
         """
-        可视化6个矩阵（增强版：添加morph-proj mismatch），并分别保存
+        可视化5个矩阵，并分别保存
 
         Args:
             top_regions: 要可视化的脑区列表
@@ -1293,17 +877,41 @@ and projection patterns."""
         proj_dist_df = pd.DataFrame(proj_dist, index=valid_regions, columns=valid_regions)
 
         # 计算相似度（1 - distance）
-        mol_sim = 1 - mol_dist_df
-        morph_sim = 1 - morph_dist_df / morph_dist_df.max().max()  # 标准化
-        proj_sim = 1 - proj_dist_df
+        # ========== 🔧 修复：使用统一的Min-Max归一化 ==========
+        def minmax_normalize_df(df):
+            """标准Min-Max归一化"""
+            values = df.values
+            valid = ~np.isnan(values)
+            if valid.sum() == 0:
+                return df
 
-        # 计算mismatch（三种）
-        mol_morph_mismatch, mol_proj_mismatch, morph_proj_mismatch = self.compute_mismatch_matrices(
+            vmin = values[valid].min()
+            vmax = values[valid].max()
+
+            if vmax - vmin < 1e-9:
+                return pd.DataFrame(np.zeros_like(values),
+                                    index=df.index, columns=df.columns)
+
+            normalized = (values - vmin) / (vmax - vmin)
+            return pd.DataFrame(normalized, index=df.index, columns=df.columns)
+
+        # 归一化距离
+        mol_dist_norm = minmax_normalize_df(mol_dist_df)
+        morph_dist_norm = minmax_normalize_df(morph_dist_df)  # ← 修复
+        proj_dist_norm = minmax_normalize_df(proj_dist_df)
+
+        # 计算相似度：1 - normalized_distance
+        mol_sim = 1 - mol_dist_norm
+        morph_sim = 1 - morph_dist_norm  # ← 修复：统一公式
+        proj_sim = 1 - proj_dist_norm
+
+        # 计算mismatch
+        mol_morph_mismatch, mol_proj_mismatch = self.compute_mismatch_matrices(
             mol_dist_df, morph_dist_df, proj_dist_df
         )
 
-        # ========== 1. 保存组合图（2x3布局，包含morph-proj mismatch）==========
-        fig, axes = plt.subplots(2, 3, figsize=(21, 13))
+        # ========== 1. 保存组合图 ==========
+        fig, axes = plt.subplots(2, 3, figsize=(20, 13))
         fig.suptitle('Brain Region Similarity and Mismatch Analysis',
                      fontsize=16, fontweight='bold', y=0.98)
 
@@ -1322,22 +930,17 @@ and projection patterns."""
                     xticklabels=True, yticklabels=True)
         axes[0, 2].set_title('Projection Similarity', fontsize=16, fontweight='bold')
 
-        sns.heatmap(mol_morph_mismatch, ax=axes[1, 0], cmap='YlOrRd',
+        sns.heatmap(mol_morph_mismatch, ax=axes[1, 0], cmap='RdYlBu_r',
                     vmin=0, vmax=1, square=True, cbar_kws={'label': 'Mismatch'},
                     xticklabels=True, yticklabels=True)
-        axes[1, 0].set_title('Molecular-Morphology Mismatch', fontsize=16, fontweight='bold')
+        # axes[1, 0].set_title('Molecular-Morphology Mismatch', fontsize=16, fontweight='bold')
 
-        sns.heatmap(mol_proj_mismatch, ax=axes[1, 1], cmap='YlOrRd',
+        sns.heatmap(mol_proj_mismatch, ax=axes[1, 1], cmap='RdYlBu_r',
                     vmin=0, vmax=1, square=True, cbar_kws={'label': 'Mismatch'},
                     xticklabels=True, yticklabels=True)
-        axes[1, 1].set_title('Molecular-Projection Mismatch', fontsize=16, fontweight='bold')
+        # axes[1, 1].set_title('Molecular-Projection Mismatch', fontsize=16, fontweight='bold')
 
-        # 新增：Morphology-Projection Mismatch
-        sns.heatmap(morph_proj_mismatch, ax=axes[1, 2], cmap='YlOrRd',
-                    vmin=0, vmax=1, square=True, cbar_kws={'label': 'Mismatch'},
-                    xticklabels=True, yticklabels=True)
-        axes[1, 2].set_title('Morphology-Projection Mismatch', fontsize=16, fontweight='bold')
-
+        axes[1, 2].axis('off')
         plt.tight_layout()
 
         combined_path = f"{output_dir}/all_matrices_combined.png"
@@ -1392,10 +995,10 @@ and projection patterns."""
 
         # 分子-形态 Mismatch
         fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(mol_morph_mismatch, ax=ax, cmap='YlOrRd', vmin=0, vmax=1,
-                    square=True, cbar_kws={'label': 'Mismatch'},
+        sns.heatmap(mol_morph_mismatch, ax=ax, cmap='RdYlBu_r', vmin=0, vmax=1,
+                    square=True,
                     xticklabels=True, yticklabels=True, annot=False)
-        ax.set_title('Molecular-Morphology Mismatch', fontsize=20, fontweight='bold')
+        # ax.set_title('Molecular-Morphology Mismatch', fontsize=20, fontweight='bold')
         ax.set_xticklabels(ax.get_xticklabels(), fontsize=16)
         ax.set_yticklabels(ax.get_yticklabels(), fontsize=16)
         ax.set_xlabel('Region', fontsize=20,fontweight='bold')
@@ -1406,30 +1009,15 @@ and projection patterns."""
 
         # 分子-投射 Mismatch
         fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(mol_proj_mismatch, ax=ax, cmap='YlOrRd', vmin=0, vmax=1,
-                    square=True, cbar_kws={'label': 'Mismatch'},
-                    xticklabels=True, yticklabels=True, annot=False)
-        ax.set_title('Molecular-Projection Mismatch', fontsize=20, fontweight='bold')
+        sns.heatmap(mol_proj_mismatch, ax=ax, cmap='RdYlBu_r', vmin=0, vmax=1,
+                    square=True,xticklabels=True, yticklabels=True, annot=False)
+        # ax.set_title('Molecular-Projection Mismatch', fontsize=20, fontweight='bold')
         ax.set_xticklabels(ax.get_xticklabels(), fontsize=16)
         ax.set_yticklabels(ax.get_yticklabels(), fontsize=16)
         ax.set_xlabel('Region', fontsize=20,fontweight='bold')
         ax.set_ylabel('Region', fontsize=20,fontweight='bold')
         plt.tight_layout()
         plt.savefig(f"{output_dir}/5_mol_proj_mismatch.png", dpi=1200, bbox_inches='tight')
-        plt.close()
-
-        # 新增：形态-投射 Mismatch
-        fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(morph_proj_mismatch, ax=ax, cmap='YlOrRd', vmin=0, vmax=1,
-                    square=True, cbar_kws={'label': 'Mismatch'},
-                    xticklabels=True, yticklabels=True, annot=False)
-        ax.set_title('Morphology-Projection Mismatch', fontsize=20, fontweight='bold')
-        ax.set_xticklabels(ax.get_xticklabels(), fontsize=16)
-        ax.set_yticklabels(ax.get_yticklabels(), fontsize=16)
-        ax.set_xlabel('Region', fontsize=20,fontweight='bold')
-        ax.set_ylabel('Region', fontsize=20,fontweight='bold')
-        plt.tight_layout()
-        plt.savefig(f"{output_dir}/6_morph_proj_mismatch.png", dpi=1200, bbox_inches='tight')
         plt.close()
 
         print("✓ 所有矩阵已单独保存")
@@ -1567,19 +1155,72 @@ and projection patterns."""
 
         return contrast
 
-    # ==================== 8. 主流程 ====================
+        # python
+    def visualize_specific_pairs(
+                self,
+                mol_morph_pairs=None,
+                mol_proj_pairs=None,
+                output_dir=".",
+                mol_morph_mismatch_df=None,
+                mol_proj_mismatch_df=None
+        ):
+            """
+            Manually visualize specified region pairs.
+
+            Args:
+                mol_morph_pairs: list of (r1, r2) or (r1, r2, mismatch) for molecular-morphology comparison.
+                mol_proj_pairs: list of (r1, r2) or (r1, r2, mismatch) for molecular-projection comparison.
+                output_dir: directory to save figures.
+                mol_morph_mismatch_df: optional DataFrame produced earlier (mol_morph_mismatch).
+                mol_proj_mismatch_df: optional DataFrame produced earlier (mol_proj_mismatch).
+            """
+            import os
+            os.makedirs(output_dir, exist_ok=True)
+
+            if mol_morph_pairs:
+                print("\nManual Molecular-Morphology comparisons:")
+                for rank, pair in enumerate(mol_morph_pairs, 1):
+                    if len(pair) == 3:
+                        r1, r2, mismatch = pair
+                    else:
+                        r1, r2 = pair
+                        mismatch = np.nan
+                        if mol_morph_mismatch_df is not None:
+                            # Try both index orders
+                            if r1 in mol_morph_mismatch_df.index and r2 in mol_morph_mismatch_df.columns:
+                                mismatch = mol_morph_mismatch_df.loc[r1, r2]
+                            elif r2 in mol_morph_mismatch_df.index and r1 in mol_morph_mismatch_df.columns:
+                                mismatch = mol_morph_mismatch_df.loc[r2, r1]
+                    self._plot_mol_morph_comparison(r1, r2, mismatch, rank, output_dir)
+
+            if mol_proj_pairs:
+                print("\nManual Molecular-Projection comparisons:")
+                for rank, pair in enumerate(mol_proj_pairs, 1):
+                    if len(pair) == 3:
+                        r1, r2, mismatch = pair
+                    else:
+                        r1, r2 = pair
+                        mismatch = np.nan
+                        if mol_proj_mismatch_df is not None:
+                            if r1 in mol_proj_mismatch_df.index and r2 in mol_proj_mismatch_df.columns:
+                                mismatch = mol_proj_mismatch_df.loc[r1, r2]
+                            elif r2 in mol_proj_mismatch_df.index and r1 in mol_proj_mismatch_df.columns:
+                                mismatch = mol_proj_mismatch_df.loc[r2, r1]
+                    self._plot_mol_proj_comparison(r1, r2, mismatch, rank, output_dir)
+
+    # ==================== 7. 主流程 ====================
 
     def run_full_analysis(self, output_dir: str = "./fingerprint_results",
                           top_n_regions: int = 20):
         """
-        运行完整分析流程（增强版）
+        运行完整分析流程
 
         Args:
             output_dir: 输出目录
             top_n_regions: 选择多少个神经元数量最多的脑区进行可视化
         """
         print("\n" + "=" * 80)
-        print("脑区指纹分析 - 完整流程（增强版）")
+        print("脑区指纹分析 - 完整流程")
         print("=" * 80)
 
         # Step 1: 获取全局维度
@@ -1594,38 +1235,30 @@ and projection patterns."""
         # Step 3: 保存指纹到CSV
         self.save_fingerprints_to_csv(output_dir)
 
-        # Step 4: 计算所有脑区的距离矩阵
-        print("\n计算全脑区距离矩阵...")
-        mol_dist_df, morph_dist_df, proj_dist_df = self.compute_distance_matrices()
-
-        # Step 5: 新增 - 全脑区对统计分析
-        print("\n开始全脑区对统计分析...")
-        stats = self.analyze_all_region_pairs(mol_dist_df, morph_dist_df, proj_dist_df, output_dir)
-
-        # Step 6: 选择top N脑区进行可视化
+        # Step 4: 选择top N脑区
         top_regions = self.select_top_regions_by_neuron_count(top_n_regions)
 
-        # Step 7: 可视化矩阵（分别保存，包含morph-proj mismatch）
+        # Step 5: 可视化矩阵（分别保存）
         top_pairs, mol_morph_mismatch, mol_proj_mismatch = self.visualize_matrices(
             top_regions, output_dir
         )
 
-        # Step 8: 绘制详细对比图
-        self.visualize_mismatch_details(top_pairs, output_dir)
+        # Step 6: 绘制详细对比图
+        # self.visualize_mismatch_details(top_pairs, output_dir)
+        manual_mol_morph = [("CA3", "MOs"),("CA3", "ACAd"), ("CA3", "SUB")]
+        manual_mol_proj = [ ("CA3", "MOs"),("CA3", "ACAd"), ("CA3", "SUB")]
+
+        self.visualize_specific_pairs(
+            mol_morph_pairs=manual_mol_morph,
+            mol_proj_pairs=manual_mol_proj,
+            output_dir=output_dir,
+            mol_morph_mismatch_df=mol_morph_mismatch,
+            mol_proj_mismatch_df=mol_proj_mismatch
+        )
 
         print("\n" + "=" * 80)
         print("分析完成！")
         print(f"结果保存在: {output_dir}")
-        print("\n生成的文件：")
-        print("  1. molecular_fingerprints.csv - 分子指纹数据")
-        print("  2. morphology_fingerprints.csv - 形态指纹数据")
-        print("  3. projection_fingerprints.csv - 投射指纹数据")
-        print("  4. 全脑区对统计报告.txt - 详细统计分析")
-        print("  5. 全脑区对统计可视化.png - 统计图表")
-        print("  6. 1-6_*.png - 6个相似度/mismatch矩阵")
-        print("  7. all_matrices_combined.png - 组合矩阵图")
-        print("  8. detail_mol_morph_*.png - 分子-形态详细对比")
-        print("  9. detail_mol_proj_*.png - 分子-投射详细对比")
         print("=" * 80 + "\n")
 
 
@@ -1640,18 +1273,15 @@ def main():
     NEO4J_PASSWORD = "neuroxiv"  # 修改为你的密码
 
     # 输出配置
-    OUTPUT_DIR = "./fingerprint_results_enhanced"
-    TOP_N_REGIONS = 20
+    OUTPUT_DIR = "./fingerprint_results_v5_RdYlBu_r"
+    TOP_N_REGIONS = 30
 
     print("\n" + "=" * 80)
-    print("脑区指纹计算与可视化（增强版）")
+    print("脑区指纹计算与可视化")
     print("=" * 80)
     print(f"\nNeo4j URI: {NEO4J_URI}")
     print(f"输出目录: {OUTPUT_DIR}")
-    print(f"选择前 {TOP_N_REGIONS} 个脑区进行可视化")
-    print("新增功能：")
-    print("  - 形态-投射 mismatch 矩阵")
-    print("  - 全脑区对的相似/不相似模式统计\n")
+    print(f"选择前 {TOP_N_REGIONS} 个脑区进行可视化\n")
 
     # 运行分析
     with BrainRegionFingerprints(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD) as analyzer:

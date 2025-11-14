@@ -479,7 +479,7 @@ class Figure4PlottingTool:
 
     def _extract_data_from_agent_result(self, agent_result: Dict) -> Optional[Dict]:
         """
-        从Agent结果中提取绘图所需数据
+        从Agent结果中提取绘图所需数据 (增强版 - 支持多种数据位置)
 
         Returns:
             {
@@ -490,29 +490,107 @@ class Figure4PlottingTool:
         regions = []
         mismatch_pairs = []
 
-        # 从executed_steps中提取
+        logger.info("Extracting data from agent result...")
+
+        # 🔍 策略1: 从executed_steps的actual_result提取
         for step in agent_result.get('executed_steps', []):
             purpose = step.get('purpose', '').lower()
-            actual_result = step.get('actual_result', {})
+
+            # 尝试获取actual_result
+            actual_result = step.get('actual_result')
+
+            if not actual_result:
+                # 如果没有actual_result，跳过
+                logger.debug(f"Step '{purpose[:40]}' has no actual_result")
+                continue
+
+            if not actual_result.get('success'):
+                continue
+
+            data = actual_result.get('data', [])
+
+            if not data:
+                continue
+
+            logger.debug(f"Step '{purpose[:50]}': {len(data)} rows")
 
             # 提取regions
-            if 'region' in purpose and 'neuron' in purpose:
-                if actual_result.get('success'):
-                    data = actual_result.get('data', [])
-                    for row in data:
-                        region = row.get('region') or row.get('acronym')
-                        if region and region not in regions:
-                            regions.append(region)
+            if any(kw in purpose for kw in ['region', 'identify', 'top', 'neuron']):
+                for row in data:
+                    region = row.get('region') or row.get('acronym') or row.get('region_name')
+                    if region and region not in regions:
+                        regions.append(region)
+
+                if regions:
+                    logger.info(f"  Found {len(regions)} regions from: {purpose[:50]}")
 
             # 提取mismatch pairs
             if 'mismatch' in purpose:
-                if actual_result.get('success'):
-                    data = actual_result.get('data', [])
-                    mismatch_pairs.extend(data)
+                # 检查是否包含mismatch字段
+                if data and isinstance(data[0], dict):
+                    has_mismatch = any(
+                        key in data[0]
+                        for key in ['mismatch_combined', 'mismatch_GM', 'mismatch_GP']
+                    )
 
+                    if has_mismatch:
+                        mismatch_pairs.extend(data)
+                        logger.info(f"  Found {len(data)} mismatch pairs from: {purpose[:50]}")
+
+        # 🔍 策略2: 从intermediate_data提取（Fallback）
         if not regions or not mismatch_pairs:
-            logger.warning(f"Incomplete data: {len(regions)} regions, {len(mismatch_pairs)} pairs")
+            logger.info("Strategy 1 failed, trying intermediate_data...")
+
+            intermediate = agent_result.get('intermediate_data', {})
+
+            for key, data in intermediate.items():
+                if not data or not isinstance(data, list):
+                    continue
+
+                if not data:
+                    continue
+
+                first_row = data[0] if isinstance(data, list) and data else {}
+
+                # 查找regions
+                if not regions:
+                    if isinstance(first_row, dict) and ('region' in first_row or 'acronym' in first_row):
+                        for row in data:
+                            region = row.get('region') or row.get('acronym')
+                            if region and region not in regions:
+                                regions.append(region)
+
+                        if regions:
+                            logger.info(f"  Found {len(regions)} regions from {key}")
+
+                # 查找mismatch pairs
+                if not mismatch_pairs:
+                    if isinstance(first_row, dict) and any(
+                            k in first_row
+                            for k in ['mismatch_combined', 'mismatch_GM', 'region1', 'region2']
+                    ):
+                        mismatch_pairs.extend(data)
+                        logger.info(f"  Found {len(data)} mismatch pairs from {key}")
+
+        # 最终验证
+        if not regions:
+            logger.error("❌ No regions found in agent result")
+            logger.error(f"   Available keys: {list(agent_result.keys())}")
+
+            if 'executed_steps' in agent_result:
+                logger.error(f"   Executed steps: {len(agent_result['executed_steps'])}")
+                for i, step in enumerate(agent_result['executed_steps'], 1):
+                    purpose = step.get('purpose', 'Unknown')
+                    has_actual = 'actual_result' in step
+                    logger.error(f"     Step {i}: {purpose[:40]} - has_actual_result: {has_actual}")
+
             return None
+
+        if not mismatch_pairs:
+            logger.error("❌ No mismatch pairs found in agent result")
+            return None
+
+        logger.info(f"✅ Successfully extracted: {len(regions)} regions, {len(mismatch_pairs)} pairs")
 
         return {
             'regions': regions,
@@ -1090,7 +1168,8 @@ class AIPOMCoTV10:
             'confidence_score': state.confidence_score,
             'execution_time': execution_time,
             'total_steps': len(state.executed_steps),
-            'schema_paths_used': state.schema_paths_used
+            'schema_paths_used': state.schema_paths_used,
+            'intermediate_data': state.intermediate_data
         }
 
         logger.info(f"\n✅ Completed in {execution_time:.2f}s")
@@ -2777,8 +2856,8 @@ Return a JSON object with key "steps" containing an array:
     # ==================== Utilities ====================
 
     def _step_to_dict(self, step: ReasoningStep) -> Dict:
-        """转换步骤为字典"""
-        return {
+        """转换步骤为字典 (修复版 - 保留完整actual_result)"""
+        step_dict = {
             'step_number': step.step_number,
             'purpose': step.purpose,
             'action': step.action,
@@ -2793,6 +2872,12 @@ Return a JSON object with key "steps" containing an array:
             'execution_time': step.execution_time,
             'modality': step.modality
         }
+
+        # 🔧 关键修复：保留完整的actual_result用于绘图
+        if step.actual_result:
+            step_dict['actual_result'] = step.actual_result
+
+        return step_dict
 
     def _estimate_confidence(self, state: EnhancedAgentState) -> float:
         """估算置信度"""

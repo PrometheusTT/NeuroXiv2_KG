@@ -24,8 +24,11 @@ from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 import re
 from pathlib import Path
-
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
 import numpy as np
+from matplotlib import pyplot as plt
 from scipy import stats
 from neo4j_exec import Neo4jExec
 from adaptive_planner import AdaptivePlanner, AnalysisDepth, AnalysisState
@@ -95,17 +98,17 @@ class RealFingerprintAnalyzer:
         fingerprint = {}
 
         # Molecular fingerprint
-        mol_fp = self._compute_molecular_fingerprint(region)
+        mol_fp = self.compute_molecular_fingerprint(region)
         if mol_fp is not None:
             fingerprint['molecular'] = mol_fp
 
         # Morphological fingerprint
-        mor_fp = self._compute_morphological_fingerprint(region)
+        mor_fp = self.compute_morphological_fingerprint(region)
         if mor_fp is not None:
             fingerprint['morphological'] = mor_fp
 
         # Projection fingerprint
-        proj_fp = self._compute_projection_fingerprint(region)
+        proj_fp = self.compute_projection_fingerprint(region)
         if proj_fp is not None:
             fingerprint['projection'] = proj_fp
 
@@ -113,59 +116,82 @@ class RealFingerprintAnalyzer:
 
     def compute_molecular_fingerprint(self, region: str) -> Optional[np.ndarray]:
         """
-        Molecular fingerprint = cluster composition
+        计算单个脑区的分子指纹 (Figure 4方法)
 
-        Uses REAL schema:
-        MATCH (r:Region {acronym: $region})-[h:HAS_CLUSTER]->(c:Cluster)
+        🎯 分子指纹 = Subclass组成百分比
+
+        使用关系: Region -[HAS_SUBCLASS]-> Subclass
         """
         query = """
-        MATCH (r:Region {acronym: $acronym})-[h:HAS_CLUSTER]->(c:Cluster)
-        RETURN c.name AS cluster_name,
-               c.markers AS markers,
-               c.number_of_neurons AS neuron_count
-        ORDER BY c.name
+        MATCH (r:Region {acronym: $acronym})-[hs:HAS_SUBCLASS]->(sc:Subclass)
+        RETURN
+          sc.name AS subclass_name,
+          hs.pct_cells AS pct_cells
+        ORDER BY sc.name
         """
 
         result = self.db.run(query, {'acronym': region})
 
         if not result['success'] or not result['data']:
+            logger.warning(f"No molecular data for {region}")
             return None
 
-        # Get all clusters
-        all_clusters = self._get_all_clusters()
+        # 构建字典
+        data = {}
+        for row in result['data']:
+            subclass_name = row.get('subclass_name')
+            pct_cells = row.get('pct_cells')
+            if subclass_name and pct_cells is not None:
+                data[subclass_name] = float(pct_cells)
 
-        # Build vector: neuron count for each cluster
-        cluster_dict = {
-            row['cluster_name']: row['neuron_count'] or 0
-            for row in result['data']
-        }
+        if not data:
+            return None
 
-        vector = np.array([cluster_dict.get(c, 0.0) for c in all_clusters])
+        # 获取全局subclass列表
+        all_subclasses = self._get_all_subclasses()  # 这个方法返回所有subclass names
 
-        # Normalize
-        total = np.sum(vector)
-        if total > 0:
-            vector = vector / total
+        if not all_subclasses:
+            logger.error("No global subclasses found")
+            return None
 
-        return vector
+        # 构建固定维度的向量
+        signature = np.zeros(len(all_subclasses), dtype=float)
+        for i, subclass in enumerate(all_subclasses):
+            if subclass in data:
+                signature[i] = data[subclass]
+
+        # 🔍 调试：检查是否是零向量
+        nonzero_count = np.count_nonzero(signature)
+        total_pct = np.sum(signature)
+
+        if nonzero_count == 0:
+            logger.warning(f"{region}: molecular fingerprint is all zeros!")
+            return None
+
+        logger.debug(f"{region}: molecular FP - {nonzero_count}/{len(signature)} nonzero, sum={total_pct:.2f}")
+
+        return signature
 
     def compute_morphological_fingerprint(self, region: str) -> Optional[np.ndarray]:
         """
-        Morphological fingerprint = aggregated neuron features
+        计算单个脑区的形态指纹 (对齐Figure 4)
 
-        Uses REAL schema:
-        MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region {acronym: $region})
-        RETURN avg(n.axonal_length), avg(n.dendritic_length), ...
+        🔧 关键改进:
+        1. 从Region节点的聚合属性读取（不是实时聚合）
+        2. 返回8维向量（不是6维）
+        3. 匹配Figure 4的特征顺序
         """
         query = """
-        MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region {acronym: $acronym})
-        RETURN 
-            avg(n.axonal_length) AS avg_axon_len,
-            avg(n.dendritic_length) AS avg_dend_len,
-            avg(n.axonal_surface) AS avg_axon_surf,
-            avg(n.dendritic_surface) AS avg_dend_surf,
-            avg(n.number_of_stems) AS avg_stems,
-            avg(n.soma_surface) AS avg_soma
+        MATCH (r:Region {acronym: $acronym})
+        RETURN
+          r.axonal_bifurcation_remote_angle AS axonal_bifurcation_remote_angle,
+          r.axonal_length AS axonal_length,
+          r.axonal_branches AS axonal_branches,
+          r.axonal_maximum_branch_order AS axonal_max_branch_order,
+          r.dendritic_bifurcation_remote_angle AS dendritic_bifurcation_remote_angle,
+          r.dendritic_length AS dendritic_length,
+          r.dendritic_branches AS dendritic_branches,
+          r.dendritic_maximum_branch_order AS dendritic_max_branch_order
         """
 
         result = self.db.run(query, {'acronym': region})
@@ -173,24 +199,26 @@ class RealFingerprintAnalyzer:
         if not result['success'] or not result['data'] or not result['data'][0]:
             return None
 
-        data = result['data'][0]
+        record = result['data'][0]
 
-        # Build feature vector
-        vector = np.array([
-            data.get('avg_axon_len') or 0.0,
-            data.get('avg_dend_len') or 0.0,
-            data.get('avg_axon_surf') or 0.0,
-            data.get('avg_dend_surf') or 0.0,
-            data.get('avg_stems') or 0.0,
-            data.get('avg_soma') or 0.0
+        # 按照固定顺序提取特征值
+        features = [
+            'axonal_bifurcation_remote_angle',
+            'axonal_length',
+            'axonal_branches',
+            'axonal_max_branch_order',
+            'dendritic_bifurcation_remote_angle',
+            'dendritic_length',
+            'dendritic_branches',
+            'dendritic_max_branch_order'
+        ]
+
+        signature = np.array([
+            record.get(feat) if record.get(feat) is not None else np.nan
+            for feat in features
         ], dtype=float)
 
-        # L2 normalize
-        norm = np.linalg.norm(vector)
-        if norm > 0:
-            vector = vector / norm
-
-        return vector
+        return signature
 
     def compute_projection_fingerprint(self, region: str) -> Optional[np.ndarray]:
         """
@@ -263,18 +291,29 @@ class RealFingerprintAnalyzer:
             'mismatch_MP': abs(sim_mor - sim_proj)
         }
 
-    def _get_all_clusters(self) -> List[str]:
-        """Get all cluster names for consistent dimensions"""
+    def _get_all_subclasses(self) -> List[str]:
+        """
+        获取所有subclass names (用于分子指纹)
+
+        🔧 注意: 这里应该查询Subclass，不是Cluster
+        """
         if self._cluster_cache is not None:
             return self._cluster_cache
 
-        query = "MATCH (c:Cluster) RETURN c.name AS name ORDER BY c.name LIMIT 100"
+        query = """
+        MATCH (sc:Subclass)
+        RETURN DISTINCT sc.name AS name
+        ORDER BY name
+        """
+
         result = self.db.run(query)
 
         if result['success'] and result['data']:
             self._cluster_cache = [row['name'] for row in result['data']]
+            logger.info(f"Found {len(self._cluster_cache)} subclasses for molecular fingerprint")
         else:
             self._cluster_cache = []
+            logger.error("No subclasses found in database!")
 
         return self._cluster_cache
 
@@ -316,9 +355,9 @@ class RealFingerprintAnalyzer:
         """
         try:
             # 计算三种fingerprint
-            molecular = self._compute_molecular_fingerprint(region)
-            morphological = self._compute_morphological_fingerprint(region)
-            projection = self._compute_projection_fingerprint(region)
+            molecular = self.compute_molecular_fingerprint(region)
+            morphological = self.compute_morphological_fingerprint(region)
+            projection = self.compute_projection_fingerprint(region)
 
             # 验证
             if molecular is None or morphological is None or projection is None:
@@ -334,6 +373,400 @@ class RealFingerprintAnalyzer:
         except Exception as e:
             logger.error(f"Failed to get fingerprint for {region}: {e}")
             return None
+
+
+class Figure4PlottingTool:
+    """
+    Figure 4绘图工具
+
+    封装了signaturev4.py的核心绘图功能，供Agent调用
+    """
+
+    def __init__(self, output_dir: str = "./figure4_results"):
+        """
+        初始化绘图工具
+
+        Args:
+            output_dir: 输出目录
+        """
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True, parents=True)
+
+        # 设置绘图样式
+        plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'DejaVu Sans']
+        plt.rcParams['axes.unicode_minus'] = False
+
+        logger.info(f"Figure 4 plotting tool initialized. Output: {self.output_dir}")
+
+    def plot_from_agent_data(self,
+                             agent_result: Dict,
+                             fingerprint_data: Optional[Dict] = None) -> Dict[str, str]:
+        """
+        从Agent结果生成所有Figure 4图表
+
+        Args:
+            agent_result: Agent的返回结果（包含mismatch数据）
+            fingerprint_data: 可选的fingerprint原始数据
+
+        Returns:
+            生成的图片文件路径字典
+        """
+        logger.info("Starting Figure 4 visualization from agent data...")
+
+        output_files = {}
+
+        # 1. 从Agent结果中提取数据
+        extracted = self._extract_data_from_agent_result(agent_result)
+
+        if not extracted:
+            logger.error("Failed to extract data from agent result")
+            return {}
+
+        regions = extracted['regions']
+        mismatch_pairs = extracted['mismatch_pairs']
+
+        logger.info(f"Extracted {len(regions)} regions and {len(mismatch_pairs)} mismatch pairs")
+
+        # 2. 构建矩阵
+        matrices = self._build_matrices_from_pairs(regions, mismatch_pairs)
+
+        if not matrices:
+            logger.error("Failed to build matrices")
+            return {}
+
+        # 3. 绘制similarity矩阵 (3个)
+        logger.info("Plotting similarity matrices...")
+        similarity_files = self._plot_similarity_matrices(
+            matrices['mol_sim'],
+            matrices['morph_sim'],
+            matrices['proj_sim'],
+            regions
+        )
+        output_files.update(similarity_files)
+
+        # 4. 绘制mismatch矩阵 (2个)
+        logger.info("Plotting mismatch matrices...")
+        mismatch_files = self._plot_mismatch_matrices(
+            matrices['mismatch_GM'],
+            matrices['mismatch_GP'],
+            regions
+        )
+        output_files.update(mismatch_files)
+
+        # 5. 识别top pairs
+        top_pairs = self._identify_top_pairs(
+            matrices['mismatch_GM'],
+            matrices['mismatch_GP'],
+            regions,
+            n=5
+        )
+
+        # 6. 绘制top pairs的详细对比 (可选，如果有fingerprint数据)
+        if fingerprint_data:
+            logger.info("Plotting detailed comparisons for top pairs...")
+            detail_files = self._plot_detailed_comparisons(
+                top_pairs,
+                fingerprint_data,
+                regions
+            )
+            output_files.update(detail_files)
+
+        logger.info(f"✅ Generated {len(output_files)} figures")
+        for name, path in output_files.items():
+            logger.info(f"   • {name}: {path}")
+
+        return output_files
+
+    def _extract_data_from_agent_result(self, agent_result: Dict) -> Optional[Dict]:
+        """
+        从Agent结果中提取绘图所需数据
+
+        Returns:
+            {
+                'regions': List[str],
+                'mismatch_pairs': List[Dict]
+            }
+        """
+        regions = []
+        mismatch_pairs = []
+
+        # 从executed_steps中提取
+        for step in agent_result.get('executed_steps', []):
+            purpose = step.get('purpose', '').lower()
+            actual_result = step.get('actual_result', {})
+
+            # 提取regions
+            if 'region' in purpose and 'neuron' in purpose:
+                if actual_result.get('success'):
+                    data = actual_result.get('data', [])
+                    for row in data:
+                        region = row.get('region') or row.get('acronym')
+                        if region and region not in regions:
+                            regions.append(region)
+
+            # 提取mismatch pairs
+            if 'mismatch' in purpose:
+                if actual_result.get('success'):
+                    data = actual_result.get('data', [])
+                    mismatch_pairs.extend(data)
+
+        if not regions or not mismatch_pairs:
+            logger.warning(f"Incomplete data: {len(regions)} regions, {len(mismatch_pairs)} pairs")
+            return None
+
+        return {
+            'regions': regions,
+            'mismatch_pairs': mismatch_pairs
+        }
+
+    def _build_matrices_from_pairs(self,
+                                   regions: List[str],
+                                   pairs: List[Dict]) -> Optional[Dict]:
+        """
+        从pair列表构建矩阵
+
+        Returns:
+            {
+                'mol_sim': DataFrame,
+                'morph_sim': DataFrame,
+                'proj_sim': DataFrame,
+                'mismatch_GM': DataFrame,
+                'mismatch_GP': DataFrame
+            }
+        """
+        n = len(regions)
+        region_to_idx = {r: i for i, r in enumerate(regions)}
+
+        # 初始化矩阵
+        mol_sim = np.full((n, n), np.nan)
+        morph_sim = np.full((n, n), np.nan)
+        proj_sim = np.full((n, n), np.nan)
+        mismatch_GM = np.full((n, n), np.nan)
+        mismatch_GP = np.full((n, n), np.nan)
+
+        # 对角线设为1（自己和自己相似度=1）
+        np.fill_diagonal(mol_sim, 1.0)
+        np.fill_diagonal(morph_sim, 1.0)
+        np.fill_diagonal(proj_sim, 1.0)
+        np.fill_diagonal(mismatch_GM, 0.0)
+        np.fill_diagonal(mismatch_GP, 0.0)
+
+        # 填充数据
+        for pair in pairs:
+            r1 = pair.get('region1')
+            r2 = pair.get('region2')
+
+            if not r1 or not r2:
+                continue
+
+            if r1 not in region_to_idx or r2 not in region_to_idx:
+                continue
+
+            i = region_to_idx[r1]
+            j = region_to_idx[r2]
+
+            # 相似度
+            mol_sim[i, j] = mol_sim[j, i] = pair.get('sim_molecular', np.nan)
+            morph_sim[i, j] = morph_sim[j, i] = pair.get('sim_morphological', np.nan)
+            proj_sim[i, j] = proj_sim[j, i] = pair.get('sim_projection', np.nan)
+
+            # Mismatch
+            mismatch_GM[i, j] = mismatch_GM[j, i] = pair.get('mismatch_GM', np.nan)
+            mismatch_GP[i, j] = mismatch_GP[j, i] = pair.get('mismatch_GP', np.nan)
+
+        # 转换为DataFrame
+        return {
+            'mol_sim': pd.DataFrame(mol_sim, index=regions, columns=regions),
+            'morph_sim': pd.DataFrame(morph_sim, index=regions, columns=regions),
+            'proj_sim': pd.DataFrame(proj_sim, index=regions, columns=regions),
+            'mismatch_GM': pd.DataFrame(mismatch_GM, index=regions, columns=regions),
+            'mismatch_GP': pd.DataFrame(mismatch_GP, index=regions, columns=regions)
+        }
+
+    def _plot_similarity_matrices(self,
+                                  mol_sim: pd.DataFrame,
+                                  morph_sim: pd.DataFrame,
+                                  proj_sim: pd.DataFrame,
+                                  regions: List[str]) -> Dict[str, str]:
+        """
+        绘制3个similarity矩阵
+
+        Returns:
+            文件路径字典
+        """
+        output_files = {}
+
+        # 1. Molecular Similarity
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sns.heatmap(mol_sim, ax=ax, cmap='RdYlBu_r', vmin=0, vmax=1,
+                    square=True, cbar_kws={'label': 'Similarity'},
+                    xticklabels=True, yticklabels=True)
+        ax.set_title('Molecular Fingerprint Similarity', fontsize=20, fontweight='bold')
+        ax.set_xlabel('Region', fontsize=16, fontweight='bold')
+        ax.set_ylabel('Region', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+
+        filepath = self.output_dir / '1_molecular_similarity.png'
+        plt.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.close()
+        output_files['molecular_similarity'] = str(filepath)
+
+        # 2. Morphology Similarity
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sns.heatmap(morph_sim, ax=ax, cmap='RdYlBu_r', vmin=0, vmax=1,
+                    square=True, cbar_kws={'label': 'Similarity'},
+                    xticklabels=True, yticklabels=True)
+        ax.set_title('Morphology Fingerprint Similarity', fontsize=20, fontweight='bold')
+        ax.set_xlabel('Region', fontsize=16, fontweight='bold')
+        ax.set_ylabel('Region', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+
+        filepath = self.output_dir / '2_morphology_similarity.png'
+        plt.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.close()
+        output_files['morphology_similarity'] = str(filepath)
+
+        # 3. Projection Similarity
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sns.heatmap(proj_sim, ax=ax, cmap='RdYlBu_r', vmin=0, vmax=1,
+                    square=True, cbar_kws={'label': 'Similarity'},
+                    xticklabels=True, yticklabels=True)
+        ax.set_title('Projection Fingerprint Similarity', fontsize=20, fontweight='bold')
+        ax.set_xlabel('Region', fontsize=16, fontweight='bold')
+        ax.set_ylabel('Region', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+
+        filepath = self.output_dir / '3_projection_similarity.png'
+        plt.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.close()
+        output_files['projection_similarity'] = str(filepath)
+
+        return output_files
+
+    def _plot_mismatch_matrices(self,
+                                mismatch_GM: pd.DataFrame,
+                                mismatch_GP: pd.DataFrame,
+                                regions: List[str]) -> Dict[str, str]:
+        """
+        绘制2个mismatch矩阵
+        """
+        output_files = {}
+
+        # 1. Molecular-Morphology Mismatch
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sns.heatmap(mismatch_GM, ax=ax, cmap='RdYlBu_r', vmin=0, vmax=1,
+                    square=True, cbar_kws={'label': 'Mismatch'},
+                    xticklabels=True, yticklabels=True)
+        ax.set_title('Molecular-Morphology Mismatch', fontsize=20, fontweight='bold')
+        ax.set_xlabel('Region', fontsize=16, fontweight='bold')
+        ax.set_ylabel('Region', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+
+        filepath = self.output_dir / '4_mol_morph_mismatch.png'
+        plt.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.close()
+        output_files['mol_morph_mismatch'] = str(filepath)
+
+        # 2. Molecular-Projection Mismatch
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sns.heatmap(mismatch_GP, ax=ax, cmap='RdYlBu_r', vmin=0, vmax=1,
+                    square=True, cbar_kws={'label': 'Mismatch'},
+                    xticklabels=True, yticklabels=True)
+        ax.set_title('Molecular-Projection Mismatch', fontsize=20, fontweight='bold')
+        ax.set_xlabel('Region', fontsize=16, fontweight='bold')
+        ax.set_ylabel('Region', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+
+        filepath = self.output_dir / '5_mol_proj_mismatch.png'
+        plt.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.close()
+        output_files['mol_proj_mismatch'] = str(filepath)
+
+        return output_files
+
+    def _identify_top_pairs(self,
+                            mismatch_GM: pd.DataFrame,
+                            mismatch_GP: pd.DataFrame,
+                            regions: List[str],
+                            n: int = 5) -> Dict:
+        """
+        识别top N mismatch pairs
+
+        Returns:
+            {
+                'mol_morph': [(r1, r2, mismatch_val), ...],
+                'mol_proj': [(r1, r2, mismatch_val), ...]
+            }
+        """
+        # Molecular-Morphology top pairs
+        mm_values = []
+        for i in range(len(regions)):
+            for j in range(i + 1, len(regions)):
+                val = mismatch_GM.iloc[i, j]
+                if not np.isnan(val):
+                    mm_values.append((regions[i], regions[j], val))
+
+        mm_values.sort(key=lambda x: x[2], reverse=True)
+
+        # Molecular-Projection top pairs
+        mp_values = []
+        for i in range(len(regions)):
+            for j in range(i + 1, len(regions)):
+                val = mismatch_GP.iloc[i, j]
+                if not np.isnan(val):
+                    mp_values.append((regions[i], regions[j], val))
+
+        mp_values.sort(key=lambda x: x[2], reverse=True)
+
+        return {
+            'mol_morph': mm_values[:n],
+            'mol_proj': mp_values[:n]
+        }
+
+    def _plot_detailed_comparisons(self,
+                                   top_pairs: Dict,
+                                   fingerprint_data: Dict,
+                                   regions: List[str]) -> Dict[str, str]:
+        """
+        绘制top pairs的详细对比图（雷达图+柱状图）
+
+        这需要原始的fingerprint数据
+        """
+        # TODO: 实现详细对比图
+        # 需要从fingerprint_data中提取形态特征和投射数据
+        logger.info("Detailed comparison plots not yet implemented")
+        return {}
+
+
+# ==================== Agent集成接口 ====================
+
+def create_plotting_tool_for_agent(output_dir: str = "./figure4_agent_output") -> Figure4PlottingTool:
+    """
+    创建供Agent使用的绘图工具实例
+
+    Args:
+        output_dir: 输出目录
+
+    Returns:
+        Figure4PlottingTool实例
+    """
+    return Figure4PlottingTool(output_dir)
+
+
+def generate_figure4_from_agent_result(agent_result: Dict,
+                                       output_dir: str = "./figure4_agent_output") -> Dict[str, str]:
+    """
+    便捷函数：从Agent结果直接生成Figure 4所有图表
+
+    Args:
+        agent_result: Agent.answer()的返回结果
+        output_dir: 输出目录
+
+    Returns:
+        生成的图片文件路径字典
+    """
+    tool = Figure4PlottingTool(output_dir)
+    return tool.plot_from_agent_data(agent_result)
 # ==================== Production Agent V10 ====================
 
 class AIPOMCoTV10:
@@ -666,6 +1099,81 @@ class AIPOMCoTV10:
         logger.info(f"   • Modalities: {', '.join(analysis_state.modalities_covered)}")
 
         return result
+
+    def answer_with_visualization(self,
+                                  question: str,
+                                  max_iterations: int = 15,
+                                  generate_plots: bool = True,
+                                  output_dir: str = "./figure4_results") -> Dict[str, Any]:
+        """
+        回答问题并生成可视化（Figure 4增强版）
+
+        Args:
+            question: 问题
+            max_iterations: 最大迭代次数
+            generate_plots: 是否生成图表
+            output_dir: 图表输出目录
+
+        Returns:
+            包含answer和visualization_files的结果
+        """
+        # 1. 正常执行分析
+        result = self.answer(question, max_iterations)
+
+        # 2. 如果是Figure 4类型的分析，生成图表
+        if generate_plots:
+            analysis_type = self._detect_analysis_type_from_result(result)
+
+            if analysis_type == 'figure4_mismatch':
+                logger.info("\n" + "=" * 70)
+                logger.info("🎨 GENERATING FIGURE 4 VISUALIZATIONS")
+                logger.info("=" * 70)
+
+                try:
+                    visualization_files = generate_figure4_from_agent_result(
+                        result,
+                        output_dir
+                    )
+
+                    result['visualization_files'] = visualization_files
+                    result['visualization_output_dir'] = output_dir
+
+                    logger.info(f"\n✅ Generated {len(visualization_files)} figures:")
+                    for name, path in visualization_files.items():
+                        logger.info(f"   • {name}: {path}")
+
+                except Exception as e:
+                    logger.error(f"❌ Visualization generation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    result['visualization_error'] = str(e)
+
+        return result
+
+    def _detect_analysis_type_from_result(self, result: Dict) -> str:
+        """
+        从结果中检测分析类型
+
+        Returns:
+            'figure4_mismatch' | 'figure3_focus' | 'other'
+        """
+        # 检查是否有mismatch计算
+        has_mismatch = any(
+            'mismatch' in step['purpose'].lower()
+            for step in result.get('executed_steps', [])
+        )
+
+        # 检查是否是systematic screening
+        has_screening = any(
+            'systematic' in step['purpose'].lower() or
+            'top' in step['purpose'].lower() and 'region' in step['purpose'].lower()
+            for step in result.get('executed_steps', [])
+        )
+
+        if has_mismatch and has_screening:
+            return 'figure4_mismatch'
+
+        return 'other'
 
     # ==================== 辅助方法 ====================
     def _select_planner(self, state, question: str) -> str:
@@ -1712,6 +2220,45 @@ Return a JSON object with key "steps" containing an array:
 
         if n_valid < 2:
             return {'success': False, 'error': 'Insufficient valid regions'}
+        # 🆕 Step 1.5: Z-score标准化形态指纹 (Figure 4方法)
+        logger.info(f"   🔧 Step 1.5/4: Z-score standardization of morphology...")
+        import numpy as np
+        if len(fingerprints) >= 2:
+            # 提取所有形态指纹
+            all_morph = []
+            for region in valid_regions:
+                morph = fingerprints[region]['morphological']
+                all_morph.append(morph)
+
+            all_morph = np.array(all_morph)  # (N_regions, 8)
+
+            logger.info(f"      Morphology array shape: {all_morph.shape}")
+
+            # 处理dendritic特征的0值 (索引4-7)
+            dendritic_indices = [4, 5, 6, 7]
+            for i in dendritic_indices:
+                col = all_morph[:, i].copy()
+                zero_mask = np.abs(col) < 1e-6
+                n_zeros = zero_mask.sum()
+                if n_zeros > 0:
+                    logger.info(f"      Dendritic feature {i}: excluding {n_zeros}/{len(col)} zeros")
+                    col[zero_mask] = np.nan
+                    all_morph[:, i] = col
+
+            # 对每个特征维度进行z-score
+            from scipy.stats import zscore
+            for i in range(all_morph.shape[1]):
+                col = all_morph[:, i]
+                valid = ~np.isnan(col)
+                if valid.sum() > 1:
+                    col[valid] = zscore(col[valid])
+                    all_morph[:, i] = col
+
+            # 更新fingerprints
+            for idx, region in enumerate(valid_regions):
+                fingerprints[region]['morphological'] = all_morph[idx]
+
+            logger.info(f"      ✓ Z-score standardization complete")
 
         # 🚀 Step 2: 构建距离矩阵 (NxN)
         logger.info(f"   📏 Step 2/4: Building distance matrices...")
@@ -1723,38 +2270,45 @@ Return a JSON object with key "steps" containing an array:
         morph_dist_matrix = np.zeros((n_valid, n_valid))
         proj_dist_matrix = np.zeros((n_valid, n_valid))
 
+        # 在Step 2: 构建距离矩阵中
         for i, region_a in enumerate(valid_regions):
             for j, region_b in enumerate(valid_regions):
                 if i == j:
+                    mol_dist_matrix[i, j] = 0
+                    morph_dist_matrix[i, j] = 0
+                    proj_dist_matrix[i, j] = 0
                     continue
 
                 fp_a = fingerprints[region_a]
                 fp_b = fingerprints[region_b]
 
-                # 分子距离: 1 - cosine_similarity
+                # 分子距离 (保持不变)
                 try:
                     mol_dist_matrix[i, j] = cosine(fp_a['molecular'], fp_b['molecular'])
                 except:
                     mol_dist_matrix[i, j] = np.nan
 
-                # 形态距离: Euclidean
+                # 🔧 形态距离 (修复 - 使用Euclidean)
                 try:
                     morph_a = fp_a['morphological']
                     morph_b = fp_b['morphological']
 
-                    # 处理NaN
+                    # 检查NaN
                     valid_mask = ~(np.isnan(morph_a) | np.isnan(morph_b))
-                    if valid_mask.sum() > 0:
+
+                    if valid_mask.sum() >= 4:  # 至少4个有效维度
+                        # 🎯 使用Euclidean距离（不是cosine）
                         morph_dist_matrix[i, j] = euclidean(
                             morph_a[valid_mask],
                             morph_b[valid_mask]
                         )
                     else:
                         morph_dist_matrix[i, j] = np.nan
-                except:
+                except Exception as e:
+                    logger.debug(f"      Morph distance failed {region_a}-{region_b}: {e}")
                     morph_dist_matrix[i, j] = np.nan
 
-                # 投射距离: 1 - cosine_similarity
+                # 投射距离 (保持不变)
                 try:
                     proj_dist_matrix[i, j] = cosine(fp_a['projection'], fp_b['projection'])
                 except:
@@ -2336,15 +2890,20 @@ def test_car3_comprehensive():
         neo4j_pwd=os.getenv("NEO4J_PASSWORD", "neuroxiv"),
         database=os.getenv("NEO4J_DATABASE", "neo4j"),
         schema_json_path="./schema_output/schema.json",
-        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        openai_api_key=os.getenv("OPENAI_API_KEY",''),
         model="gpt-4o"
     )
 
     # 🎯 关键: 使用"comprehensive"触发深度分析
     # question = "Give me a comprehensive analysis of Car3+ neurons"
-    question = "Which brain region pairs show the highest cross-modal mismatch in the top 30 brain regions with most neurons?"
-    result = agent.answer(question, max_iterations=12)
-
+    question = "Which brain region pairs show the highest cross-modal mismatch between molecular fingerprints, morphological features, and projection patterns among the top 30 brain regions with most neurons?"
+    # result = agent.answer(question, max_iterations=12)
+    result = agent.answer_with_visualization(
+        question,
+        max_iterations=10,
+        generate_plots=True,
+        output_dir='./figure4_automatic_output'
+    )
     print("\n" + "=" * 80)
     print("FIGURE 3 STORY ARC ANALYSIS")
     print("=" * 80)

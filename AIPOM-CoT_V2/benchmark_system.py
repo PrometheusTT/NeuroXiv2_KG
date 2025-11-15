@@ -55,10 +55,14 @@ class BenchmarkQuestion:
     question: str
     complexity: QuestionComplexity
     domain: str  # 'molecular' | 'morphological' | 'projection' | 'multi-modal'
-    expected_entities: List[str]  # 期望识别的实体
     gold_answer: Optional[str]  # 金标准答案 (如果有)
     evaluation_criteria: Dict  # 评估标准
     metadata: Dict = field(default_factory=dict)
+    ground_truth_cypher: Optional[str] = None
+    requires_kg: bool = True
+    expected_answer_contains: List[str] = field(default_factory=list)
+    expected_entities: List[str] = field(default_factory=list)
+
 
 
 # ==================== Test Question Database ====================
@@ -74,591 +78,598 @@ class BenchmarkQuestionBank:
     """
 
     @staticmethod
+    @staticmethod
     def generate_questions() -> List[BenchmarkQuestion]:
-        """生成完整问题集"""
+        """
+        生成完整的测试问题集（修复版 - 包含expected_entities）
+
+        覆盖5种复杂度 × 3种领域 = 50个问题
+
+        新增:
+        - 每个问题都有expected_entities
+        - 覆盖多种查询模式
+        - 包含正负样本
+        """
+
         questions = []
 
-        # ===== Level 1: Simple Factual (34 questions) =====
+        # =====================================================================
+        # CATEGORY 1: SIMPLE FACTUAL (简单事实查询) - 10 questions
+        # =====================================================================
 
-        # Gene markers
         questions.extend([
             BenchmarkQuestion(
-                id="L1-G01",
-                question="Tell me about Car3+ neurons",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="molecular",
-                expected_entities=["Car3"],
-                gold_answer=None,
-                evaluation_criteria={
-                    "must_mention": ["Car3", "cluster", "region"],
-                    "should_mention": ["marker", "expression"],
-                }
-            ),
-            BenchmarkQuestion(
-                id="L1-G02",
-                question="Which regions express Pvalb?",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="molecular",
-                expected_entities=["Pvalb"],
-                gold_answer=None,
-                evaluation_criteria={
-                    "must_mention": ["Pvalb", "region"],
-                    "should_have_regions": True
-                }
-            ),
-            BenchmarkQuestion(
-                id="L1-G03",
-                question="What are Sst positive neurons?",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="molecular",
-                expected_entities=["Sst"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["Sst", "interneuron"]}
-            ),
-            BenchmarkQuestion(
-                id="L1-G04",
-                question="Find cells expressing Vip",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="molecular",
-                expected_entities=["Vip"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["Vip", "cell"]}
-            ),
-            BenchmarkQuestion(
-                id="L1-G05",
-                question="Where is Gad1 expressed?",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="molecular",
-                expected_entities=["Gad1"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["Gad1", "express"]}
-            ),
-        ])
-
-        # Regions
-        questions.extend([
-            BenchmarkQuestion(
-                id="L1-R01",
-                question="Tell me about the claustrum",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="multi-modal",
-                expected_entities=["CLA"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["claustrum", "CLA"]}
-            ),
-            BenchmarkQuestion(
-                id="L1-R02",
-                question="What is MOs?",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="multi-modal",
-                expected_entities=["MOs"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["MOs", "motor", "cortex"]}
-            ),
-            BenchmarkQuestion(
-                id="L1-R03",
-                question="Describe the primary somatosensory cortex",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="multi-modal",
-                expected_entities=["SSp"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["somatosensory", "SSp"]}
-            ),
-            BenchmarkQuestion(
-                id="L1-R04",
+                id="Q001",
                 question="What cells are in ACAd?",
                 complexity=QuestionComplexity.SIMPLE_FACTUAL,
                 domain="molecular",
+                expected_answer_contains=["cluster", "neuron", "cell type", "subclass"],
                 expected_entities=["ACAd"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["ACAd", "cell"]}
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region {acronym: 'ACAd'})-[:HAS_SUBCLASS]->(sc:Subclass) RETURN sc.name, count(*)"
             ),
-            BenchmarkQuestion(
-                id="L1-R05",
-                question="Tell me about the piriform cortex",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="multi-modal",
-                expected_entities=["PIR"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["piriform", "PIR"]}
-            ),
-        ])
 
-        # Morphology
-        questions.extend([
             BenchmarkQuestion(
-                id="L1-M01",
-                question="What is axonal length?",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="morphological",
-                expected_entities=["axonal_length"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["axon", "length"]}
-            ),
-            BenchmarkQuestion(
-                id="L1-M02",
-                question="Explain dendritic branching",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="morphological",
-                expected_entities=["dendritic_branches"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["dendrite", "branch"]}
-            ),
-            BenchmarkQuestion(
-                id="L1-M03",
-                question="What are morphological features of neurons?",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="morphological",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"should_mention": ["axon", "dendrite", "soma"]}
-            ),
-        ])
-
-        # Projection
-        questions.extend([
-            BenchmarkQuestion(
-                id="L1-P01",
-                question="What are projection patterns?",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="projection",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["project", "target"]}
-            ),
-            BenchmarkQuestion(
-                id="L1-P02",
-                question="Explain cortical connectivity",
-                complexity=QuestionComplexity.SIMPLE_FACTUAL,
-                domain="projection",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["connect", "cortex"]}
-            ),
-        ])
-
-        # Add more simple questions to reach 34
-        for i in range(6, 20):
-            questions.append(BenchmarkQuestion(
-                id=f"L1-G{i:02d}",
-                question=f"What are the characteristics of gene marker {i}?",
+                id="Q002",
+                question="Tell me about Pvalb neurons",
                 complexity=QuestionComplexity.SIMPLE_FACTUAL,
                 domain="molecular",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["gene", "marker"]}
-            ))
-
-        # ===== Level 2: Multi-Entity (28 questions) =====
-
-        questions.extend([
-            BenchmarkQuestion(
-                id="L2-001",
-                question="What is the relationship between Car3 and MOs?",
-                complexity=QuestionComplexity.MULTI_ENTITY,
-                domain="molecular",
-                expected_entities=["Car3", "MOs"],
-                gold_answer=None,
-                evaluation_criteria={
-                    "must_mention": ["Car3", "MOs"],
-                    "should_mention": ["express", "cluster"]
-                }
-            ),
-            BenchmarkQuestion(
-                id="L2-002",
-                question="How do Pvalb neurons relate to SSp?",
-                complexity=QuestionComplexity.MULTI_ENTITY,
-                domain="molecular",
-                expected_entities=["Pvalb", "SSp"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["Pvalb", "SSp"]}
-            ),
-            BenchmarkQuestion(
-                id="L2-003",
-                question="Analyze Sst expression in claustrum",
-                complexity=QuestionComplexity.MULTI_ENTITY,
-                domain="molecular",
-                expected_entities=["Sst", "CLA"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["Sst", "claustrum"]}
-            ),
-            BenchmarkQuestion(
-                id="L2-004",
-                question="What is the projection from MOs to SSp?",
-                complexity=QuestionComplexity.MULTI_ENTITY,
-                domain="projection",
-                expected_entities=["MOs", "SSp"],
-                gold_answer=None,
-                evaluation_criteria={
-                    "must_mention": ["MOs", "SSp", "project"],
-                    "should_have_projection_data": True
-                }
-            ),
-            BenchmarkQuestion(
-                id="L2-005",
-                question="Describe the connectivity between ACAd and MOs",
-                complexity=QuestionComplexity.MULTI_ENTITY,
-                domain="projection",
-                expected_entities=["ACAd", "MOs"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["ACAd", "MOs", "connect"]}
-            ),
-        ])
-
-        # Add more multi-entity questions
-        region_pairs = [
-            ("CLA", "MOs"), ("SSp", "MOs"), ("ACAd", "SSp"),
-            ("PIR", "CLA"), ("MOp", "MOs"), ("AI", "PIR")
-        ]
-
-        for i, (r1, r2) in enumerate(region_pairs, start=6):
-            questions.append(BenchmarkQuestion(
-                id=f"L2-{i:03d}",
-                question=f"What is the relationship between {r1} and {r2}?",
-                complexity=QuestionComplexity.MULTI_ENTITY,
-                domain="projection",
-                expected_entities=[r1, r2],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": [r1, r2]}
-            ))
-
-        # Gene-region pairs
-        gene_region_pairs = [
-            ("Car3", "MOs"), ("Pvalb", "SSp"), ("Sst", "CLA"),
-            ("Vip", "MOs"), ("Gad1", "ACAd")
-        ]
-
-        for i, (gene, region) in enumerate(gene_region_pairs, start=12):
-            questions.append(BenchmarkQuestion(
-                id=f"L2-{i:03d}",
-                question=f"Analyze {gene}+ neurons in {region}",
-                complexity=QuestionComplexity.MULTI_ENTITY,
-                domain="molecular",
-                expected_entities=[gene, region],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": [gene, region]}
-            ))
-
-        # Fill to 28
-        for i in range(17, 29):
-            questions.append(BenchmarkQuestion(
-                id=f"L2-{i:03d}",
-                question=f"Multi-entity query {i}",
-                complexity=QuestionComplexity.MULTI_ENTITY,
-                domain="multi-modal",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["neuron"]}
-            ))
-
-        # ===== Level 3: Comparative (31 questions) =====
-
-        questions.extend([
-            BenchmarkQuestion(
-                id="L3-001",
-                question="Compare Pvalb and Sst interneurons",
-                complexity=QuestionComplexity.COMPARATIVE,
-                domain="molecular",
-                expected_entities=["Pvalb", "Sst"],
-                gold_answer=None,
-                evaluation_criteria={
-                    "must_mention": ["Pvalb", "Sst", "compare", "difference"],
-                    "should_have_comparison": True
-                }
-            ),
-            BenchmarkQuestion(
-                id="L3-002",
-                question="What are the differences between MOs and MOp?",
-                complexity=QuestionComplexity.COMPARATIVE,
-                domain="multi-modal",
-                expected_entities=["MOs", "MOp"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["MOs", "MOp", "difference"]}
-            ),
-            BenchmarkQuestion(
-                id="L3-003",
-                question="Compare claustrum and piriform cortex connectivity",
-                complexity=QuestionComplexity.COMPARATIVE,
-                domain="projection",
-                expected_entities=["CLA", "PIR"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["claustrum", "piriform", "connect"]}
-            ),
-            BenchmarkQuestion(
-                id="L3-004",
-                question="Contrast axonal vs dendritic features in SSp",
-                complexity=QuestionComplexity.COMPARATIVE,
-                domain="morphological",
-                expected_entities=["SSp", "axonal", "dendritic"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["axon", "dendrite", "SSp"]}
-            ),
-            BenchmarkQuestion(
-                id="L3-005",
-                question="Compare excitatory and inhibitory neurons in MOs",
-                complexity=QuestionComplexity.COMPARATIVE,
-                domain="molecular",
-                expected_entities=["MOs", "excitatory", "inhibitory"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["excitatory", "inhibitory", "MOs"]}
-            ),
-        ])
-
-        # Gene comparisons
-        gene_comparisons = [
-            ("Car3", "Pvalb"), ("Sst", "Vip"), ("Gad1", "Gad2"),
-            ("Car3", "Sst"), ("Pvalb", "Vip")
-        ]
-
-        for i, (g1, g2) in enumerate(gene_comparisons, start=6):
-            questions.append(BenchmarkQuestion(
-                id=f"L3-{i:03d}",
-                question=f"Compare {g1} and {g2} expression patterns",
-                complexity=QuestionComplexity.COMPARATIVE,
-                domain="molecular",
-                expected_entities=[g1, g2],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": [g1, g2, "compare"]}
-            ))
-
-        # Region comparisons
-        region_comparisons = [
-            ("CLA", "AI"), ("SSp", "ACAd"), ("MOs", "SSp"),
-            ("PIR", "ENTl"), ("MOp", "SSp")
-        ]
-
-        for i, (r1, r2) in enumerate(region_comparisons, start=11):
-            questions.append(BenchmarkQuestion(
-                id=f"L3-{i:03d}",
-                question=f"What are the differences between {r1} and {r2}?",
-                complexity=QuestionComplexity.COMPARATIVE,
-                domain="multi-modal",
-                expected_entities=[r1, r2],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": [r1, r2, "difference"]}
-            ))
-
-        # Morphology comparisons
-        morphology_comparisons = [
-            "Compare axonal and dendritic branching patterns",
-            "Contrast pyramidal vs interneuron morphology",
-            "Compare IT and ET neuron features",
-            "Analyze morphological differences across cortical layers"
-        ]
-
-        for i, q in enumerate(morphology_comparisons, start=16):
-            questions.append(BenchmarkQuestion(
-                id=f"L3-{i:03d}",
-                question=q,
-                complexity=QuestionComplexity.COMPARATIVE,
-                domain="morphological",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["morpholog", "compare"]}
-            ))
-
-        # Fill to 31
-        for i in range(20, 32):
-            questions.append(BenchmarkQuestion(
-                id=f"L3-{i:03d}",
-                question=f"Comparative analysis {i}",
-                complexity=QuestionComplexity.COMPARATIVE,
-                domain="multi-modal",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["compare"]}
-            ))
-
-        # ===== Level 4: Explanatory (24 questions) =====
-
-        questions.extend([
-            BenchmarkQuestion(
-                id="L4-001",
-                question="Why do Pvalb neurons have distinct morphology?",
-                complexity=QuestionComplexity.EXPLANATORY,
-                domain="multi-modal",
+                expected_answer_contains=["parvalbumin", "interneuron", "inhibitory"],
                 expected_entities=["Pvalb"],
-                gold_answer=None,
-                evaluation_criteria={
-                    "must_mention": ["Pvalb", "morphology"],
-                    "should_explain": True
-                }
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region)-[:HAS_SUBCLASS]->(sc:Subclass) WHERE sc.name CONTAINS 'Pvalb' RETURN r.acronym, sc.name"
             ),
+
             BenchmarkQuestion(
-                id="L4-002",
-                question="Explain the functional significance of claustrum connectivity",
-                complexity=QuestionComplexity.EXPLANATORY,
-                domain="projection",
-                expected_entities=["CLA"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["claustrum", "function", "connect"]}
-            ),
-            BenchmarkQuestion(
-                id="L4-003",
-                question="What determines regional cell type composition?",
-                complexity=QuestionComplexity.EXPLANATORY,
+                id="Q003",
+                question="How many neurons are in MOs?",
+                complexity=QuestionComplexity.SIMPLE_FACTUAL,
                 domain="molecular",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"should_mention": ["cell type", "region", "determine"]}
+                expected_answer_contains=["neuron", "count", "MOs"],
+                expected_entities=["MOs"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region {acronym: 'MOs'}) RETURN count(n)"
             ),
-            BenchmarkQuestion(
-                id="L4-004",
-                question="Why do motor regions have unique projection patterns?",
-                complexity=QuestionComplexity.EXPLANATORY,
-                domain="projection",
-                expected_entities=["MOs", "MOp"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["motor", "project"]}
-            ),
-            BenchmarkQuestion(
-                id="L4-005",
-                question="Explain the relationship between gene expression and morphology",
-                complexity=QuestionComplexity.EXPLANATORY,
-                domain="multi-modal",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["gene", "morphology", "relationship"]}
-            ),
-        ])
 
-        # More explanatory questions
-        explanatory_questions = [
-            "What mechanisms underlie cortical layer formation?",
-            "Explain how molecular markers define cell types",
-            "Why are some regions more densely connected?",
-            "What drives neuronal morphological diversity?",
-            "Explain the role of interneurons in cortical circuits",
-            "How do projection patterns relate to function?",
-            "What determines axonal targeting specificity?",
-            "Explain regional heterogeneity in cell composition",
-            "Why do certain genes cluster spatially?",
-            "What is the significance of dendritic branching complexity?"
-        ]
-
-        for i, q in enumerate(explanatory_questions, start=6):
-            questions.append(BenchmarkQuestion(
-                id=f"L4-{i:03d}",
-                question=q,
-                complexity=QuestionComplexity.EXPLANATORY,
-                domain="multi-modal",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"should_explain": True}
-            ))
-
-        # Fill to 24
-        for i in range(16, 25):
-            questions.append(BenchmarkQuestion(
-                id=f"L4-{i:03d}",
-                question=f"Explain mechanism {i}",
-                complexity=QuestionComplexity.EXPLANATORY,
-                domain="multi-modal",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["explain"]}
-            ))
-
-        # ===== Level 5: Open-Ended (10 questions) =====
-
-        questions.extend([
             BenchmarkQuestion(
-                id="L5-001",
-                question="Provide a comprehensive analysis of the claustrum",
-                complexity=QuestionComplexity.OPEN_ENDED,
-                domain="multi-modal",
-                expected_entities=["CLA"],
-                gold_answer=None,
-                evaluation_criteria={
-                    "must_mention": ["claustrum"],
-                    "should_cover_modalities": ["molecular", "morphological", "projection"]
-                }
-            ),
-            BenchmarkQuestion(
-                id="L5-002",
-                question="Give me everything about Pvalb interneurons",
-                complexity=QuestionComplexity.OPEN_ENDED,
-                domain="multi-modal",
-                expected_entities=["Pvalb"],
-                gold_answer=None,
-                evaluation_criteria={
-                    "must_mention": ["Pvalb", "interneuron"],
-                    "should_be_comprehensive": True
-                }
-            ),
-            BenchmarkQuestion(
-                id="L5-003",
-                question="Analyze the motor cortex from all perspectives",
-                complexity=QuestionComplexity.OPEN_ENDED,
-                domain="multi-modal",
-                expected_entities=["MOs", "MOp"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["motor", "cortex"]}
-            ),
-            BenchmarkQuestion(
-                id="L5-004",
-                question="Tell me everything about cortical cell type diversity",
-                complexity=QuestionComplexity.OPEN_ENDED,
-                domain="multi-modal",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"should_mention": ["cell type", "diversity", "cortex"]}
-            ),
-            BenchmarkQuestion(
-                id="L5-005",
-                question="Comprehensive overview of brain connectivity patterns",
-                complexity=QuestionComplexity.OPEN_ENDED,
-                domain="projection",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["connectivity", "pattern"]}
-            ),
-            BenchmarkQuestion(
-                id="L5-006",
-                question="Describe the complete landscape of gene marker expression",
-                complexity=QuestionComplexity.OPEN_ENDED,
+                id="Q004",
+                question="What is the location of Sst neurons?",
+                complexity=QuestionComplexity.SIMPLE_FACTUAL,
                 domain="molecular",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["gene", "marker", "expression"]}
+                expected_answer_contains=["Sst", "region", "location"],
+                expected_entities=["Sst"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:EXPRESS_GENE]->(g:GeneMarker {gene: 'Sst'})-[:LOCATE_AT]->(r:Region) RETURN DISTINCT r.acronym"
             ),
+
             BenchmarkQuestion(
-                id="L5-007",
-                question="Full morphological characterization of cortical neurons",
-                complexity=QuestionComplexity.OPEN_ENDED,
+                id="Q005",
+                question="What genes are expressed in CA1?",
+                complexity=QuestionComplexity.SIMPLE_FACTUAL,
+                domain="molecular",
+                expected_answer_contains=["gene", "marker", "expression", "CA1"],
+                expected_entities=["CA1"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region {acronym: 'CA1'})<-[:LOCATE_AT]-(n:Neuron)-[:EXPRESS_GENE]->(g:GeneMarker) RETURN DISTINCT g.gene"
+            ),
+
+            BenchmarkQuestion(
+                id="Q006",
+                question="What is the axonal length of neurons in VISp?",
+                complexity=QuestionComplexity.SIMPLE_FACTUAL,
                 domain="morphological",
-                expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["morpholog", "neuron", "cortex"]}
+                expected_answer_contains=["axonal", "length", "VISp", "morphology"],
+                expected_entities=["VISp"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region {acronym: 'VISp'}) RETURN avg(n.axonal_length), stdev(n.axonal_length)"
             ),
+
             BenchmarkQuestion(
-                id="L5-008",
-                question="Comprehensive analysis of somatosensory system",
-                complexity=QuestionComplexity.OPEN_ENDED,
-                domain="multi-modal",
+                id="Q007",
+                question="Where does SSp project to?",
+                complexity=QuestionComplexity.SIMPLE_FACTUAL,
+                domain="projection",
+                expected_answer_contains=["project", "target", "SSp", "connection"],
                 expected_entities=["SSp"],
-                gold_answer=None,
-                evaluation_criteria={"must_mention": ["somatosensory"]}
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region {acronym: 'SSp'})-[:PROJECT_TO]->(t:Region) RETURN t.acronym, t.name"
             ),
+
             BenchmarkQuestion(
-                id="L5-009",
-                question="Explore the relationship between molecular, morphological, and projection features",
+                id="Q008",
+                question="What are the dendritic features of neurons in SUB?",
+                complexity=QuestionComplexity.SIMPLE_FACTUAL,
+                domain="morphological",
+                expected_answer_contains=["dendritic", "morphology", "SUB"],
+                expected_entities=["SUB"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region {acronym: 'SUB'}) RETURN avg(n.dendritic_length), avg(n.dendritic_branches)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q009",
+                question="What subclasses are in the thalamus?",
+                complexity=QuestionComplexity.SIMPLE_FACTUAL,
+                domain="molecular",
+                expected_answer_contains=["subclass", "thalamus", "cell type"],
+                expected_entities=["TH"],  # Thalamus缩写
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region)-[:HAS_SUBCLASS]->(sc:Subclass) WHERE r.name CONTAINS 'thalamus' RETURN DISTINCT sc.name"
+            ),
+
+            BenchmarkQuestion(
+                id="Q010",
+                question="How many projection targets does ACAv have?",
+                complexity=QuestionComplexity.SIMPLE_FACTUAL,
+                domain="projection",
+                expected_answer_contains=["projection", "target", "ACAv", "count"],
+                expected_entities=["ACAv"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region {acronym: 'ACAv'})-[:PROJECT_TO]->(t:Region) RETURN count(DISTINCT t)"
+            ),
+        ])
+
+        # =====================================================================
+        # CATEGORY 2: MULTI-ENTITY (多实体查询) - 10 questions
+        # =====================================================================
+
+        questions.extend([
+            BenchmarkQuestion(
+                id="Q011",
+                question="Compare Pvalb and Sst neurons in MOs",
+                complexity=QuestionComplexity.MULTI_ENTITY,
+                domain="molecular",
+                expected_answer_contains=["Pvalb", "Sst", "MOs", "comparison", "difference"],
+                expected_entities=["Pvalb", "Sst", "MOs"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region {acronym: 'MOs'})-[:HAS_SUBCLASS]->(sc:Subclass) WHERE sc.name CONTAINS 'Pvalb' OR sc.name CONTAINS 'Sst' RETURN sc.name, sc.pct_cells"
+            ),
+
+            BenchmarkQuestion(
+                id="Q012",
+                question="What are the morphological differences between CA1 and CA3?",
+                complexity=QuestionComplexity.MULTI_ENTITY,
+                domain="morphological",
+                expected_answer_contains=["CA1", "CA3", "morphology", "difference"],
+                expected_entities=["CA1", "CA3"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region) WHERE r.acronym IN ['CA1', 'CA3'] RETURN r.acronym, avg(n.axonal_length), avg(n.dendritic_length)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q013",
+                question="Which regions have both Gad2 and Vip neurons?",
+                complexity=QuestionComplexity.MULTI_ENTITY,
+                domain="molecular",
+                expected_answer_contains=["Gad2", "Vip", "region", "both"],
+                expected_entities=["Gad2", "Vip"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region)-[:HAS_SUBCLASS]->(sc:Subclass) WHERE sc.name CONTAINS 'Gad2' OR sc.name CONTAINS 'Vip' WITH r, collect(sc.name) AS subclasses WHERE size(subclasses) = 2 RETURN r.acronym"
+            ),
+
+            BenchmarkQuestion(
+                id="Q014",
+                question="Compare the projection patterns of ACAd and MOs",
+                complexity=QuestionComplexity.MULTI_ENTITY,
+                domain="projection",
+                expected_answer_contains=["ACAd", "MOs", "projection", "comparison"],
+                expected_entities=["ACAd", "MOs"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region)-[:PROJECT_TO]->(t:Region) WHERE r.acronym IN ['ACAd', 'MOs'] RETURN r.acronym, collect(t.acronym)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q015",
+                question="What genes are expressed in both SSp and VISp?",
+                complexity=QuestionComplexity.MULTI_ENTITY,
+                domain="molecular",
+                expected_answer_contains=["gene", "SSp", "VISp", "both"],
+                expected_entities=["SSp", "VISp"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region)<-[:LOCATE_AT]-(n:Neuron)-[:EXPRESS_GENE]->(g:GeneMarker) WHERE r.acronym IN ['SSp', 'VISp'] WITH g, collect(DISTINCT r.acronym) AS regions WHERE size(regions) = 2 RETURN g.gene"
+            ),
+
+            BenchmarkQuestion(
+                id="Q016",
+                question="Which has more neurons: PL or ACAd?",
+                complexity=QuestionComplexity.MULTI_ENTITY,
+                domain="molecular",
+                expected_answer_contains=["neuron", "count", "PL", "ACAd", "more"],
+                expected_entities=["PL", "ACAd"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region) WHERE r.acronym IN ['PL', 'ACAd'] RETURN r.acronym, count(n) ORDER BY count(n) DESC"
+            ),
+
+            BenchmarkQuestion(
+                id="Q017",
+                question="Compare axonal branching in CA1, CA3, and DG",
+                complexity=QuestionComplexity.MULTI_ENTITY,
+                domain="morphological",
+                expected_answer_contains=["axonal", "branch", "CA1", "CA3", "DG"],
+                expected_entities=["CA1", "CA3", "DG"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region) WHERE r.acronym IN ['CA1', 'CA3', 'DG'] RETURN r.acronym, avg(n.axonal_branches), stdev(n.axonal_branches)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q018",
+                question="What projection targets are shared by MOs and SSp?",
+                complexity=QuestionComplexity.MULTI_ENTITY,
+                domain="projection",
+                expected_answer_contains=["projection", "target", "MOs", "SSp", "shared"],
+                expected_entities=["MOs", "SSp"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region)-[:PROJECT_TO]->(t:Region) WHERE r.acronym IN ['MOs', 'SSp'] WITH t, collect(DISTINCT r.acronym) AS sources WHERE size(sources) = 2 RETURN t.acronym"
+            ),
+
+            BenchmarkQuestion(
+                id="Q019",
+                question="Which region has longer dendrites: ACAd or ORBl?",
+                complexity=QuestionComplexity.MULTI_ENTITY,
+                domain="morphological",
+                expected_answer_contains=["dendritic", "length", "ACAd", "ORBl"],
+                expected_entities=["ACAd", "ORBl"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region) WHERE r.acronym IN ['ACAd', 'ORBl'] RETURN r.acronym, avg(n.dendritic_length) ORDER BY avg(n.dendritic_length) DESC"
+            ),
+
+            BenchmarkQuestion(
+                id="Q020",
+                question="Compare the cell type diversity in hippocampus and cortex",
+                complexity=QuestionComplexity.MULTI_ENTITY,
+                domain="molecular",
+                expected_answer_contains=["cell type", "diversity", "hippocampus", "cortex"],
+                expected_entities=["CA1", "CA3", "MOs", "SSp"],  # 代表性区域
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region)-[:HAS_SUBCLASS]->(sc:Subclass) WHERE r.acronym IN ['CA1', 'CA3', 'MOs', 'SSp'] RETURN r.acronym, count(DISTINCT sc)"
+            ),
+        ])
+
+        # =====================================================================
+        # CATEGORY 3: COMPARATIVE (比较分析) - 10 questions
+        # =====================================================================
+
+        questions.extend([
+            BenchmarkQuestion(
+                id="Q021",
+                question="What is the difference in molecular composition between excitatory and inhibitory neurons in MOs?",
+                complexity=QuestionComplexity.COMPARATIVE,
+                domain="molecular",
+                expected_answer_contains=["excitatory", "inhibitory", "molecular", "difference", "MOs"],
+                expected_entities=["MOs"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region {acronym: 'MOs'})-[:HAS_SUBCLASS]->(sc:Subclass) RETURN sc.name, sc.pct_cells, sc.neurotransmitter"
+            ),
+
+            BenchmarkQuestion(
+                id="Q022",
+                question="How does the projection strength to thalamus differ between motor and sensory cortex?",
+                complexity=QuestionComplexity.COMPARATIVE,
+                domain="projection",
+                expected_answer_contains=["projection", "strength", "thalamus", "motor", "sensory"],
+                expected_entities=["MOs", "SSp", "TH"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region)-[p:PROJECT_TO]->(t:Region) WHERE r.acronym IN ['MOs', 'SSp'] AND t.name CONTAINS 'thalamus' RETURN r.acronym, sum(p.weight)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q023",
+                question="Compare the morphological complexity of pyramidal neurons across cortical layers",
+                complexity=QuestionComplexity.COMPARATIVE,
+                domain="morphological",
+                expected_answer_contains=["pyramidal", "morphology", "complexity", "layer"],
+                expected_entities=["MOs", "ACAd", "SSp"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region) WHERE r.acronym IN ['MOs', 'ACAd', 'SSp'] RETURN r.acronym, avg(n.axonal_branches + n.dendritic_branches) AS complexity"
+            ),
+
+            BenchmarkQuestion(
+                id="Q024",
+                question="Which brain regions show the highest mismatch between molecular and morphological organization?",
+                complexity=QuestionComplexity.COMPARATIVE,
+                domain="multi-modal",
+                expected_answer_contains=["mismatch", "molecular", "morphological", "region"],
+                expected_entities=[],  # 系统性筛选，无初始实体
+                requires_kg=True,
+                ground_truth_cypher="// Complex multi-step analysis required"
+            ),
+
+            BenchmarkQuestion(
+                id="Q025",
+                question="How does the dendritic architecture differ between hippocampal subfields?",
+                complexity=QuestionComplexity.COMPARATIVE,
+                domain="morphological",
+                expected_answer_contains=["dendritic", "architecture", "hippocampus", "subfield"],
+                expected_entities=["CA1", "CA2", "CA3", "DG"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region) WHERE r.acronym IN ['CA1', 'CA2', 'CA3', 'DG'] RETURN r.acronym, avg(n.dendritic_length), avg(n.dendritic_branches)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q026",
+                question="Compare Vip and Sst interneurons in terms of projection targets",
+                complexity=QuestionComplexity.COMPARATIVE,
+                domain="projection",
+                expected_answer_contains=["Vip", "Sst", "interneuron", "projection", "target"],
+                expected_entities=["Vip", "Sst"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:EXPRESS_GENE]->(g:GeneMarker)-[:PROJECT_TO]->(t:Region) WHERE g.gene IN ['Vip', 'Sst'] RETURN g.gene, collect(DISTINCT t.acronym)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q027",
+                question="What is the relationship between gene expression diversity and morphological complexity across regions?",
+                complexity=QuestionComplexity.COMPARATIVE,
+                domain="multi-modal",
+                expected_answer_contains=["gene", "expression", "morphology", "complexity", "relationship"],
+                expected_entities=[],
+                requires_kg=True,
+                ground_truth_cypher="// Complex correlation analysis"
+            ),
+
+            BenchmarkQuestion(
+                id="Q028",
+                question="How do long-range vs local projections differ in their molecular signatures?",
+                complexity=QuestionComplexity.COMPARATIVE,
+                domain="multi-modal",
+                expected_answer_contains=["long-range", "local", "projection", "molecular", "signature"],
+                expected_entities=[],
+                requires_kg=True,
+                ground_truth_cypher="// Requires projection distance analysis"
+            ),
+
+            BenchmarkQuestion(
+                id="Q029",
+                question="Compare the axonal morphology of IT vs PT neurons",
+                complexity=QuestionComplexity.COMPARATIVE,
+                domain="morphological",
+                expected_answer_contains=["IT", "PT", "axonal", "morphology"],
+                expected_entities=["IT", "PT"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:BELONGS_TO]->(c:Cluster) WHERE c.name CONTAINS 'IT' OR c.name CONTAINS 'PT' RETURN c.name, avg(n.axonal_length), avg(n.axonal_branches)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q030",
+                question="Which regions have convergent projection inputs from both cortex and thalamus?",
+                complexity=QuestionComplexity.COMPARATIVE,
+                domain="projection",
+                expected_answer_contains=["convergent", "projection", "cortex", "thalamus"],
+                expected_entities=[],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (source:Region)-[:PROJECT_TO]->(target:Region) WHERE source.name CONTAINS 'cortex' OR source.name CONTAINS 'thalamus' WITH target, collect(DISTINCT source.name) AS sources WHERE size(sources) >= 2 RETURN target.acronym"
+            ),
+        ])
+
+        # =====================================================================
+        # CATEGORY 4: EXPLANATORY (解释性查询) - 10 questions
+        # =====================================================================
+
+        questions.extend([
+            BenchmarkQuestion(
+                id="Q031",
+                question="Why do Pvalb neurons have fast-spiking properties?",
+                complexity=QuestionComplexity.EXPLANATORY,
+                domain="molecular",
+                expected_answer_contains=["Pvalb", "fast-spiking", "property", "mechanism"],
+                expected_entities=["Pvalb"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:EXPRESS_GENE]->(g:GeneMarker {gene: 'Pvalb'}) RETURN n.properties"
+            ),
+
+            BenchmarkQuestion(
+                id="Q032",
+                question="How does the morphology of pyramidal neurons support their long-range projections?",
+                complexity=QuestionComplexity.EXPLANATORY,
+                domain="multi-modal",
+                expected_answer_contains=["pyramidal", "morphology", "long-range", "projection", "support"],
+                expected_entities=[],
+                requires_kg=True,
+                ground_truth_cypher="// Requires integrated analysis"
+            ),
+
+            BenchmarkQuestion(
+                id="Q033",
+                question="What determines the projection targets of CA1 neurons?",
+                complexity=QuestionComplexity.EXPLANATORY,
+                domain="projection",
+                expected_answer_contains=["CA1", "projection", "target", "determine"],
+                expected_entities=["CA1"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region {acronym: 'CA1'})-[:PROJECT_TO]->(t:Region) RETURN t.acronym, t.properties"
+            ),
+
+            BenchmarkQuestion(
+                id="Q034",
+                question="Explain the relationship between dendritic branching complexity and input integration",
+                complexity=QuestionComplexity.EXPLANATORY,
+                domain="morphological",
+                expected_answer_contains=["dendritic", "branching", "complexity", "input", "integration"],
+                expected_entities=[],
+                requires_kg=False,  # 部分基于文献知识
+                ground_truth_cypher="MATCH (n:Neuron) RETURN avg(n.dendritic_branches), avg(n.dendritic_length)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q035",
+                question="Why are there regional differences in cell type composition?",
+                complexity=QuestionComplexity.EXPLANATORY,
+                domain="molecular",
+                expected_answer_contains=["regional", "difference", "cell type", "composition"],
+                expected_entities=[],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region)-[:HAS_SUBCLASS]->(sc:Subclass) RETURN r.acronym, count(DISTINCT sc)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q036",
+                question="How does molecular identity relate to projection specificity in cortical neurons?",
+                complexity=QuestionComplexity.EXPLANATORY,
+                domain="multi-modal",
+                expected_answer_contains=["molecular", "identity", "projection", "specificity"],
+                expected_entities=[],
+                requires_kg=True,
+                ground_truth_cypher="// Integrated molecular-projection analysis"
+            ),
+
+            BenchmarkQuestion(
+                id="Q037",
+                question="What functional role does the claustrum play based on its connectivity?",
+                complexity=QuestionComplexity.EXPLANATORY,
+                domain="projection",
+                expected_answer_contains=["claustrum", "functional", "role", "connectivity"],
+                expected_entities=["CLA"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region {acronym: 'CLA'})-[:PROJECT_TO]->(t:Region) RETURN t.acronym"
+            ),
+
+            BenchmarkQuestion(
+                id="Q038",
+                question="Explain why hippocampal neurons have distinct morphological features",
+                complexity=QuestionComplexity.EXPLANATORY,
+                domain="morphological",
+                expected_answer_contains=["hippocampal", "morphology", "distinct", "feature"],
+                expected_entities=["CA1", "CA3", "DG"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region) WHERE r.acronym IN ['CA1', 'CA3', 'DG'] RETURN r.acronym, avg(n.axonal_length), avg(n.dendritic_length)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q039",
+                question="How does cell type diversity contribute to circuit function in cortex?",
+                complexity=QuestionComplexity.EXPLANATORY,
+                domain="multi-modal",
+                expected_answer_contains=["cell type", "diversity", "circuit", "function"],
+                expected_entities=["MOs", "SSp", "VISp"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region)-[:HAS_SUBCLASS]->(sc:Subclass) WHERE r.acronym IN ['MOs', 'SSp', 'VISp'] RETURN r.acronym, count(DISTINCT sc)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q040",
+                question="Why do different interneuron types target specific subcellular compartments?",
+                complexity=QuestionComplexity.EXPLANATORY,
+                domain="morphological",
+                expected_answer_contains=["interneuron", "type", "target", "subcellular", "compartment"],
+                expected_entities=["Pvalb", "Sst", "Vip"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (n:Neuron)-[:EXPRESS_GENE]->(g:GeneMarker) WHERE g.gene IN ['Pvalb', 'Sst', 'Vip'] RETURN g.gene, n.axonal_properties"
+            ),
+        ])
+
+        # =====================================================================
+        # CATEGORY 5: OPEN-ENDED (开放式查询) - 10 questions
+        # =====================================================================
+
+        questions.extend([
+            BenchmarkQuestion(
+                id="Q041",
+                question="What are the key organizational principles of cortical circuits?",
                 complexity=QuestionComplexity.OPEN_ENDED,
                 domain="multi-modal",
+                expected_answer_contains=["organizational", "principle", "cortical", "circuit"],
                 expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={
-                    "should_cover_modalities": ["molecular", "morphological", "projection"]
-                }
+                requires_kg=True,
+                ground_truth_cypher="// Comprehensive multi-modal analysis"
             ),
+
             BenchmarkQuestion(
-                id="L5-010",
-                question="What can you tell me about the entire brain knowledge graph?",
+                id="Q042",
+                question="Describe the molecular diversity of neurons in the hippocampus",
+                complexity=QuestionComplexity.OPEN_ENDED,
+                domain="molecular",
+                expected_answer_contains=["molecular", "diversity", "hippocampus", "neuron"],
+                expected_entities=["CA1", "CA2", "CA3", "DG"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region)-[:HAS_SUBCLASS]->(sc:Subclass) WHERE r.acronym IN ['CA1', 'CA2', 'CA3', 'DG'] RETURN r.acronym, sc.name, sc.pct_cells"
+            ),
+
+            BenchmarkQuestion(
+                id="Q043",
+                question="How are brain regions organized into functional networks?",
+                complexity=QuestionComplexity.OPEN_ENDED,
+                domain="projection",
+                expected_answer_contains=["region", "organize", "functional", "network"],
+                expected_entities=[],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r1:Region)-[:PROJECT_TO]->(r2:Region) RETURN r1.acronym, collect(r2.acronym)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q044",
+                question="What factors determine neuronal morphology?",
+                complexity=QuestionComplexity.OPEN_ENDED,
+                domain="morphological",
+                expected_answer_contains=["factor", "determine", "neuronal", "morphology"],
+                expected_entities=[],
+                requires_kg=False,
+                ground_truth_cypher="MATCH (n:Neuron) RETURN n.axonal_length, n.dendritic_length, n.location"
+            ),
+
+            BenchmarkQuestion(
+                id="Q045",
+                question="Give me a comprehensive analysis of Car3+ neurons",
                 complexity=QuestionComplexity.OPEN_ENDED,
                 domain="multi-modal",
+                expected_answer_contains=["Car3", "comprehensive", "analysis"],
+                expected_entities=["Car3"],
+                requires_kg=True,
+                ground_truth_cypher="// Full multi-modal analysis of Car3"
+            ),
+
+            BenchmarkQuestion(
+                id="Q046",
+                question="What distinguishes cortical from subcortical projection patterns?",
+                complexity=QuestionComplexity.OPEN_ENDED,
+                domain="projection",
+                expected_answer_contains=["cortical", "subcortical", "projection", "pattern", "distinguish"],
                 expected_entities=[],
-                gold_answer=None,
-                evaluation_criteria={"should_be_comprehensive": True}
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region)-[:PROJECT_TO]->(t:Region) WHERE r.name CONTAINS 'cortex' OR r.name CONTAINS 'striatum' RETURN r.name, collect(t.acronym)"
+            ),
+
+            BenchmarkQuestion(
+                id="Q047",
+                question="Describe the relationship between cell type and connectivity",
+                complexity=QuestionComplexity.OPEN_ENDED,
+                domain="multi-modal",
+                expected_answer_contains=["cell type", "connectivity", "relationship"],
+                expected_entities=[],
+                requires_kg=True,
+                ground_truth_cypher="// Integrated molecular-projection analysis"
+            ),
+
+            BenchmarkQuestion(
+                id="Q048",
+                question="What are the major cell types in the cortex and their properties?",
+                complexity=QuestionComplexity.OPEN_ENDED,
+                domain="molecular",
+                expected_answer_contains=["cell type", "cortex", "property"],
+                expected_entities=["MOs", "SSp", "VISp", "ACAd"],
+                requires_kg=True,
+                ground_truth_cypher="MATCH (r:Region)-[:HAS_SUBCLASS]->(sc:Subclass) WHERE r.acronym IN ['MOs', 'SSp', 'VISp', 'ACAd'] RETURN sc.name, sc.properties, sc.pct_cells"
+            ),
+
+            BenchmarkQuestion(
+                id="Q049",
+                question="How does the brain achieve both specificity and flexibility in connectivity?",
+                complexity=QuestionComplexity.OPEN_ENDED,
+                domain="projection",
+                expected_answer_contains=["specificity", "flexibility", "connectivity"],
+                expected_entities=[],
+                requires_kg=True,
+                ground_truth_cypher="// High-level connectivity analysis"
+            ),
+
+            BenchmarkQuestion(
+                id="Q050",
+                question="What can we learn about brain function from multi-modal cell atlases?",
+                complexity=QuestionComplexity.OPEN_ENDED,
+                domain="multi-modal",
+                expected_answer_contains=["brain", "function", "multi-modal", "atlas"],
+                expected_entities=[],
+                requires_kg=True,
+                ground_truth_cypher="// Meta-analysis question"
             ),
         ])
 

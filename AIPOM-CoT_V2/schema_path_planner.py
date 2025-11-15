@@ -98,12 +98,12 @@ class SchemaGraph:
 
 class SchemaPathFinder:
     """
-    在Schema中寻找最优路径
+    在Schema中寻找最优路径（修复版）
 
-    算法:
-    - BFS: 寻找最短路径
-    - Dijkstra: 考虑权重的最优路径
-    - Bidirectional: 双向搜索加速
+    🔧 关键修复：
+    1. 统一元组格式：内部用4元组，输出用3元组
+    2. 修复_score_path方法
+    3. 添加空路径保护
     """
 
     def __init__(self, schema_graph: SchemaGraph):
@@ -114,7 +114,13 @@ class SchemaPathFinder:
                    end_label: str,
                    max_hops: int = 3,
                    max_paths: int = 5) -> List[SchemaPath]:
-        """找到从start到end的所有可行路径"""
+        """
+        找到从start到end的所有可行路径（修复版）
+
+        🔧 修复：
+        - 内部使用4元组 (source, rel_type, target, count)
+        - 输出转换为3元组 (source, rel_type, target)
+        """
 
         if start_label == end_label:
             return []
@@ -133,15 +139,15 @@ class SchemaPathFinder:
             if len(edge_path) >= max_hops:
                 continue
 
-            # Found target
+            # ✅ Found target
             if current == end_label and len(edge_path) > 0:
-                # ✅ FIX: edge_path中是4元组 (source, rel_type, target, count)
+                # ✅ 正确处理4元组 -> 3元组
                 score = self._score_path(edge_path)
-                total_rels = sum(count for _, _, _, count in edge_path)  # ✅ 4个元素!
+                total_rels = sum(count for _, _, _, count in edge_path)  # ✅ 4元组
 
-                # ✅ FIX: 构建SchemaPath时也要用正确的格式
+                # ✅ 转换为3元组
                 hops = [
-                    (source, rel_type, target)  # SchemaPath.hops只需要3个元素
+                    (source, rel_type, target)
                     for source, rel_type, target, _ in edge_path
                 ]
 
@@ -163,7 +169,7 @@ class SchemaPathFinder:
             # Expand neighbors
             for rel_type, next_node, count in self.graph.get_neighbors(current):
                 new_node_path = node_path + [next_node]
-                # ✅ 保持4元组格式: (source, rel_type, target, count)
+                # ✅ 保持4元组格式用于内部处理
                 new_edge_path = edge_path + [(current, rel_type, next_node, count)]
                 queue.append((new_node_path, new_edge_path))
 
@@ -175,7 +181,11 @@ class SchemaPathFinder:
         return paths[:max_paths]
 
     def _score_path(self, edge_path: List[Tuple]) -> float:
-        """评估路径质量"""
+        """
+        评估路径质量（修复版）
+
+        🔧 修复：正确解包4元组 (source, rel_type, target, count)
+        """
         if not edge_path:
             return 0.0
 
@@ -186,7 +196,7 @@ class SchemaPathFinder:
         score *= length_penalty
 
         # Factor 2: Relationship frequency bonus
-        # ✅ FIX: 正确解包4元组
+        # ✅ 正确解包4元组
         total_count = sum(count for _, _, _, count in edge_path)
         freq_bonus = min(1.5, 1.0 + (total_count / 10000))
         score *= freq_bonus
@@ -200,7 +210,7 @@ class SchemaPathFinder:
             'BELONGS_TO': 1.1
         }
 
-        # ✅ FIX: 正确解包4元组
+        # ✅ 正确解包4元组
         for _, rel_type, _, _ in edge_path:
             if rel_type in preferred_rels:
                 score *= preferred_rels[rel_type]
@@ -261,15 +271,12 @@ class DynamicSchemaPathPlanner:
         else:
             return self._generate_exploratory_plan()
 
-    def _plan_gene_marker_analysis(self,
-                                   gene_cluster: EntityCluster,
-                                   all_clusters: List[EntityCluster],
-                                   question: str) -> List[QueryPlan]:
-        """基因marker分析的动态规划"""
+    def _plan_gene_marker_analysis(self, gene_cluster, all_clusters, question):
+        """基因marker分析的动态规划（修复版）"""
         plans = []
         gene_name = gene_cluster.primary_entity.entity_id
 
-        # Step 1: Find clusters expressing gene
+        # Step 1: Find clusters
         plans.append(QueryPlan(
             step_number=1,
             purpose=f"Find cell clusters expressing {gene_name}",
@@ -277,7 +284,7 @@ class DynamicSchemaPathPlanner:
             schema_path=SchemaPath(
                 start_label="Cluster",
                 end_label="Cluster",
-                hops=[],  # ✅ 空列表
+                hops=[],  # ✅ 空列表（不是None）
                 score=1.0,
                 total_relationships=0
             ),
@@ -296,11 +303,12 @@ class DynamicSchemaPathPlanner:
             modality='molecular'
         ))
 
-        # Step 2: Find enriched regions via HAS_CLUSTER
+        # Step 2: Find enriched regions
         region_cluster_path = self.path_finder.find_shortest_path('Region', 'Cluster')
 
-        # ✅ FIX: 如果没找到路径,使用默认的
+        # ✅ 修复：如果找不到路径，使用默认路径
         if not region_cluster_path:
+            logger.warning("   Could not find Region->Cluster path, using default")
             region_cluster_path = SchemaPath(
                 start_label="Region",
                 end_label="Cluster",
@@ -313,7 +321,7 @@ class DynamicSchemaPathPlanner:
             step_number=2,
             purpose=f"Identify regions enriched for {gene_name}+ clusters",
             action="execute_cypher",
-            schema_path=region_cluster_path,
+            schema_path=region_cluster_path,  # ✅ 保证不是None
             cypher_template="""
             MATCH (r:Region)-[h:HAS_CLUSTER]->(c:Cluster)
             WHERE c.markers CONTAINS $gene
@@ -330,7 +338,7 @@ class DynamicSchemaPathPlanner:
             modality='molecular'
         ))
 
-        # Step 3: Morphological features (if mentioned)
+        # Step 3: Morphology (如果问题提到)
         question_lower = question.lower()
         if any(kw in question_lower for kw in ['morpholog', 'feature', 'structure', 'axon', 'dendrite']):
             plans.append(QueryPlan(
@@ -361,7 +369,7 @@ class DynamicSchemaPathPlanner:
                 modality='morphological'
             ))
 
-        # Step 4: Projection patterns (if mentioned)
+        # Step 4: Projections (如果问题提到)
         if any(kw in question_lower for kw in ['project', 'target', 'connect', 'output', 'pathway']):
             plans.append(QueryPlan(
                 step_number=len(plans) + 1,

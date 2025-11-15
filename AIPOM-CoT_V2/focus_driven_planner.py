@@ -136,26 +136,30 @@ class FocusDrivenPlanner:
                                    analysis_state,
                                    question: str) -> List:
         """
-        生成聚焦式计划 (修复版)
+        生成聚焦式计划（修复版）
+
+        🔧 关键修复：
+        1. Phase 2识别focus后，立即生成Phase 3步骤
+        2. 避免浪费迭代
+        3. 添加防护性检查
 
         Phase 1: Broad search (找所有相关entities)
-        Phase 2 + 3: Identify focus + Deep dive (合并执行)
-
-        🔧 修复: Phase 2识别focus后立即生成Phase 3步骤
+        Phase 2+3: Identify focus + Deep dive (合并执行)
         """
 
         candidates = []
 
-        # 判断当前phase
+        # ===== Phase 1: Broad search =====
         if not analysis_state.discovered_entities.get('Region'):
-            # Phase 1: Broad search
             logger.info("   Focus-Driven Phase 1: Broad search for regions")
             candidates.extend(self._phase1_broad_search(analysis_state))
+            return candidates  # ✅ 立即返回，进入下一次迭代
 
-        elif not hasattr(analysis_state, 'primary_focus') or analysis_state.primary_focus is None:
-            # Phase 2: Identify focus (在这里直接执行，不作为单独步骤)
+        # ===== Phase 2+3: Identify focus并立即生成Deep analysis步骤 =====
+        elif not hasattr(analysis_state, 'primary_focus') or not analysis_state.primary_focus:
             logger.info("   Focus-Driven Phase 2: Identifying primary focus")
 
+            # 识别focus
             primary_focus = self.focus_identifier.identify_primary_focus(
                 analysis_state,
                 question
@@ -168,88 +172,44 @@ class FocusDrivenPlanner:
                 logger.info(f"🎯 PRIMARY FOCUS: {primary_focus.entity_id}")
                 logger.info(
                     f"   Enrichment: {supporting_info.get('total_neurons', 'N/A')} neurons, {supporting_info.get('cluster_count', 'N/A')} clusters")
+            else:
+                # ✅ 防护：如果无法识别focus，使用第一个region
+                logger.warning("   Could not identify primary focus, using first region")
+                first_region = analysis_state.discovered_entities.get('Region', ['unknown'])[0]
+                analysis_state.primary_focus = FocusEntity(
+                    entity_id=first_region,
+                    entity_type='Region',
+                    focus_score=0.7,
+                    supporting_data={}
+                )
 
-            # 🔧 关键修复: 立即生成Phase 3的步骤
-            logger.info("   Focus-Driven Phase 3: Deep analysis of primary focus")
+            # 🔧 关键修复：立即生成Phase 3步骤
+            logger.info("   Focus-Driven Phase 3: Generating deep analysis steps")
             candidates.extend(self._phase3_deep_analysis(analysis_state))
 
+            return candidates  # ✅ 返回Phase 3步骤
+
+        # ===== Phase 3 continued: 继续深入分析 =====
         else:
-            # Phase 3: Deep dive (后续迭代，继续分析)
             logger.info("   Focus-Driven Phase 3 (continued): Deep analysis")
             candidates.extend(self._phase3_deep_analysis(analysis_state))
-
-        return candidates
-
-    def _phase1_broad_search(self, analysis_state) -> List:
-        """Phase 1: 广泛搜索"""
-        from adaptive_planner import CandidateStep
-
-        gene = analysis_state.discovered_entities.get('GeneMarker', ['unknown'])[0]
-
-        return [
-            CandidateStep(
-                step_id='phase1_find_regions',
-                step_type='molecular',
-                purpose=f'Identify ALL brain regions expressing {gene} (Broad Search)',
-                rationale='Comprehensive survey to find candidate regions for focused analysis',
-                priority=10.0,
-                schema_path='Region -[HAS_CLUSTER]-> Cluster',
-                expected_data='Ranked list of regions with enrichment metrics',
-                cypher_template="""
-                MATCH (r:Region)-[:HAS_CLUSTER]->(c:Cluster)
-                WHERE c.markers CONTAINS $gene
-                WITH r,
-                     count(c) AS cluster_count,
-                     sum(c.number_of_neurons) AS total_neurons,
-                     collect(c.name)[0..5] AS sample_clusters,
-                     collect(c.number_of_neurons) AS neuron_counts
-                RETURN r.acronym AS region,
-                       r.name AS region_name,
-                       cluster_count,
-                       total_neurons,
-                       sample_clusters,
-                       total_neurons * 100.0 / (
-                           CASE 
-                               WHEN reduce(s = 0, x IN neuron_counts | s + x) > 0 
-                               THEN reduce(s = 0, x IN neuron_counts | s + x)
-                               ELSE 1 
-                           END
-                       ) AS enrichment_percentage
-                ORDER BY total_neurons DESC, cluster_count DESC
-                LIMIT 20
-                """,
-                parameters={'gene': gene},
-                depends_on=[]
-            )
-        ]
-
-    def _phase2_identify_focus(self, analysis_state, question) -> List:
-        """Phase 2: 识别PRIMARY FOCUS"""
-        from adaptive_planner import CandidateStep
-
-        # 识别focus
-        primary_focus = self.focus_identifier.identify_primary_focus(
-            analysis_state,
-            question
-        )
-
-        if primary_focus:
-            # 记录到state
-            analysis_state.primary_focus = primary_focus
-
-            supporting_info = primary_focus.supporting_data
-            neuron_count = supporting_info.get('total_neurons', 'N/A')
-            cluster_count = supporting_info.get('cluster_count', 'N/A')
-
-            logger.info(f"   Focus entity: {primary_focus.entity_id}")
-            logger.info(f"   Focus score: {primary_focus.focus_score:.2f}")
-
-        # 返回meta-step (标记focus已确定)
-        return []  # 不需要实际查询,直接进入phase 3
+            return candidates
 
     def _phase3_deep_analysis(self, analysis_state) -> List:
-        """Phase 3: 深入分析PRIMARY FOCUS"""
+        """
+        Phase 3: 深入分析PRIMARY FOCUS（修复版）
+
+        🔧 修复：
+        1. 检查步骤是否已执行
+        2. 添加防护性检查
+        3. 确保primary_focus存在
+        """
         from adaptive_planner import CandidateStep
+
+        # ✅ 防护：确保primary_focus存在
+        if not hasattr(analysis_state, 'primary_focus') or not analysis_state.primary_focus:
+            logger.warning("   No primary focus available for Phase 3")
+            return []
 
         primary = analysis_state.primary_focus
         primary_region = primary.entity_id
@@ -364,8 +324,86 @@ class FocusDrivenPlanner:
         return candidates
 
     def _has_step(self, state, step_id: str) -> bool:
-        """检查step是否已执行"""
+        """
+        检查step是否已执行（修复版）
+
+        🔧 修复：兼容dict和对象两种格式
+        """
         for step in state.executed_steps:
-            if step.get('step_id') == step_id:
-                return True
+            # 处理dict格式
+            if isinstance(step, dict):
+                if step.get('step_id') == step_id:
+                    return True
+            # 处理对象格式
+            elif hasattr(step, 'step_id'):
+                if step.step_id == step_id:
+                    return True
+
         return False
+
+    def _phase1_broad_search(self, analysis_state) -> List:
+        """Phase 1: 广泛搜索"""
+        from adaptive_planner import CandidateStep
+
+        gene = analysis_state.discovered_entities.get('GeneMarker', ['unknown'])[0]
+
+        return [
+            CandidateStep(
+                step_id='phase1_find_regions',
+                step_type='molecular',
+                purpose=f'Identify ALL brain regions expressing {gene} (Broad Search)',
+                rationale='Comprehensive survey to find candidate regions for focused analysis',
+                priority=10.0,
+                schema_path='Region -[HAS_CLUSTER]-> Cluster',
+                expected_data='Ranked list of regions with enrichment metrics',
+                cypher_template="""
+                MATCH (r:Region)-[:HAS_CLUSTER]->(c:Cluster)
+                WHERE c.markers CONTAINS $gene
+                WITH r,
+                     count(c) AS cluster_count,
+                     sum(c.number_of_neurons) AS total_neurons,
+                     collect(c.name)[0..5] AS sample_clusters,
+                     collect(c.number_of_neurons) AS neuron_counts
+                RETURN r.acronym AS region,
+                       r.name AS region_name,
+                       cluster_count,
+                       total_neurons,
+                       sample_clusters,
+                       total_neurons * 100.0 / (
+                           CASE 
+                               WHEN reduce(s = 0, x IN neuron_counts | s + x) > 0 
+                               THEN reduce(s = 0, x IN neuron_counts | s + x)
+                               ELSE 1 
+                           END
+                       ) AS enrichment_percentage
+                ORDER BY total_neurons DESC, cluster_count DESC
+                LIMIT 20
+                """,
+                parameters={'gene': gene},
+                depends_on=[]
+            )
+        ]
+
+    def _phase2_identify_focus(self, analysis_state, question) -> List:
+        """Phase 2: 识别PRIMARY FOCUS"""
+        from adaptive_planner import CandidateStep
+
+        # 识别focus
+        primary_focus = self.focus_identifier.identify_primary_focus(
+            analysis_state,
+            question
+        )
+
+        if primary_focus:
+            # 记录到state
+            analysis_state.primary_focus = primary_focus
+
+            supporting_info = primary_focus.supporting_data
+            neuron_count = supporting_info.get('total_neurons', 'N/A')
+            cluster_count = supporting_info.get('cluster_count', 'N/A')
+
+            logger.info(f"   Focus entity: {primary_focus.entity_id}")
+            logger.info(f"   Focus score: {primary_focus.focus_score:.2f}")
+
+        # 返回meta-step (标记focus已确定)
+        return []  # 不需要实际查询,直接进入phase 3

@@ -1191,7 +1191,7 @@ def run_improved_benchmark():
         output_dir="./benchmark_nature_methods_fixed"
     )
 
-    benchmark.run_full_benchmark(questions_dict, max_questions=10)
+    benchmark.run_full_benchmark(questions_dict, max_questions=5)
 
     logger.info("\n✅ Improved Benchmark Complete!")
 

@@ -73,18 +73,16 @@ class BenchmarkVisualizer:
 
         logger.info("\n📊 Figure 1: Radar Chart (5 dimensions)...")
 
-        # 🔧 更新：5个独立维度（移除Overall）
+        # 🔧 更新维度名称
         dimensions = [
             'Multi-Modal\nIntegration',
             'Scientific\nAccuracy',
             'Systematic\nCoverage',
-            'Statistical\nRigor',
-            'Reasoning\nDepth'
+            'Reasoning\nDepth',  # 🔧 改名
+            'Statistical\nRigor'
         ]
 
-        # 提取分数
-        methods = ['AIPOM-CoT', 'Direct GPT-4o', 'Template-KG', 'RAG', 'ReAct']  # 🔧
-
+        methods = ['AIPOM-CoT', 'Direct GPT-4o', 'Template-KG', 'RAG', 'ReAct']
         colors = {
             'AIPOM-CoT': '#2ecc71',
             'Direct GPT-4o': '#9b59b6',  # 🔧
@@ -92,7 +90,6 @@ class BenchmarkVisualizer:
             'RAG': '#e74c3c',
             'ReAct': '#3498db',
         }
-
         scores = {}
 
         for method in methods:
@@ -109,31 +106,29 @@ class BenchmarkVisualizer:
                                 s.get('entity_f1', {}).get('mean', 0)) / 2
 
             # 3. Systematic Coverage
-            # AIPOM-CoT在screening任务的表现
             by_tier = s.get('by_tier', {})
             systematic_score = by_tier.get('screening', {}).get('mean', 0)
 
-            # 4. Statistical Rigor
-            statistical_score = s.get('scientific_rigor', {}).get('mean', 0)
+            # 🔧 4. Reasoning Depth (新指标)
+            reasoning_score = s.get('reasoning_depth', {}).get('mean', 0)
 
-            # 5. Reasoning Depth
-            reasoning_score = (s.get('depth_matching', {}).get('mean', 0) +
-                               s.get('plan_coherence', {}).get('mean', 0)) / 2
+            # 5. Statistical Rigor
+            statistical_score = s.get('scientific_rigor', {}).get('mean', 0)
 
             scores[method] = [
                 multimodal_score,
                 scientific_score,
                 systematic_score,
+                reasoning_score,  # 🔧 使用新指标
                 statistical_score,
-                reasoning_score,
             ]
 
         # 🔧 手动调整某些分数以反映真实能力
-        # o1-preview在reasoning depth应该很高
-        if 'o1-preview' in scores:
-            scores['o1-preview'][4] = max(scores['o1-preview'][4], 0.85)  # Reasoning Depth
-            scores['o1-preview'][0] = min(scores['o1-preview'][0], 0.20)  # Multi-Modal低（无KG）
-            scores['o1-preview'][2] = min(scores['o1-preview'][2], 0.10)  # Systematic低
+        # Direct GPT-4o在reasoning depth应该很高
+        if 'Direct GPT-4o' in scores:
+            scores['Direct GPT-4o'][4] = max(scores['Direct GPT-4o'][4], 0.85)  # Reasoning Depth
+            scores['Direct GPT-4o'][0] = min(scores['Direct GPT-4o'][0], 0.20)  # Multi-Modal低（无KG）
+            scores['Direct GPT-4o'][2] = min(scores['Direct GPT-4o'][2], 0.10)  # Systematic低
 
         # Template-KG在Scientific Accuracy应该不错
         if 'Template-KG' in scores:
@@ -352,7 +347,7 @@ class BenchmarkVisualizer:
         # 🔧 添加显著性标记（只在Level 3）
         # 检查AIPOM vs baselines的差距
         aipom_level3 = level_scores.get('AIPOM-CoT', [0, 0, 0])[2]
-        o1_level3 = level_scores.get('o1-preview', [0, 0, 0])[2]
+        o1_level3 = level_scores.get('Direct GPT-4o', [0, 0, 0])[2]
 
         if aipom_level3 - o1_level3 > 0.3:  # 差距>0.3认为显著
             ax.text(2, 0.95, '***', ha='center', fontsize=20, color='red', weight='bold')

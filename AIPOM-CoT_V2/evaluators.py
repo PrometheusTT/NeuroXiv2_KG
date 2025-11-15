@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 # ==================== 🔧 新增：评估配置 ====================
 
+# 在 evaluators.py 开头修改 EVALUATION_CONFIG
+
 EVALUATION_CONFIG = {
     # 核心指标：所有方法都必须评估
     'core_metrics': {
@@ -56,72 +58,68 @@ EVALUATION_CONFIG = {
 
     # 系统能力指标：只评估有该能力的方法
     'system_metrics': {
-        'depth_matching': {
+        'reasoning_depth': {  # 🔧 改为reasoning_depth
             'weight': 1.0,
-            'methods': ['AIPOM-CoT', 'ReAct', 'Template-KG'],  # 有planning/步骤的方法
-            'description': 'Adaptive depth matching'
+            'methods': 'all',  # 🔧 所有方法都评估
+            'description': 'Multi-hop reasoning depth (number of steps)'
         },
         'plan_coherence': {
             'weight': 1.0,
-            'methods': ['AIPOM-CoT', 'ReAct'],  # 只有动态planning的
+            'methods': ['AIPOM-CoT', 'ReAct'],
             'description': 'Coherence of execution plan'
         },
         'closed_loop': {
             'weight': 1.0,
-            'methods': ['AIPOM-CoT'],  # 只有AIPOM设计了闭环
+            'methods': ['AIPOM-CoT'],
             'description': 'Closed-loop circuit analysis'
         },
         'modality_coverage': {
             'weight': 1.0,
-            'methods': ['AIPOM-CoT', 'Template-KG', 'RAG', 'ReAct'],  # 有KG访问的
+            'methods': ['AIPOM-CoT', 'Template-KG', 'RAG', 'ReAct'],
             'description': 'Multi-modal data coverage'
         },
     },
 
-    # 🔧 方法特定权重（用于计算Overall分数）
+    # 🔧 方法特定权重（更新版）
     'method_weights': {
         'AIPOM-CoT': {
-            # 全面评估
             'entity_f1': 0.15,
             'factual_accuracy': 0.15,
             'answer_completeness': 0.12,
             'scientific_rigor': 0.13,
-            'depth_matching': 0.15,
+            'reasoning_depth': 0.15,  # 🔧 改名
             'plan_coherence': 0.10,
             'closed_loop': 0.10,
             'modality_coverage': 0.10,
         },
         'Direct GPT-4o': {
-            # 重点评估答案质量（无planning指标）
-            'entity_f1': 0.20,
+            'entity_f1': 0.25,
             'factual_accuracy': 0.30,
             'answer_completeness': 0.25,
-            'scientific_rigor': 0.25,
+            'scientific_rigor': 0.20,
+            # reasoning_depth不计入（单步推理）
         },
         'Template-KG': {
-            # 有KG访问和固定步骤
             'entity_f1': 0.20,
             'factual_accuracy': 0.20,
             'answer_completeness': 0.15,
             'scientific_rigor': 0.15,
-            'depth_matching': 0.15,  # 评估步骤匹配
+            'reasoning_depth': 0.15,  # 🔧 改名
             'modality_coverage': 0.15,
         },
         'RAG': {
-            # 重点评估检索和答案质量
             'entity_f1': 0.20,
             'factual_accuracy': 0.25,
             'answer_completeness': 0.20,
             'scientific_rigor': 0.20,
-            'modality_coverage': 0.15,
+            'reasoning_depth': 0.15,  # 🔧 RAG也有（检索步骤）
         },
         'ReAct': {
-            # 评估推理和planning
             'entity_f1': 0.15,
             'factual_accuracy': 0.20,
             'answer_completeness': 0.15,
             'scientific_rigor': 0.15,
-            'depth_matching': 0.15,
+            'reasoning_depth': 0.15,  # 🔧 改名
             'plan_coherence': 0.10,
             'modality_coverage': 0.10,
         },
@@ -133,16 +131,13 @@ EVALUATION_CONFIG = {
 
 @dataclass
 class EvaluationMetrics:
-    """
-    评估指标（更新版 - 支持None值）
-
-    None值表示该指标不适用于当前方法
-    """
+    """评估指标（v3.1 - Reasoning Depth）"""
 
     # D1: Adaptive Planning (系统能力)
-    depth_matching_accuracy: Optional[float] = None
+    reasoning_depth: Optional[float] = None  # 🔧 新增
+    # depth_matching_accuracy: Optional[float] = None  # 🔧 删除
     plan_coherence: Optional[float] = None
-    strategy_selection_accuracy: Optional[float] = None
+    strategy_selection_accuracy: Optional[float] = None  # 保留备用
 
     # D2: Entity Recognition (核心能力)
     entity_precision: float = 0.0
@@ -150,7 +145,7 @@ class EvaluationMetrics:
     entity_f1: float = 0.0
 
     # D3: Multi-hop Reasoning (核心能力)
-    multi_hop_depth: int = 0
+    multi_hop_depth: int = 0  # 原始步数（用于统计）
     query_success_rate: float = 0.0
 
     # D4: Multi-Modal Integration (系统能力)
@@ -167,11 +162,9 @@ class EvaluationMetrics:
     execution_time: float = 0.0
     api_calls: int = 0
 
-    # 🔧 新增：方法特定Overall分数
+    # Overall
     overall_score: Optional[float] = None
-
-    # 🔧 新增：任务完成度
-    task_completion: Optional[str] = None  # 'completed', 'partial', 'failed', None
+    task_completion: Optional[str] = None
 
 
 # ==================== D1: Adaptive Planning Evaluator ====================
@@ -184,52 +177,30 @@ class AdaptivePlanningEvaluator:
     """
 
     def __init__(self):
-        self.depth_map = {
-            'shallow': 2,
-            'medium': 4,
-            'deep': 6,
-        }
+        pass
 
     def evaluate(self,
-                question_data: Dict,
-                agent_output: Dict,
-                method_name: str) -> Dict[str, float]:
-        """
-        评估adaptive planning
-
-        🔧 修复：对于无planning的方法，返回None而非0
-        """
+                 question_data: Dict,
+                 agent_output: Dict,
+                 method_name: str) -> Dict[str, float]:
+        """评估adaptive planning"""
 
         metrics = {}
 
-        # 检查是否应该评估planning
-        should_evaluate_planning = method_name in EVALUATION_CONFIG['system_metrics']['plan_coherence']['methods']
+        # 🔧 D1.1: Reasoning Depth (所有方法都评估)
+        metrics['reasoning_depth'] = self._evaluate_reasoning_depth(
+            agent_output
+        )
 
-        # D1.1: Depth Matching
-        if method_name in EVALUATION_CONFIG['system_metrics']['depth_matching']['methods']:
-            metrics['depth_matching'] = self._evaluate_depth_matching(
-                question_data, agent_output
-            )
-        else:
-            metrics['depth_matching'] = None
-
-        # D1.2: Plan Coherence
-        if should_evaluate_planning:
+        # D1.2: Plan Coherence (只有agent方法)
+        if method_name in EVALUATION_CONFIG['system_metrics']['plan_coherence']['methods']:
             metrics['plan_coherence'] = self._evaluate_plan_coherence(
                 agent_output
             )
         else:
             metrics['plan_coherence'] = None
 
-        # D1.3: Strategy Selection
-        if should_evaluate_planning:
-            metrics['strategy_selection'] = self._evaluate_strategy_selection(
-                question_data, agent_output
-            )
-        else:
-            metrics['strategy_selection'] = None
-
-        # D1.4: Modality Coverage (有KG访问的方法都评估)
+        # D1.3: Modality Coverage
         if method_name in EVALUATION_CONFIG['system_metrics']['modality_coverage']['methods']:
             metrics['modality_coverage'] = self._evaluate_modality_coverage(
                 question_data, agent_output
@@ -237,7 +208,7 @@ class AdaptivePlanningEvaluator:
         else:
             metrics['modality_coverage'] = None
 
-        # D1.5: Closed-Loop (只有AIPOM评估)
+        # D1.4: Closed-Loop
         if method_name in EVALUATION_CONFIG['system_metrics']['closed_loop']['methods']:
             metrics['closed_loop'] = self._evaluate_closed_loop(
                 question_data, agent_output
@@ -247,31 +218,42 @@ class AdaptivePlanningEvaluator:
 
         return metrics
 
-    def _evaluate_depth_matching(self, question_data: Dict, agent_output: Dict) -> float:
-        """评估深度匹配"""
+    def _evaluate_reasoning_depth(self, agent_output: Dict) -> float:
+        """
+        🔧 评估推理深度（新方法）
 
-        expected_depth = question_data.get('expected_depth', 'medium')
-        expected_steps = self.depth_map.get(expected_depth, 4)
+        计算归一化的步数分数：
+        - 0步 = 0.0
+        - 1-2步 = 0.3-0.5
+        - 3-5步 = 0.6-0.8
+        - 6+步 = 0.9-1.0
+
+        这样可以：
+        1. 公平比较所有方法
+        2. 奖励multi-hop推理
+        3. 避免过度奖励步数（有上限）
+        """
 
         executed_steps = agent_output.get('executed_steps', [])
-        actual_steps = len(executed_steps)
+        num_steps = len(executed_steps)
 
-        if actual_steps == 0:
-            return 0.0
-
-        # 计算匹配度（允许±2步的误差）
-        diff = abs(actual_steps - expected_steps)
-
-        if diff == 0:
-            score = 1.0
-        elif diff == 1:
-            score = 0.9
-        elif diff == 2:
-            score = 0.75
-        elif diff == 3:
+        # 归一化分数
+        if num_steps == 0:
+            score = 0.0
+        elif num_steps == 1:
+            score = 0.3
+        elif num_steps == 2:
             score = 0.5
-        else:
-            score = max(0.0, 1.0 - (diff - 3) * 0.15)
+        elif num_steps == 3:
+            score = 0.6
+        elif num_steps == 4:
+            score = 0.7
+        elif num_steps == 5:
+            score = 0.8
+        elif num_steps >= 6 and num_steps <= 8:
+            score = 0.85 + (num_steps - 6) * 0.03  # 0.85-0.91
+        else:  # 9+
+            score = min(1.0, 0.9 + (num_steps - 8) * 0.02)  # 最高1.0
 
         return score
 
@@ -926,43 +908,33 @@ class BiologicalTaskEvaluator:
 # ==================== Comprehensive Evaluator (Updated) ====================
 
 class ComprehensiveEvaluator:
-    """
-    综合评估器（v3.0 - 公平的分层评估）
-
-    🔧 关键改进：
-    - 分层评估：区分核心能力和系统能力
-    - None-able指标：不强制所有方法在所有指标上评分
-    - 方法特定权重：计算Overall分数
-    """
+    """综合评估器（v3.1 - Reasoning Depth）"""
 
     def __init__(self):
-        self.planning_eval = AdaptivePlanningEvaluator()
-        self.entity_eval = EntityRecognitionEvaluator()
-        self.answer_eval = AnswerQualityEvaluator()
-        self.task_eval = BiologicalTaskEvaluator()
+        """初始化所有子评估器"""
+        # 🔧 确保初始化所有评估器
+        self.planning_eval = AdaptivePlanningEvaluator()  # ✅ 必须有
+        self.entity_eval = EntityRecognitionEvaluator()  # ✅ 必须有
+        self.answer_eval = AnswerQualityEvaluator()  # ✅ 必须有
+        self.task_eval = BiologicalTaskEvaluator()  # ✅ 必须有
 
         self.config = EVALUATION_CONFIG
 
     def evaluate_full(self,
-                     question_data: Dict,
-                     agent_output: Dict,
-                     method_name: str) -> EvaluationMetrics:
-        """
-        完整评估（v3.0 - 公平版）
-
-        🔧 修复：
-        - 只评估适用的指标
-        - 使用方法特定权重计算Overall
-        """
+                      question_data: Dict,
+                      agent_output: Dict,
+                      method_name: str) -> EvaluationMetrics:
+        """完整评估（v3.1）"""
 
         metrics = EvaluationMetrics()
 
-        # D1: Adaptive Planning (系统能力 - 分层评估)
+        # D1: Adaptive Planning (使用 self.planning_eval)
         planning_metrics = self.planning_eval.evaluate(
             question_data, agent_output, method_name
         )
 
-        metrics.depth_matching_accuracy = planning_metrics.get('depth_matching')
+        # 🔧 使用reasoning_depth替代depth_matching
+        metrics.reasoning_depth = planning_metrics.get('reasoning_depth')
         metrics.plan_coherence = planning_metrics.get('plan_coherence')
         metrics.strategy_selection_accuracy = planning_metrics.get('strategy_selection')
         metrics.modality_coverage = planning_metrics.get('modality_coverage')
@@ -973,15 +945,15 @@ class ComprehensiveEvaluator:
         else:
             metrics.closed_loop_achieved = None
 
-        # D2: Entity Recognition (核心能力 - 所有方法)
+        # D2: Entity Recognition
         entity_metrics = self.entity_eval.evaluate(question_data, agent_output)
         metrics.entity_precision = entity_metrics['entity_precision']
         metrics.entity_recall = entity_metrics['entity_recall']
         metrics.entity_f1 = entity_metrics['entity_f1']
 
-        # D3: Multi-hop (所有有KG访问的方法)
+        # D3: Multi-hop (保留原始步数用于统计)
         steps = agent_output.get('executed_steps', [])
-        metrics.multi_hop_depth = len(steps)
+        metrics.multi_hop_depth = len(steps)  # 原始步数
 
         if steps:
             successful = sum(1 for s in steps if s.get('success', True))
@@ -989,42 +961,38 @@ class ComprehensiveEvaluator:
         else:
             metrics.query_success_rate = 1.0
 
-        # D4: Multi-Modal (已在planning中评估)
+        # D4: Multi-Modal
         modalities = set(s.get('modality') for s in steps if s.get('modality'))
         metrics.modalities_used = list(modalities)
 
-        # D5: Answer Quality (核心能力 - 所有方法)
+        # D5: Answer Quality
         answer_metrics = self.answer_eval.evaluate(question_data, agent_output)
         metrics.factual_accuracy = answer_metrics['factual_accuracy']
         metrics.answer_completeness = answer_metrics['answer_completeness']
         metrics.scientific_rigor = answer_metrics['scientific_rigor']
 
-        # D6: Efficiency (所有方法)
+        # D6: Efficiency
         metrics.execution_time = agent_output.get('execution_time', 0.0)
         metrics.api_calls = len(steps)
 
-        # 🔧 Task Completion (如果有定义)
+        # Task Completion
         if question_data.get('task_type'):
             metrics.task_completion = self.task_eval.evaluate_task_completion(
                 question_data, agent_output
             )
 
-        # 🔧 计算方法特定的Overall分数
+        # 🔧 计算Overall（使用reasoning_depth）
         metrics.overall_score = self._calculate_weighted_overall(metrics, method_name)
 
         return metrics
 
     def _calculate_weighted_overall(self, metrics: EvaluationMetrics, method_name: str) -> float:
-        """
-        🔧 计算方法特定的加权Overall分数
-
-        关键：只对non-None的指标加权
-        """
+        """计算加权Overall分数（v3.1）"""
 
         weights = self.config['method_weights'].get(method_name, {})
 
         if not weights:
-            # Fallback：核心指标简单平均
+            # Fallback
             core_scores = [
                 metrics.entity_f1,
                 metrics.factual_accuracy,
@@ -1034,7 +1002,6 @@ class ComprehensiveEvaluator:
             valid_scores = [s for s in core_scores if s is not None]
             return sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
 
-        # 加权平均（只对non-None的指标）
         weighted_sum = 0.0
         total_weight = 0.0
 
@@ -1043,16 +1010,17 @@ class ComprehensiveEvaluator:
             'factual_accuracy': metrics.factual_accuracy,
             'answer_completeness': metrics.answer_completeness,
             'scientific_rigor': metrics.scientific_rigor,
-            'depth_matching': metrics.depth_matching_accuracy,
+            'reasoning_depth': metrics.reasoning_depth,  # 🔧 使用新指标
             'plan_coherence': metrics.plan_coherence,
             'modality_coverage': metrics.modality_coverage,
-            'closed_loop': 1.0 if metrics.closed_loop_achieved else (0.0 if metrics.closed_loop_achieved is not None else None),
+            'closed_loop': 1.0 if metrics.closed_loop_achieved else (
+                0.0 if metrics.closed_loop_achieved is not None else None),
         }
 
         for metric_name, weight in weights.items():
             value = metric_values.get(metric_name)
 
-            if value is not None:  # 🔧 只计算non-None的指标
+            if value is not None:
                 weighted_sum += value * weight
                 total_weight += weight
 

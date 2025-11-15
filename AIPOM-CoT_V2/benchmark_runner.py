@@ -109,7 +109,7 @@ class BenchmarkRunner:
             'Direct GPT-4o': DirectGPT4oBaseline(openai_client),  # 🔧 更新
             'Template-KG': TemplateKGBaseline(neo4j_exec, openai_client),
             'RAG': RAGBaseline(neo4j_exec, openai_client),
-            'ReAct': ReActBaseline(neo4j_exec, openai_client, max_iterations=5),
+            'ReAct': ReActBaseline(neo4j_exec, openai_client, base_max_iterations=10),
         }
 
         # 初始化evaluator
@@ -153,8 +153,14 @@ class BenchmarkRunner:
             for q_idx, question in enumerate(questions, 1):
                 logger.info(f"\n{'=' * 80}")
                 logger.info(f"Question {q_idx}/{len(questions)}: {question.id}")
-                logger.info(
-                    f"Complexity: {question.complexity_level.value if hasattr(question, 'complexity_level') else 'N/A'}")
+
+                # 🔧 安全获取complexity_level
+                complexity = getattr(question, 'complexity_level', None)
+                if complexity:
+                    logger.info(f"Complexity: {complexity.value}")
+                else:
+                    logger.info(f"Tier: {question.tier.value}")
+
                 logger.info(f"Q: {question.question[:80]}...")
                 logger.info(f"{'=' * 80}")
 
@@ -164,16 +170,29 @@ class BenchmarkRunner:
                     result = self._run_single_test(question, method_name)
                     self.results[method_name].append(result)
 
-                    # 打印关键指标
+                    # 🔧 安全打印关键指标（处理None值）
                     metrics = result.metrics
-                    logger.info(f"  ✓ Entity F1: {metrics.entity_f1:.3f}")
-                    logger.info(f"  ✓ Depth Match: {metrics.depth_matching_accuracy:.3f}")
-                    logger.info(f"  ✓ Closed Loop: {'Yes' if metrics.closed_loop_achieved else 'No'}")
 
-                    # 🆕 打印task completion（如果有）
-                    if hasattr(metrics, 'task_completion') and metrics.task_completion != 'unknown':
+                    # Entity F1 (总是有值)
+                    logger.info(f"  ✓ Entity F1: {metrics.entity_f1:.3f}")
+
+                    # Depth Match (可能是None)
+                    if metrics.reasoning_depth is not None:
+                        logger.info(f"  ✓ reasoning_depth: {metrics.reasoning_depth:.3f}")
+                    else:
+                        logger.info(f"  ✓ reasoning_depth: N/A")
+
+                    # Closed Loop (可能是None)
+                    if metrics.closed_loop_achieved is not None:
+                        logger.info(f"  ✓ Closed Loop: {'Yes' if metrics.closed_loop_achieved else 'No'}")
+                    else:
+                        logger.info(f"  ✓ Closed Loop: N/A")
+
+                    # Task Completion (可能是None)
+                    if hasattr(metrics, 'task_completion') and metrics.task_completion is not None:
                         logger.info(f"  ✓ Task: {metrics.task_completion}")
 
+                    # Time (总是有值)
                     logger.info(f"  ✓ Time: {metrics.execution_time:.2f}s")
 
                     pbar.update(1)
@@ -182,6 +201,7 @@ class BenchmarkRunner:
                 if q_idx % save_interval == 0:
                     self._save_intermediate_results()
                     logger.info(f"\n💾 Intermediate results saved at Q{q_idx}")
+
 
         # 最终保存
         logger.info(f"\n{'=' * 80}")

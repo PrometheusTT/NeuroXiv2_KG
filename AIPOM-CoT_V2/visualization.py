@@ -83,15 +83,16 @@ class BenchmarkVisualizer:
         ]
 
         # 提取分数
-        methods = ['AIPOM-CoT', 'Direct GPT-5', 'Template-KG', 'RAG', 'ReAct']
+        methods = ['AIPOM-CoT', 'Direct GPT-4o', 'Template-KG', 'RAG', 'ReAct']  # 🔧
 
         colors = {
             'AIPOM-CoT': '#2ecc71',
-            'Direct GPT-5': '#9b59b6',  # 🔧 更新
+            'Direct GPT-4o': '#9b59b6',  # 🔧
             'Template-KG': '#e67e22',
             'RAG': '#e74c3c',
             'ReAct': '#3498db',
         }
+
         scores = {}
 
         for method in methods:
@@ -189,7 +190,15 @@ class BenchmarkVisualizer:
         # 🔧 使用3个complexity levels
         from test_questions import ComplexityLevel, get_questions_by_complexity
 
-        methods = ['AIPOM-CoT', 'o1-preview', 'Template-KG', 'RAG', 'ReAct']
+        methods = ['AIPOM-CoT', 'Direct GPT-4o', 'Template-KG', 'RAG', 'ReAct']  # 🔧
+
+        colors = {
+            'AIPOM-CoT': '#2ecc71',
+            'Direct GPT-4o': '#9b59b6',  # 🔧
+            'Template-KG': '#e67e22',
+            'RAG': '#e74c3c',
+            'ReAct': '#3498db',
+        }
 
         # 预期深度
         expected_depth = {
@@ -241,13 +250,6 @@ class BenchmarkVisualizer:
                 alpha=0.7, marker='s', markersize=8)
 
         # 各方法
-        colors = {
-            'AIPOM-CoT': '#2ecc71',
-            'o1-preview': '#9b59b6',
-            'Template-KG': '#e67e22',
-            'RAG': '#e74c3c',
-            'ReAct': '#3498db',
-        }
 
         for method in methods:
             if method not in mean_depth:
@@ -369,11 +371,11 @@ class BenchmarkVisualizer:
 
         fig, ax = plt.subplots(figsize=(12, 7))
 
-        methods = ['AIPOM-CoT', 'Direct GPT-5', 'Template-KG', 'RAG', 'ReAct']
+        methods = ['AIPOM-CoT', 'Direct GPT-4o', 'Template-KG', 'RAG', 'ReAct']  # 🔧
 
         colors = {
             'AIPOM-CoT': '#2ecc71',
-            'Direct GPT-5': '#9b59b6',  # 🔧 更新
+            'Direct GPT-4o': '#9b59b6',  # 🔧
             'Template-KG': '#e67e22',
             'RAG': '#e74c3c',
             'ReAct': '#3498db',
@@ -480,12 +482,11 @@ class BenchmarkVisualizer:
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-        methods = ['AIPOM-CoT', 'Direct GPT-5', 'Template-KG', 'RAG', 'ReAct']
-
+        methods = ['AIPOM-CoT', 'Direct GPT-4o', 'Template-KG', 'RAG', 'ReAct']  # 🔧
 
         colors = {
             'AIPOM-CoT': '#2ecc71',
-            'Direct GPT-5': '#9b59b6',  # 🔧 更新
+            'Direct GPT-4o': '#9b59b6',  # 🔧
             'Template-KG': '#e67e22',
             'RAG': '#e74c3c',
             'ReAct': '#3498db',

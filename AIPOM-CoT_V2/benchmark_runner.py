@@ -16,7 +16,7 @@ from collections import defaultdict
 
 from test_questions import ALL_QUESTIONS, QuestionTier, TestQuestion
 from baselines import (
-    DirectGPT5Baseline,    # 🆕 新增
+    DirectGPT4oBaseline,    # 🆕 新增
     TemplateKGBaseline, # 🆕 新增
     RAGBaseline,
     ReActBaseline,
@@ -106,7 +106,7 @@ class BenchmarkRunner:
         # 🔧 更新：使用GPT-5的baselines
         logger.info("Initializing baseline methods (with GPT-5)...")
         self.baselines = {
-            'Direct GPT-5': DirectGPT5Baseline(openai_client),  # 🆕
+            'Direct GPT-4o': DirectGPT4oBaseline(openai_client),  # 🔧 更新
             'Template-KG': TemplateKGBaseline(neo4j_exec, openai_client),
             'RAG': RAGBaseline(neo4j_exec, openai_client),
             'ReAct': ReActBaseline(neo4j_exec, openai_client, max_iterations=5),
@@ -245,21 +245,29 @@ class BenchmarkRunner:
         return result
 
     def _run_baseline(self, question: TestQuestion, method_name: str) -> Dict:
-        """运行baseline方法"""
+        """运行baseline方法（修复版 - 传递tier信息）"""
 
         baseline = self.baselines.get(method_name)
         if not baseline:
             raise ValueError(f"Unknown method: {method_name}")
 
-        # 设置timeout
+        # 根据问题复杂度设置timeout
         if question.tier == QuestionTier.SIMPLE:
-            timeout = 30
+            timeout = 40
         elif question.tier == QuestionTier.MEDIUM:
-            timeout = 60
-        else:
+            timeout = 80
+        elif question.tier == QuestionTier.DEEP:
+            timeout = 150  # 🔧 增加timeout for deep questions
+        else:  # SCREENING
             timeout = 120
 
-        result = baseline.answer(question.question, timeout=timeout)
+        # 🔧 传递tier信息给baseline（特别是ReAct）
+        kwargs = {
+            'timeout': timeout,
+            'question_tier': question.tier.value,  # 🔧 新增
+        }
+
+        result = baseline.answer(question.question, **kwargs)
 
         return result
 

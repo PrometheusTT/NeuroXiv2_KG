@@ -61,7 +61,7 @@ class BenchmarkVisualizer:
         logger.info("=" * 80)
 
         self.generate_figure1_radar()
-        self.generate_figure2_depth_matching()
+        self.generate_figure2_reasoning_depth()
         self.generate_figure3_performance_scaling()
         self.generate_figure4_closed_loop()
         self.generate_figure5_efficiency()
@@ -175,9 +175,9 @@ class BenchmarkVisualizer:
 
         logger.info("  ✓ Figure 1 saved")
 
-    # 修改 generate_figure2_depth_matching 方法
+    # 修改 generate_figure2_reasoning_depth 方法
 
-    def generate_figure2_depth_matching(self):
+    def generate_figure2_reasoning_depth(self):
         """Figure 2: Adaptive Depth Matching (v2.0 - 3 levels)"""
 
         logger.info("\n📊 Figure 2: Depth Matching (3 levels)...")
@@ -267,8 +267,8 @@ class BenchmarkVisualizer:
         ax.grid(alpha=0.3, linestyle='--')
 
         plt.tight_layout()
-        plt.savefig(self.figures_dir / "figure2_depth_matching.png", dpi=300, bbox_inches='tight')
-        plt.savefig(self.figures_dir / "figure2_depth_matching.pdf", bbox_inches='tight')
+        plt.savefig(self.figures_dir / "figure2_reasoning_depth.png", dpi=300, bbox_inches='tight')
+        plt.savefig(self.figures_dir / "figure2_reasoning_depth.pdf", bbox_inches='tight')
         plt.close()
 
         logger.info("  ✓ Figure 2 saved")
@@ -318,7 +318,7 @@ class BenchmarkVisualizer:
                         m = result.get('metrics', {})
                         score = np.mean([
                             m.get('entity_f1', 0),
-                            m.get('depth_matching', 0),
+                            m.get('reasoning_depth', 0),
                             m.get('modality_coverage', 0),
                             m.get('scientific_rigor', 0),
                         ])

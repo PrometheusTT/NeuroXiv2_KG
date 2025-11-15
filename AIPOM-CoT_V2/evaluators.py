@@ -934,7 +934,7 @@ class ComprehensiveEvaluator:
         )
 
         # 🔧 使用reasoning_depth替代depth_matching
-        metrics.reasoning_depth = planning_metrics.get('reasoning_depth')
+        metrics.reasoning_depth = planning_metrics.get('reasoning_depth', 0.0)
         metrics.plan_coherence = planning_metrics.get('plan_coherence')
         metrics.strategy_selection_accuracy = planning_metrics.get('strategy_selection')
         metrics.modality_coverage = planning_metrics.get('modality_coverage')

@@ -526,7 +526,7 @@ class StatisticalAnalyzer:
             'factual_accuracy',
             'answer_completeness',
             'scientific_rigor',
-            'depth_matching_accuracy',
+            'reasoning_depth',
             'modality_coverage',
         ]
 

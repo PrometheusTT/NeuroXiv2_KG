@@ -1,147 +1,297 @@
 """
-Complete Benchmark Evaluation Script
-====================================
-运行完整的benchmark评估并生成报告
+Main Entry Point for AIPOM-CoT Benchmark
+=========================================
+运行完整benchmark的主入口
 
-使用:
-    python run_benchmark.py --max-questions 50
+Usage:
+    # Quick test (10 questions)
+    python run_benchmark.py --mode quick
+
+    # Extended test (30 questions)
+    python run_benchmark.py --mode extended
+
+    # Full benchmark (100 questions)
+    python run_benchmark.py --mode full
+
+    # Analyze existing results
+    python run_benchmark.py --mode analyze
 
 Author: Claude & PrometheusTT
-Date: 2025-01-12
+Date: 2025-01-15
 """
 
-import argparse
-import logging
 import os
 import sys
+import argparse
+import logging
 from pathlib import Path
 
-from aipom_v10_production import AIPOMCoTV10
-from benchmark_system import (
-    BenchmarkQuestionBank,
-    BenchmarkRunner,
-    generate_test_questions_file
-)
+# Add parent directory to path
+sys.path.append(str(Path(__file__).parent.parent))
 
-# 设置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('benchmark.log'),
-        logging.StreamHandler()
-    ]
-)
+from test_questions import ALL_QUESTIONS, TIER1_SIMPLE, TIER2_MEDIUM, TIER3_DEEP, TIER4_SCREENING
+from benchmark_runner import BenchmarkRunner, run_quick_test
+from statistical_analysis import StatisticalAnalyzer
+from visualization import BenchmarkVisualizer
 
 logger = logging.getLogger(__name__)
 
 
+def setup_logging(verbose: bool = False):
+    """设置日志"""
+    level = logging.DEBUG if verbose else logging.INFO
+
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler('benchmark.log', mode='w')
+        ]
+    )
+
+
+def initialize_systems():
+    """初始化所有系统组件"""
+
+    logger.info("Initializing systems...")
+
+    # 1. Neo4j
+    from neo4j_exec import Neo4jExec
+
+    neo4j_exec = Neo4jExec(
+        uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+        user=os.getenv("NEO4J_USER", "neo4j"),
+        pwd=os.getenv("NEO4J_PASSWORD", "neuroxiv"),
+        database=os.getenv("NEO4J_DATABASE", "neo4j")
+    )
+
+    logger.info("  ✓ Neo4j connected")
+
+    # 2. OpenAI
+    from openai import OpenAI
+
+    openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY",''))
+
+    logger.info("  ✓ OpenAI client initialized")
+
+    # 3. AIPOM-CoT Agent
+    from aipom_v10_production import AIPOMCoTV10
+
+    aipom_agent = AIPOMCoTV10(
+        neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+        neo4j_user=os.getenv("NEO4J_USER", "neo4j"),
+        neo4j_pwd=os.getenv("NEO4J_PASSWORD", "neuroxiv"),
+        database=os.getenv("NEO4J_DATABASE", "neo4j"),
+        schema_json_path="schema_output/schema.json",
+        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        model="gpt-4o"
+    )
+
+    logger.info("  ✓ AIPOM-CoT agent initialized")
+
+    return neo4j_exec, openai_client, aipom_agent
+
+
+# 修改main()函数中的方法列表
+
+def run_quick(neo4j_exec, openai_client, aipom_agent):
+    """Quick test (10 questions) - v2.0"""
+
+    logger.info("\n" + "=" * 80)
+    logger.info("🚀 QUICK TEST MODE (10 questions, v2.0)")
+    logger.info("=" * 80)
+
+    from test_questions import TIER1_SIMPLE, TIER2_MEDIUM, TIER3_DEEP, TIER4_SCREENING
+
+    # 选择代表性问题
+    selected = []
+    selected.extend(TIER1_SIMPLE[:2])  # 2个简单
+    selected.extend(TIER2_MEDIUM[:2])  # 3个中等
+    selected.extend(TIER3_DEEP[:2])  # 3个深度
+    selected.extend(TIER4_SCREENING[:2])  # 2个筛选
+
+    runner = BenchmarkRunner(
+        aipom_agent,
+        neo4j_exec,
+        openai_client,
+        output_dir="./benchmark_results_quick_v2"
+    )
+
+    # 🔧 更新：新的方法列表
+    summary = runner.run_full_benchmark(
+        questions=selected,
+        methods = ['AIPOM-CoT', 'Direct GPT-4o', 'Template-KG', 'RAG', 'ReAct'],  # 🔧
+        save_interval=5
+    )
+
+    runner.print_summary()
+
+    return summary
+
+
+def run_extended(neo4j_exec, openai_client, aipom_agent):
+    """Extended test (30 questions) - v2.0"""
+
+    logger.info("\n" + "=" * 80)
+    logger.info("🚀 EXTENDED TEST MODE (30 questions, v2.0)")
+    logger.info("=" * 80)
+
+    from test_questions import ComplexityLevel, get_questions_by_complexity
+
+    # 🔧 按complexity level选择
+    selected = []
+
+    level1_questions = get_questions_by_complexity(ComplexityLevel.LEVEL_1)
+    selected.extend(level1_questions[:8])  # 8个Level 1
+
+    level2_questions = get_questions_by_complexity(ComplexityLevel.LEVEL_2)
+    selected.extend(level2_questions[:15])  # 15个Level 2
+
+    level3_questions = get_questions_by_complexity(ComplexityLevel.LEVEL_3)
+    selected.extend(level3_questions[:7])  # 7个Level 3
+
+    runner = BenchmarkRunner(
+        aipom_agent,
+        neo4j_exec,
+        openai_client,
+        output_dir="./benchmark_results_extended_v2"
+    )
+
+    summary = runner.run_full_benchmark(
+        questions=selected,
+        methods=['AIPOM-CoT', 'Direct GPT-4o', 'Template-KG', 'RAG', 'ReAct'],  # 🔧
+        save_interval=5
+    )
+
+    runner.print_summary()
+
+    return summary
+
+
+def run_full(neo4j_exec, openai_client, aipom_agent):
+    """Full benchmark (100 questions) - v2.0"""
+
+    logger.info("\n" + "=" * 80)
+    logger.info("🚀 FULL BENCHMARK MODE (100 questions, v2.0)")
+    logger.info("=" * 80)
+
+    from test_questions import ALL_QUESTIONS
+
+    runner = BenchmarkRunner(
+        aipom_agent,
+        neo4j_exec,
+        openai_client,
+        output_dir="./benchmark_results_full_v2"
+    )
+
+    summary = runner.run_full_benchmark(
+        questions=ALL_QUESTIONS,
+        methods=['AIPOM-CoT', 'Direct GPT-4o', 'Template-KG', 'RAG', 'ReAct'],
+        save_interval=10
+    )
+
+    runner.print_summary()
+
+    return summary
+
+
+def run_analyze(results_dir: str = "./benchmark_results"):
+    """Analyze existing results"""
+
+    logger.info("\n" + "="*80)
+    logger.info("📊 ANALYSIS MODE")
+    logger.info("="*80)
+
+    # Statistical analysis
+    analyzer = StatisticalAnalyzer(results_dir)
+    df = analyzer.run_full_analysis()
+    latex = analyzer.generate_latex_table()
+
+    # Visualization
+    visualizer = BenchmarkVisualizer(results_dir)
+    visualizer.generate_all_figures()
+
+    logger.info("\n✅ Analysis complete!")
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Run AIPOM-CoT benchmark evaluation')
+    parser = argparse.ArgumentParser(description='AIPOM-CoT Benchmark Suite')
 
-    parser.add_argument('--neo4j-uri', type=str, default='bolt://localhost:7687',
-                        help='Neo4j URI')
-    parser.add_argument('--neo4j-user', type=str, default='neo4j',
-                        help='Neo4j username')
-    parser.add_argument('--neo4j-password', type=str, required=True,
-                        help='Neo4j password')
-    parser.add_argument('--database', type=str, default='neo4j',
-                        help='Neo4j database name')
-    parser.add_argument('--schema-json', type=str, default='./schema_output/schema.json',
-                        help='Path to schema.json')
-    parser.add_argument('--openai-api-key', type=str, default="",
-                        help='OpenAI API key (or set OPENAI_API_KEY env var)')
-    parser.add_argument('--model', type=str, default='gpt-4o',
-                        help='OpenAI model name')
+    parser.add_argument(
+        '--mode',
+        type=str,
+        choices=['quick', 'extended', 'full', 'analyze'],
+        default='quick',
+        help='Benchmark mode'
+    )
 
-    parser.add_argument('--questions-file', type=str, default='test_questions.json',
-                        help='Path to test questions JSON')
-    parser.add_argument('--generate-questions', action='store_true',
-                        help='Generate test questions file')
-    parser.add_argument('--max-questions', type=int, default=None,
-                        help='Maximum number of questions to test (for quick testing)')
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Verbose logging'
+    )
 
-    parser.add_argument('--output-dir', type=str, default='./benchmark_results',
-                        help='Output directory for results')
+    parser.add_argument(
+        '--results-dir',
+        type=str,
+        default='./benchmark_results',
+        help='Results directory for analysis mode'
+    )
 
     args = parser.parse_args()
 
-    # 获取API key
-    api_key = args.openai_api_key or os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        logger.error("OpenAI API key not provided. Set --openai-api-key or OPENAI_API_KEY env var")
-        sys.exit(1)
+    # Setup logging
+    setup_logging(args.verbose)
 
-    # 生成测试问题 (如果需要)
-    if args.generate_questions:
-        logger.info("Generating test questions...")
-        generate_test_questions_file()
-        logger.info(f"✅ Test questions saved to {args.questions_file}")
+    logger.info("\n" + "="*80)
+    logger.info("🎯 AIPOM-CoT Benchmark Suite")
+    logger.info("="*80)
 
-    # 检查问题文件
-    if not Path(args.questions_file).exists():
-        logger.error(f"Questions file not found: {args.questions_file}")
-        logger.info("Run with --generate-questions to create it")
-        sys.exit(1)
-
-    # 加载测试问题
-    logger.info(f"Loading test questions from {args.questions_file}...")
-    questions = BenchmarkQuestionBank.load_from_json(args.questions_file)
-
-    logger.info(f"Loaded {len(questions)} test questions")
-
-    # 初始化Agent
-    logger.info("\n" + "=" * 80)
-    logger.info("Initializing AIPOM-CoT V10 Agent")
-    logger.info("=" * 80)
-
-    agent = AIPOMCoTV10(
-        neo4j_uri=args.neo4j_uri,
-        neo4j_user=args.neo4j_user,
-        neo4j_pwd=args.neo4j_password,
-        database=args.database,
-        schema_json_path=args.schema_json,
-        openai_api_key=api_key,
-        model=args.model
-    )
-
-    # 初始化Benchmark Runner
-    logger.info("\n" + "=" * 80)
-    logger.info("Starting Benchmark Evaluation")
-    logger.info("=" * 80)
-
-    runner = BenchmarkRunner(agent, output_dir=args.output_dir)
-
-    # 运行benchmark
     try:
-        results = runner.run_benchmark(questions, max_questions=args.max_questions)
+        if args.mode == 'analyze':
+            # 只分析，不运行测试
+            run_analyze(args.results_dir)
 
-        logger.info("\n" + "=" * 80)
-        logger.info("✅ Benchmark Complete!")
-        logger.info("=" * 80)
-        logger.info(f"Results saved to: {args.output_dir}")
+        else:
+            # 初始化系统
+            neo4j_exec, openai_client, aipom_agent = initialize_systems()
 
-        # 打印快速摘要
-        successful = sum(1 for r in results if r.success)
-        avg_accuracy = sum(r.accuracy_score for r in results if r.success) / successful if successful > 0 else 0
+            # 运行benchmark
+            if args.mode == 'quick':
+                summary = run_quick(neo4j_exec, openai_client, aipom_agent)
 
-        print(f"\n📊 Quick Summary:")
-        print(f"   Total: {len(results)}")
-        print(f"   Successful: {successful} ({successful / len(results) * 100:.1f}%)")
-        print(f"   Average Accuracy: {avg_accuracy:.3f}")
+            elif args.mode == 'extended':
+                summary = run_extended(neo4j_exec, openai_client, aipom_agent)
+
+            elif args.mode == 'full':
+                summary = run_full(neo4j_exec, openai_client, aipom_agent)
+
+            # 自动分析
+            logger.info("\n📊 Running analysis...")
+
+            if args.mode == 'quick':
+                results_dir = "./benchmark_results_quick"
+            elif args.mode == 'extended':
+                results_dir = "./benchmark_results_extended"
+            else:
+                results_dir = "./benchmark_results_full"
+
+            run_analyze(results_dir)
+
+        logger.info("\n" + "="*80)
+        logger.info("✅ BENCHMARK COMPLETE!")
+        logger.info("="*80)
 
     except KeyboardInterrupt:
-        logger.info("\n❌ Benchmark interrupted by user")
+        logger.warning("\n\n⚠️ Benchmark interrupted by user")
         sys.exit(1)
 
     except Exception as e:
-        logger.error(f"\n❌ Benchmark failed: {e}")
+        logger.error(f"\n\n❌ Benchmark failed: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
-
-    finally:
-        agent.close()
 
 
 if __name__ == "__main__":

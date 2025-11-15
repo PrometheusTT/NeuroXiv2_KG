@@ -52,7 +52,7 @@ class BenchmarkResult:
             'success': self.agent_output.get('success', False),
             'metrics': {
                 # D1
-                'depth_matching': self.metrics.depth_matching_accuracy,
+                'reasoning_depth': self.metrics.reasoning_depth,
                 'plan_coherence': self.metrics.plan_coherence,
                 'modality_coverage': self.metrics.modality_coverage,
                 'strategy_selection': self.metrics.strategy_selection_accuracy,
@@ -136,7 +136,7 @@ class BenchmarkRunner:
 
         # 🔧 更新：准备方法（新的默认列表）
         if methods is None:
-            methods = ['AIPOM-CoT', 'o1-preview', 'Template-KG', 'RAG', 'ReAct']
+            methods = ['AIPOM-CoT', 'Direct GPT-4o', 'Template-KG', 'RAG', 'ReAct']
 
         logger.info(f"\n{'=' * 80}")
         logger.info(f"🚀 Starting Benchmark (v2.0)")
@@ -377,7 +377,7 @@ class BenchmarkRunner:
 
             # 提取所有指标
             all_metrics = {
-                'depth_matching': [],
+                'reasoning_depth': [],
                 'entity_f1': [],
                 'closed_loop': [],
                 'modality_coverage': [],
@@ -388,7 +388,7 @@ class BenchmarkRunner:
 
             for result in results:
                 m = result.metrics
-                all_metrics['depth_matching'].append(m.depth_matching_accuracy)
+                all_metrics['reasoning_depth'].append(m.reasoning_depth)
                 all_metrics['entity_f1'].append(m.entity_f1)
                 all_metrics['closed_loop'].append(1.0 if m.closed_loop_achieved else 0.0)
                 all_metrics['modality_coverage'].append(m.modality_coverage)
@@ -411,7 +411,7 @@ class BenchmarkRunner:
 
             # 总体分数
             overall_scores = [
-                all_metrics['depth_matching'],
+                all_metrics['reasoning_depth'],
                 all_metrics['entity_f1'],
                 all_metrics['modality_coverage'],
                 all_metrics['scientific_rigor'],
@@ -441,7 +441,7 @@ class BenchmarkRunner:
                 for result in tier_results:
                     m = result.metrics
                     score = statistics.mean([
-                        m.depth_matching_accuracy,
+                        m.reasoning_depth,
                         m.entity_f1,
                         m.modality_coverage,
                         m.scientific_rigor,
@@ -475,7 +475,7 @@ class BenchmarkRunner:
             print(f"Overall Score: {overall.get('mean', 0):.3f} ± {overall.get('std', 0):.3f}")
 
             print(f"\nKey Metrics:")
-            for metric in ['entity_f1', 'depth_matching', 'closed_loop', 'scientific_rigor']:
+            for metric in ['entity_f1', 'reasoning_depth', 'closed_loop', 'scientific_rigor']:
                 if metric in summary[method]:
                     m = summary[method][metric]
                     print(f"  {metric:20s}: {m['mean']:.3f} ± {m['std']:.3f}")
@@ -515,7 +515,7 @@ def run_quick_test(aipom_agent, neo4j_exec, openai_client, n_questions: int = 10
 
     summary = runner.run_full_benchmark(
         questions=selected,
-        methods=['AIPOM-CoT', 'Direct LLM', 'RAG', 'ReAct'],
+        methods=['AIPOM-CoT', 'Direct GPT-4o', 'RAG', 'ReAct'],
         save_interval=5
     )
 

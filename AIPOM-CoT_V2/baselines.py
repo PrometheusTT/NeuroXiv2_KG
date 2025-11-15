@@ -1,25 +1,23 @@
 """
-Baseline Methods for AIPOM-CoT Benchmark (v2.1 - GPT-5)
-========================================================
-包含4个baseline方法：
-1. Direct GPT-5 - 最强LLM baseline
-2. Template-KG - 模板化KG查询
-3. RAG - 检索增强生成 (with GPT-5)
-4. ReAct - 推理+行动 (with GPT-5)
+Baseline Methods for AIPOM-CoT Benchmark
+=========================================
+实现3个高质量的baseline方法：
+1. Direct LLM (GPT-4)
+2. RAG (Retrieval-Augmented Generation)
+3. ReAct (Reasoning + Acting)
 
-Changes in v2.1:
-- 使用GPT-5替代所有LLM调用
-- 移除o1-preview（使用GPT-5作为SOTA baseline）
+设计原则：
+- 不故意削弱baseline
+- 给予baseline充分的提示工程
+- 但展示AIPOM-CoT的独特优势
 
 Author: Claude & PrometheusTT
 Date: 2025-01-15
-Version: 2.1
 """
 
 import time
 import json
 import logging
-import re
 from typing import Dict, Any, List, Optional
 from abc import ABC, abstractmethod
 
@@ -36,82 +34,95 @@ class BaselineAgent(ABC):
 
     @abstractmethod
     def answer(self, question: str, timeout: int = 120) -> Dict[str, Any]:
-        """回答问题"""
+        """
+        回答问题
+
+        Returns:
+            {
+                'question': str,
+                'answer': str,
+                'entities_recognized': List[Dict],
+                'executed_steps': List[Dict],
+                'schema_paths_used': List[Dict],
+                'execution_time': float,
+                'total_steps': int,
+                'confidence_score': float,
+                'success': bool,
+                'method': str,
+            }
+        """
         pass
 
 
-# ==================== Baseline 1: Direct GPT-5 ====================
+# ==================== Baseline 1: Direct LLM ====================
 
-class DirectGPT5Baseline(BaselineAgent):
+class DirectLLMBaseline(BaselineAgent):
     """
-    Direct GPT-5 Baseline (SOTA LLM)
+    Baseline 1: 直接使用LLM回答
 
     特点：
-    - 使用最新的GPT-5模型
     - 无KG访问
     - 纯粹依赖预训练知识
-    - 单次推理（fast）
+    - 快速但可能幻觉
 
     优势：
-    - SOTA语言理解和推理能力
     - 速度快
-    - 对常识性问题表现好
+    - 对简单问题可能正确
 
     劣势：
-    - 无法访问最新/专有数据
-    - 可能产生幻觉
-    - 无系统分析能力
+    - 无法访问最新/详细数据
+    - 容易幻觉
+    - 无法进行多跳推理
     """
 
-    def __init__(self, openai_client):
-        super().__init__("Direct GPT-5")
+    def __init__(self, openai_client, model="gpt-4o"):
+        super().__init__("Direct LLM")
         self.client = openai_client
-        self.model = "gpt-5"
+        self.model = model
 
     def answer(self, question: str, timeout: int = 120) -> Dict[str, Any]:
-        """使用GPT-5直接回答"""
         start_time = time.time()
 
         # 🔧 高质量的system prompt
         system_prompt = """You are an expert neuroscientist with deep knowledge of:
-- Brain anatomy and neuroanatomy (Allen Mouse Brain Atlas)
-- Cell types and molecular markers (Pvalb, Sst, VIP, Car3, etc.)
-- Neuronal morphology and electrophysiology
-- Brain connectivity and neural circuits
-- Mouse brain regions and their functions
+- Brain anatomy and neuroanatomy
+- Cell types and molecular markers
+- Neuronal morphology
+- Brain connectivity and circuits
+- Mouse brain atlas (Allen Brain Atlas)
 
 Provide scientifically accurate, detailed answers based on your knowledge.
-Include specific quantitative data when possible (neuron counts, connectivity strengths, etc.).
-If you're uncertain about specific details, acknowledge it rather than speculate."""
+Include specific data when possible (numbers, region names, gene names).
+If you're uncertain, acknowledge it rather than speculate."""
 
-        user_prompt = f"""Question about neuroscience:
-
-{question}
+        # 🔧 高质量的user prompt
+        user_prompt = f"""Question: {question}
 
 Please provide a comprehensive, scientifically rigorous answer that includes:
 1. Direct answer to the question
 2. Relevant molecular markers or cell types (if applicable)
 3. Brain regions involved (if applicable)
 4. Quantitative data when available
-5. Key scientific context
+5. Citations to established knowledge
 
 Answer:"""
 
         try:
-            completion = self.client.chat.completions.create(
+            response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                max_completion_tokens=1500,
+                temperature=0.3,  # 低温度减少幻觉
+                max_tokens=1500,
                 timeout=timeout
             )
 
-            answer = completion.choices[0].message.content
+            answer = response.choices[0].message.content
             execution_time = time.time() - start_time
 
-            # 提取实体
+            # 尝试从答案中提取实体（简单启发式）
             entities_recognized = self._extract_entities_heuristic(answer)
 
             return {
@@ -119,451 +130,48 @@ Answer:"""
                 'answer': answer,
                 'entities_recognized': entities_recognized,
                 'executed_steps': [{
-                    'purpose': 'Direct GPT-5 inference',
+                    'purpose': 'Direct LLM inference',
                     'modality': None,
                 }],
                 'schema_paths_used': [],
                 'execution_time': execution_time,
                 'total_steps': 1,
-                'confidence_score': 0.75,  # 高置信（SOTA LLM）
+                'confidence_score': 0.5,  # 中等置信度（无验证）
                 'success': True,
-                'method': 'Direct GPT-5',
+                'method': 'Direct LLM',
             }
 
         except Exception as e:
-            logger.error(f"Direct GPT-5 failed: {e}")
+            logger.error(f"Direct LLM failed: {e}")
             return self._error_response(question, str(e), time.time() - start_time)
 
     def _extract_entities_heuristic(self, answer: str) -> List[Dict]:
-        """启发式提取实体"""
+        """启发式提取实体（简单方法）"""
+        import re
+
         entities = []
 
-        # 提取脑区缩写 (2-5个大写字母)
+        # 提取大写缩写（可能是脑区）
         regions = re.findall(r'\b[A-Z]{2,5}\b', answer)
         for r in set(regions):
-            # 排除常见非脑区词
-            if r not in ['DNA', 'RNA', 'ATP', 'GABA', 'LLM', 'GPT', 'USA', 'PHD']:
+            if r not in ['DNA', 'RNA', 'ATP', 'GABA']:  # 排除常见非region缩写
                 entities.append({
                     'text': r,
                     'type': 'Region',
-                    'confidence': 0.7,
-                })
-
-        # 提取基因名 (首字母大写 + 小写字母)
-        genes = re.findall(r'\b[A-Z][a-z]{2,8}\+?\b', answer)
-        for g in set(genes):
-            # 排除常见非基因词
-            if g not in ['The', 'This', 'That', 'There', 'These', 'Their', 'When', 'Where', 'Which']:
-                entities.append({
-                    'text': g.rstrip('+'),
-                    'type': 'Gene',
                     'confidence': 0.6,
                 })
 
-        return entities[:15]
-
-    def _error_response(self, question: str, error: str, elapsed: float) -> Dict:
-        return {
-            'question': question,
-            'answer': f"Error: {error}",
-            'entities_recognized': [],
-            'executed_steps': [],
-            'schema_paths_used': [],
-            'execution_time': elapsed,
-            'total_steps': 0,
-            'confidence_score': 0.0,
-            'success': False,
-            'method': 'Direct GPT-5',
-            'error': error,
-        }
-
-
-# ==================== Baseline 2: Template-KG ====================
-
-class TemplateKGBaseline(BaselineAgent):
-    """
-    Template-based Knowledge Graph Query Baseline
-
-    特点：
-    - 使用预定义查询模板
-    - 有KG访问（公平对比）
-    - 无自适应能力
-    - 使用GPT-5合成答案
-    """
-
-    def __init__(self, neo4j_exec, openai_client):
-        super().__init__("Template-KG")
-        self.db = neo4j_exec
-        self.client = openai_client
-        self.model = "gpt-5"  # 🔧 使用GPT-5
-        self.templates = self._build_templates()
-
-    def _build_templates(self) -> Dict:
-        """构建查询模板库"""
-        return {
-            # 模板1：基因 → 细胞簇
-            'gene_to_clusters': """
-                MATCH (c:Cluster)
-                WHERE c.markers CONTAINS $gene
-                RETURN c.name AS cluster, 
-                       c.number_of_neurons AS neurons,
-                       c.broad_region_distribution AS regions,
-                       c.markers AS markers
-                ORDER BY c.number_of_neurons DESC
-                LIMIT 20
-            """,
-
-            # 模板2：脑区 → 细胞簇
-            'region_to_clusters': """
-                MATCH (r:Region)-[:HAS_CLUSTER]->(c:Cluster)
-                WHERE r.acronym = $region
-                RETURN r.name AS region_name, 
-                       c.name AS cluster,
-                       c.markers AS markers, 
-                       c.number_of_neurons AS neurons
-                ORDER BY c.number_of_neurons DESC
-                LIMIT 30
-            """,
-
-            # 模板3：脑区 → 投射
-            'region_projections': """
-                MATCH (r:Region)-[p:PROJECT_TO]->(t:Region)
-                WHERE r.acronym = $region
-                RETURN r.name AS source, 
-                       t.acronym AS target, 
-                       t.name AS target_name,
-                       p.weight AS weight,
-                       p.neuron_count AS neuron_count
-                ORDER BY p.weight DESC
-                LIMIT 20
-            """,
-
-            # 模板4：脑区 → 形态
-            'region_morphology': """
-                MATCH (n:Neuron)-[:LOCATE_AT]->(r:Region)
-                WHERE r.acronym = $region
-                RETURN r.name AS region,
-                       count(n) AS neuron_count,
-                       avg(n.axonal_length) AS avg_axon_length,
-                       avg(n.dendritic_length) AS avg_dendrite_length,
-                       avg(n.axonal_branches) AS avg_axon_branches,
-                       avg(n.dendritic_branches) AS avg_dendrite_branches
-            """,
-
-            # 模板5：基因 → 脑区（enrichment）
-            'gene_to_regions': """
-                MATCH (r:Region)-[:HAS_CLUSTER]->(c:Cluster)
-                WHERE c.markers CONTAINS $gene
-                WITH r, count(c) AS cluster_count, sum(c.number_of_neurons) AS total_neurons
-                RETURN r.acronym AS region,
-                       r.name AS region_name,
-                       cluster_count,
-                       total_neurons
-                ORDER BY total_neurons DESC
-                LIMIT 15
-            """,
-        }
-
-    def answer(self, question: str, timeout: int = 120) -> Dict[str, Any]:
-        """使用模板回答问题"""
-        start_time = time.time()
-
-        try:
-            # Step 1: 分类问题
-            question_type = self._classify_question(question)
-            logger.info(f"  Template-KG: Classified as '{question_type}'")
-
-            # Step 2: 提取参数
-            params = self._extract_parameters(question)
-            logger.info(f"  Template-KG: Extracted params: {params}")
-
-            if not params:
-                return self._fallback_answer(question, time.time() - start_time)
-
-            # Step 3: 执行模板
-            results = []
-            executed_steps = []
-
-            if question_type == 'gene_profiling':
-                results, executed_steps = self._execute_gene_profiling(params)
-
-            elif question_type == 'region_analysis':
-                results, executed_steps = self._execute_region_analysis(params)
-
-            elif question_type == 'projection_query':
-                results, executed_steps = self._execute_projection_query(params)
-
-            else:
-                results, executed_steps = self._execute_simple_lookup(params)
-
-            # Step 4: 合成答案（使用GPT-5）
-            if not results or not any(r.get('success') for r in results):
-                return self._fallback_answer(question, time.time() - start_time)
-
-            answer = self._synthesize_answer(question, results)
-
-            execution_time = time.time() - start_time
-
-            # 提取实体
-            entities_recognized = []
-            for key, value in params.items():
-                if value:
-                    entities_recognized.append({
-                        'text': value,
-                        'type': 'Gene' if key == 'gene' else 'Region',
-                        'confidence': 1.0,
-                    })
-
-            return {
-                'question': question,
-                'answer': answer,
-                'entities_recognized': entities_recognized,
-                'executed_steps': executed_steps,
-                'schema_paths_used': [s['template'] for s in executed_steps],
-                'execution_time': execution_time,
-                'total_steps': len(executed_steps),
-                'confidence_score': 0.7,
-                'success': True,
-                'method': 'Template-KG',
-            }
-
-        except Exception as e:
-            logger.error(f"Template-KG failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return self._error_response(question, str(e), time.time() - start_time)
-
-    def _classify_question(self, question: str) -> str:
-        """分类问题类型"""
-        q_lower = question.lower()
-
-        if any(kw in q_lower for kw in ['tell me about', 'about', 'profile', 'characterize']):
-            if any(kw in q_lower for kw in ['+', 'neuron', 'cell', 'interneuron']):
-                return 'gene_profiling'
-            else:
-                return 'region_analysis'
-
-        if any(kw in q_lower for kw in ['projection', 'project', 'target', 'connectivity']):
-            return 'projection_query'
-
-        return 'simple_lookup'
-
-    def _extract_parameters(self, question: str) -> Dict:
-        """提取查询参数"""
-        params = {}
-
-        # 提取基因名
-        genes = re.findall(r'\b([A-Z][a-z]{2,8})\+?', question)
-        if genes:
-            stopwords = {'What', 'Which', 'Where', 'Tell', 'Give', 'Show', 'Find', 'The', 'This', 'That'}
-            for g in genes:
-                if g not in stopwords:
-                    params['gene'] = g
-                    break
-
-        # 提取脑区缩写
-        regions = re.findall(r'\b([A-Z]{2,5})\b', question)
-        known_regions = {
-            'MOp', 'MOs', 'SSp', 'SSs', 'VISp', 'VISal', 'VISam', 'VISl', 'VISpm',
-            'AUDp', 'AUDpo', 'AUDv', 'ACA', 'PL', 'ILA', 'ORB',
-            'RSP', 'CLA', 'HPF', 'HIP', 'TH', 'HY'
-        }
-        for r in regions:
-            if r in known_regions:
-                params['region'] = r
-                break
-
-        return params
-
-    def _execute_gene_profiling(self, params: Dict) -> tuple:
-        """执行基因profiling模板序列"""
-        gene = params.get('gene')
-        if not gene:
-            return [], []
-
-        results = []
-        steps = []
-
-        # Step 1: Gene -> Clusters
-        result1 = self.db.run(self.templates['gene_to_clusters'], {'gene': gene})
-        results.append(result1)
-        steps.append({
-            'purpose': f'Find clusters expressing {gene}',
-            'template': 'gene_to_clusters',
-            'modality': 'molecular',
-            'success': result1.get('success', False),
-        })
-
-        # Step 2: Gene -> Regions
-        result2 = self.db.run(self.templates['gene_to_regions'], {'gene': gene})
-        results.append(result2)
-        steps.append({
-            'purpose': f'Find regions enriched for {gene}',
-            'template': 'gene_to_regions',
-            'modality': 'molecular',
-            'success': result2.get('success', False),
-        })
-
-        # Step 3: 如果找到了primary region，查询morphology
-        if result2.get('success') and result2.get('data'):
-            top_region = result2['data'][0].get('region')
-            if top_region:
-                result3 = self.db.run(self.templates['region_morphology'], {'region': top_region})
-                results.append(result3)
-                steps.append({
-                    'purpose': f'Morphology of {top_region}',
-                    'template': 'region_morphology',
-                    'modality': 'morphological',
-                    'success': result3.get('success', False),
+        # 提取基因名模式
+        genes = re.findall(r'\b[A-Z][a-z]{2,8}\+?\b', answer)
+        for g in set(genes):
+            if g not in ['The', 'This', 'These', 'That']:
+                entities.append({
+                    'text': g.rstrip('+'),
+                    'type': 'Gene',
+                    'confidence': 0.5,
                 })
 
-        return results, steps
-
-    def _execute_region_analysis(self, params: Dict) -> tuple:
-        """执行脑区分析模板序列"""
-        region = params.get('region')
-        if not region:
-            return [], []
-
-        results = []
-        steps = []
-
-        # Step 1: Region -> Clusters
-        result1 = self.db.run(self.templates['region_to_clusters'], {'region': region})
-        results.append(result1)
-        steps.append({
-            'purpose': f'Cell types in {region}',
-            'template': 'region_to_clusters',
-            'modality': 'molecular',
-            'success': result1.get('success', False),
-        })
-
-        # Step 2: Region -> Morphology
-        result2 = self.db.run(self.templates['region_morphology'], {'region': region})
-        results.append(result2)
-        steps.append({
-            'purpose': f'Morphology of {region}',
-            'template': 'region_morphology',
-            'modality': 'morphological',
-            'success': result2.get('success', False),
-        })
-
-        # Step 3: Region -> Projections
-        result3 = self.db.run(self.templates['region_projections'], {'region': region})
-        results.append(result3)
-        steps.append({
-            'purpose': f'Projections from {region}',
-            'template': 'region_projections',
-            'modality': 'projection',
-            'success': result3.get('success', False),
-        })
-
-        return results, steps
-
-    def _execute_projection_query(self, params: Dict) -> tuple:
-        """执行投射查询"""
-        region = params.get('region')
-        if not region:
-            return [], []
-
-        results = []
-        steps = []
-
-        result = self.db.run(self.templates['region_projections'], {'region': region})
-        results.append(result)
-        steps.append({
-            'purpose': f'Projections from {region}',
-            'template': 'region_projections',
-            'modality': 'projection',
-            'success': result.get('success', False),
-        })
-
-        return results, steps
-
-    def _execute_simple_lookup(self, params: Dict) -> tuple:
-        """执行简单查询"""
-        results = []
-        steps = []
-
-        if 'gene' in params:
-            result = self.db.run(self.templates['gene_to_clusters'], params)
-            results.append(result)
-            steps.append({
-                'purpose': f'Lookup {params["gene"]}',
-                'template': 'gene_to_clusters',
-                'modality': 'molecular',
-                'success': result.get('success', False),
-            })
-
-        elif 'region' in params:
-            result = self.db.run(self.templates['region_to_clusters'], params)
-            results.append(result)
-            steps.append({
-                'purpose': f'Lookup {params["region"]}',
-                'template': 'region_to_clusters',
-                'modality': 'molecular',
-                'success': result.get('success', False),
-            })
-
-        return results, steps
-
-    def _synthesize_answer(self, question: str, results: List[Dict]) -> str:
-        """合成答案（使用GPT-5）"""
-        # 收集所有成功的数据
-        all_data = []
-        for result in results:
-            if result.get('success') and result.get('data'):
-                all_data.extend(result['data'][:10])
-
-        if not all_data:
-            return "No data found in knowledge graph."
-
-        # 格式化为context
-        context = "Data from Knowledge Graph:\n"
-        for i, row in enumerate(all_data[:20], 1):
-            context += f"\n{i}. "
-            context += ", ".join(f"{k}: {v}" for k, v in list(row.items())[:5])
-
-        # 🔧 使用GPT-5合成
-        prompt = f"""Based on the following data from a neuroscience knowledge graph, provide a comprehensive answer.
-
-Question: {question}
-
-{context}
-
-Provide a detailed, scientific answer using ONLY the data above. Include quantitative details and be precise."""
-
-        try:
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a neuroscience expert analyzing knowledge graph data."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_completion_tokens=1000,
-                timeout=30
-            )
-
-            return completion.choices[0].message.content
-
-        except Exception as e:
-            logger.error(f"GPT-5 synthesis failed: {e}")
-            return f"Based on knowledge graph data: Found {len(all_data)} relevant entries. " + context[:500]
-
-    def _fallback_answer(self, question: str, elapsed: float) -> Dict:
-        """Fallback answer"""
-        return {
-            'question': question,
-            'answer': "Unable to extract parameters or execute templates for this question.",
-            'entities_recognized': [],
-            'executed_steps': [],
-            'schema_paths_used': [],
-            'execution_time': elapsed,
-            'total_steps': 0,
-            'confidence_score': 0.0,
-            'success': False,
-            'method': 'Template-KG',
-        }
+        return entities[:10]  # 最多返回10个
 
     def _error_response(self, question: str, error: str, elapsed: float) -> Dict:
         return {
@@ -576,44 +184,60 @@ Provide a detailed, scientific answer using ONLY the data above. Include quantit
             'total_steps': 0,
             'confidence_score': 0.0,
             'success': False,
-            'method': 'Template-KG',
+            'method': 'Direct LLM',
             'error': error,
         }
 
 
-# ==================== Baseline 3: RAG (with GPT-5) ====================
+# ==================== Baseline 2: RAG ====================
 
 class RAGBaseline(BaselineAgent):
-    """RAG baseline (使用GPT-5)"""
+    """
+    Baseline 2: Retrieval-Augmented Generation
 
-    def __init__(self, neo4j_exec, openai_client):
+    特点：
+    - 检索相关KG节点
+    - 基于检索内容生成答案
+
+    优势：
+    - 有KG数据支持
+    - 比Direct LLM更准确
+
+    劣势：
+    - 检索可能不精准
+    - 无多跳推理
+    - 无闭环能力
+    """
+
+    def __init__(self, neo4j_exec, openai_client, model="gpt-4o"):
         super().__init__("RAG")
         self.db = neo4j_exec
         self.client = openai_client
-        self.model = "gpt-5"  # 🔧 使用GPT-5
+        self.model = model
 
     def answer(self, question: str, timeout: int = 120) -> Dict[str, Any]:
         start_time = time.time()
 
-        # 提取关键词
+        # Step 1: 提取关键词
         keywords = self._extract_keywords(question)
         logger.info(f"  RAG keywords: {keywords}")
 
-        # 检索文档
+        # Step 2: 检索相关文档
         docs = self._retrieve_documents(keywords, top_k=10)
         logger.info(f"  RAG retrieved {len(docs)} documents")
 
-        # 构建prompt
+        # Step 3: 构建prompt
         if docs:
             context = self._format_documents(docs)
         else:
             context = "No relevant documents found in the knowledge graph."
 
-        # 生成答案（使用GPT-5）
+        # Step 4: 生成答案
         try:
             answer = self._generate_answer(question, context, timeout)
             execution_time = time.time() - start_time
 
+            # 从docs提取实体
             entities_recognized = self._extract_entities_from_docs(docs)
 
             return {
@@ -627,7 +251,7 @@ class RAGBaseline(BaselineAgent):
                 'schema_paths_used': [],
                 'execution_time': execution_time,
                 'total_steps': 1,
-                'confidence_score': 0.6,
+                'confidence_score': 0.6,  # 有KG支持，置信度稍高
                 'success': True,
                 'method': 'RAG',
             }
@@ -637,10 +261,16 @@ class RAGBaseline(BaselineAgent):
             return self._error_response(question, str(e), time.time() - start_time)
 
     def _extract_keywords(self, question: str) -> List[str]:
-        """提取关键词"""
+        """提取关键词（简单方法）"""
+        import re
+
+        # 提取大写缩写
         keywords = re.findall(r'\b[A-Z]{2,5}\b', question)
+
+        # 提取基因名模式
         keywords.extend(re.findall(r'\b[A-Z][a-z]{2,8}\+?\b', question))
 
+        # 提取常见神经科学术语
         neuro_terms = [
             'neuron', 'neurons', 'cell', 'cells', 'cortex', 'region',
             'brain', 'axon', 'dendrite', 'projection', 'marker', 'cluster'
@@ -648,14 +278,16 @@ class RAGBaseline(BaselineAgent):
         q_lower = question.lower()
         keywords.extend([term for term in neuro_terms if term in q_lower])
 
-        return list(set(keywords))[:5]
+        return list(set(keywords))[:5]  # 最多5个关键词
 
     def _retrieve_documents(self, keywords: List[str], top_k: int = 10) -> List[Dict]:
-        """检索文档"""
+        """检索相关文档"""
         docs = []
 
         for keyword in keywords:
-            # Region
+            # 🔧 多种检索策略
+
+            # 策略1: 匹配Region
             query_region = """
             MATCH (r:Region)
             WHERE r.acronym CONTAINS $keyword OR r.name CONTAINS $keyword
@@ -667,7 +299,7 @@ class RAGBaseline(BaselineAgent):
             if result.get('success') and result.get('data'):
                 docs.extend(result['data'])
 
-            # Cluster
+            # 策略2: 匹配Cluster (基因marker)
             query_cluster = """
             MATCH (c:Cluster)
             WHERE c.markers CONTAINS $keyword
@@ -677,6 +309,17 @@ class RAGBaseline(BaselineAgent):
             LIMIT 3
             """
             result = self.db.run(query_cluster, {'keyword': keyword})
+            if result.get('success') and result.get('data'):
+                docs.extend(result['data'])
+
+            # 策略3: 匹配Subclass
+            query_subclass = """
+            MATCH (s:Subclass)
+            WHERE s.name CONTAINS $keyword OR s.markers CONTAINS $keyword
+            RETURN 'Subclass' AS type, s.name AS subclass_name, s.markers AS markers
+            LIMIT 2
+            """
+            result = self.db.run(query_subclass, {'keyword': keyword})
             if result.get('success') and result.get('data'):
                 docs.extend(result['data'])
 
@@ -692,7 +335,7 @@ class RAGBaseline(BaselineAgent):
         return unique_docs[:top_k]
 
     def _format_documents(self, docs: List[Dict]) -> str:
-        """格式化文档"""
+        """格式化文档为prompt"""
         if not docs:
             return "No documents found."
 
@@ -712,6 +355,11 @@ class RAGBaseline(BaselineAgent):
                 if doc.get('neurons'):
                     text += f"\n  Neurons: {doc['neurons']:,}"
 
+            elif doc_type == 'Subclass':
+                text = f"Subclass: {doc.get('subclass_name', 'N/A')}"
+                if doc.get('markers'):
+                    text += f"\n  Markers: {doc['markers']}"
+
             else:
                 text = json.dumps(doc, indent=2)
 
@@ -720,7 +368,7 @@ class RAGBaseline(BaselineAgent):
         return "\n\n".join(formatted)
 
     def _generate_answer(self, question: str, context: str, timeout: int) -> str:
-        """生成答案（使用GPT-5）"""
+        """基于检索内容生成答案"""
 
         system_prompt = """You are a neuroscience expert analyzing data from a knowledge graph.
 Use ONLY the provided documents to answer the question.
@@ -735,24 +383,25 @@ Documents:
 Question: {question}
 
 Provide a detailed, scientific answer using ONLY information from the documents above.
+Include specific numbers, region names, and markers when available.
 
 Answer:"""
 
-        completion = self.client.chat.completions.create(
+        response = self.client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            
-            max_completion_tokens=1200,
+            temperature=0.2,
+            max_tokens=1200,
             timeout=timeout
         )
 
-        return completion.choices[0].message.content
+        return response.choices[0].message.content
 
     def _extract_entities_from_docs(self, docs: List[Dict]) -> List[Dict]:
-        """从文档提取实体"""
+        """从检索文档中提取实体"""
         entities = []
 
         for doc in docs:
@@ -766,6 +415,7 @@ Answer:"""
                 })
 
             elif doc_type == 'Cluster':
+                # 提取markers
                 markers = doc.get('markers', '')
                 if markers:
                     for marker in markers.split(',')[:3]:
@@ -793,16 +443,33 @@ Answer:"""
         }
 
 
-# ==================== Baseline 4: ReAct (with GPT-5) ====================
+# ==================== Baseline 3: ReAct ====================
 
 class ReActBaseline(BaselineAgent):
-    """ReAct baseline (使用GPT-5，增加max_iterations)"""
+    """
+    Baseline 3: ReAct (Reasoning + Acting)
 
-    def __init__(self, neo4j_exec, openai_client, max_iterations=5):
+    特点：
+    - 交替进行推理和行动
+    - 可以执行多步查询
+    - 有一定推理能力
+
+    优势：
+    - 可以进行简单的多跳推理
+    - 有KG访问能力
+
+    劣势：
+    - 无schema引导
+    - 无自适应深度
+    - 无闭环机制
+    - 推理步骤有限
+    """
+
+    def __init__(self, neo4j_exec, openai_client, model="gpt-4o", max_iterations=3):
         super().__init__("ReAct")
         self.db = neo4j_exec
         self.client = openai_client
-        self.model = "gpt-5"  # 🔧 使用GPT-5
+        self.model = model
         self.max_iterations = max_iterations
 
     def answer(self, question: str, timeout: int = 120) -> Dict[str, Any]:
@@ -837,6 +504,7 @@ Keep queries simple and focused. Limit results to 20 rows."""
             for iteration in range(self.max_iterations):
                 logger.info(f"  ReAct iteration {iteration + 1}/{self.max_iterations}")
 
+                # 构建context
                 if history:
                     context = "\n\n".join(history)
                 else:
@@ -849,19 +517,20 @@ Previous steps:
 
 What's your next step? Respond in JSON format."""
 
-                # LLM推理（使用GPT-5）
-                completion = self.client.chat.completions.create(
+                # LLM推理
+                response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
                     ],
                     response_format={"type": "json_object"},
-                    max_completion_tokens=800,
+                    temperature=0.3,
+                    max_tokens=800,
                     timeout=timeout // self.max_iterations
                 )
 
-                result = json.loads(completion.choices[0].message.content)
+                result = json.loads(response.choices[0].message.content)
 
                 thought = result.get('thought', '')
                 action = result.get('action', '')
@@ -869,7 +538,7 @@ What's your next step? Respond in JSON format."""
                 history.append(f"Thought: {thought}")
                 logger.info(f"    Thought: {thought[:80]}...")
 
-                # 回答
+                # 如果决定回答
                 if action == 'answer':
                     final_answer = result.get('final_answer', '')
 
@@ -883,12 +552,12 @@ What's your next step? Respond in JSON format."""
                         'schema_paths_used': [],
                         'execution_time': execution_time,
                         'total_steps': len(executed_steps),
-                        'confidence_score': 0.7,
+                        'confidence_score': 0.7,  # ReAct有推理，置信度较高
                         'success': True,
                         'method': 'ReAct',
                     }
 
-                # 查询
+                # 如果决定查询
                 elif action == 'query':
                     query = result.get('query', '')
 
@@ -899,12 +568,14 @@ What's your next step? Respond in JSON format."""
                     history.append(f"Action: Execute query")
                     logger.info(f"    Executing query: {query[:80]}...")
 
+                    # 执行查询
                     db_result = self.db.run(query)
 
                     if db_result.get('success'):
-                        data = db_result.get('data', [])[:20]
+                        data = db_result.get('data', [])[:20]  # 限制20行
                         observation = f"Query returned {len(data)} results"
 
+                        # 提取实体
                         entities_recognized.extend(self._extract_entities_from_data(data))
 
                     else:
@@ -920,10 +591,9 @@ What's your next step? Respond in JSON format."""
                         'query': query,
                         'result_count': len(data),
                         'success': db_result.get('success', False),
-                        'modality': self._infer_modality(query),
                     })
 
-            # 达到最大迭代
+            # 达到最大迭代次数
             logger.warning(f"  ReAct reached max iterations")
 
             final_answer = "Unable to complete analysis within iteration limit. "
@@ -940,43 +610,30 @@ What's your next step? Respond in JSON format."""
                 'schema_paths_used': [],
                 'execution_time': time.time() - start_time,
                 'total_steps': len(executed_steps),
-                'confidence_score': 0.4,
+                'confidence_score': 0.4,  # 未完成，低置信度
                 'success': False,
                 'method': 'ReAct',
             }
 
         except Exception as e:
             logger.error(f"ReAct failed: {e}")
-            import traceback
-            traceback.print_exc()
             return self._error_response(question, str(e), time.time() - start_time)
 
-    def _infer_modality(self, query: str) -> str:
-        """推断查询的modality"""
-        query_lower = query.lower()
-
-        if 'project' in query_lower or 'target' in query_lower:
-            return 'projection'
-        elif 'morpholog' in query_lower or 'axon' in query_lower or 'dendrit' in query_lower:
-            return 'morphological'
-        elif 'cluster' in query_lower or 'marker' in query_lower:
-            return 'molecular'
-        else:
-            return None
-
     def _extract_entities_from_data(self, data: List[Dict]) -> List[Dict]:
-        """从数据提取实体"""
+        """从查询结果提取实体"""
         entities = []
 
-        for row in data[:5]:
+        for row in data[:5]:  # 只处理前5行
             for key, value in row.items():
                 if isinstance(value, str):
+                    # Region acronym pattern
                     if len(value) >= 2 and len(value) <= 5 and value.isupper():
                         entities.append({
                             'text': value,
                             'type': 'Region',
                             'confidence': 0.8,
                         })
+                    # Gene pattern
                     elif len(value) >= 3 and value[0].isupper():
                         entities.append({
                             'text': value,
@@ -984,6 +641,7 @@ What's your next step? Respond in JSON format."""
                             'confidence': 0.6,
                         })
 
+        # 去重
         seen = set()
         unique = []
         for e in entities:
@@ -1015,28 +673,25 @@ What's your next step? Respond in JSON format."""
 def create_baseline(baseline_type: str, **kwargs) -> BaselineAgent:
     """工厂函数创建baseline"""
 
-    if baseline_type == 'direct-gpt5':
-        return DirectGPT5Baseline(
-            openai_client=kwargs['openai_client']
-        )
-
-    elif baseline_type == 'template-kg':
-        return TemplateKGBaseline(
-            neo4j_exec=kwargs['neo4j_exec'],
-            openai_client=kwargs['openai_client']
+    if baseline_type == 'direct_llm':
+        return DirectLLMBaseline(
+            openai_client=kwargs['openai_client'],
+            model=kwargs.get('model', 'gpt-4o')
         )
 
     elif baseline_type == 'rag':
         return RAGBaseline(
             neo4j_exec=kwargs['neo4j_exec'],
-            openai_client=kwargs['openai_client']
+            openai_client=kwargs['openai_client'],
+            model=kwargs.get('model', 'gpt-4o')
         )
 
     elif baseline_type == 'react':
         return ReActBaseline(
             neo4j_exec=kwargs['neo4j_exec'],
             openai_client=kwargs['openai_client'],
-            max_iterations=kwargs.get('max_iterations', 5)
+            model=kwargs.get('model', 'gpt-4o'),
+            max_iterations=kwargs.get('max_iterations', 3)
         )
 
     else:
@@ -1046,9 +701,9 @@ def create_baseline(baseline_type: str, **kwargs) -> BaselineAgent:
 # ==================== Test ====================
 
 if __name__ == "__main__":
-    print("✅ Updated baselines.py v2.1 (GPT-5) loaded successfully!")
+    # 简单测试
+    print("Baseline implementations loaded successfully!")
     print("\nAvailable baselines:")
-    print("1. Direct GPT-5 - SOTA LLM (no KG)")
-    print("2. Template-KG - Template-based KG query (with GPT-5)")
-    print("3. RAG - Retrieval + Generation (with GPT-5)")
-    print("4. ReAct - Reasoning + Acting (with GPT-5, max_iter=5)")
+    print("1. Direct LLM - No KG access, pure LLM knowledge")
+    print("2. RAG - Retrieval + Generation")
+    print("3. ReAct - Reasoning + Acting with KG queries")

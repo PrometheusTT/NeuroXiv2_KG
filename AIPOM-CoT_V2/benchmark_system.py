@@ -40,28 +40,80 @@ except ImportError:
 # ==================== Question Types ====================
 
 class QuestionComplexity(Enum):
-    """问题复杂度分级"""
-    SIMPLE_FACTUAL = "simple_factual"  # Level 1: 简单事实查询
-    MULTI_ENTITY = "multi_entity"  # Level 2: 多实体关联
-    COMPARATIVE = "comparative"  # Level 3: 比较分析
-    EXPLANATORY = "explanatory"  # Level 4: 解释性推理
-    OPEN_ENDED = "open_ended"  # Level 5: 开放性探索
+    """
+    问题复杂度分级
 
+    基于问题所需的推理步骤和知识整合程度
+    """
+    SIMPLE_FACTUAL = "simple_factual"  # 简单事实查询 (1-2步)
+    MULTI_ENTITY = "multi_entity"  # 多实体查询 (2-3步)
+    COMPARATIVE = "comparative"  # 比较分析 (3-5步)
+    EXPLANATORY = "explanatory"  # 解释性查询 (4-6步)
+    OPEN_ENDED = "open_ended"  # 开放式查询 (5+步)
+
+
+# ==================== Benchmark Question ====================
 
 @dataclass
 class BenchmarkQuestion:
-    """单个测试问题"""
+    """
+    Benchmark测试问题
+
+    🔧 修复：字段顺序正确，无默认值的在前
+
+    字段说明:
+    - id: 问题唯一标识
+    - question: 问题文本
+    - complexity: 复杂度级别
+    - domain: 领域 (molecular/morphological/projection/multi-modal)
+    - expected_answer_contains: 期望答案包含的关键词
+    - expected_entities: 期望识别的实体列表
+    - requires_kg: 是否需要访问知识图谱
+    - gold_answer: 标准答案（可选）
+    - ground_truth_cypher: Ground truth查询（可选）
+    """
+
+    # ===== 必需字段（无默认值）=====
     id: str
     question: str
     complexity: QuestionComplexity
-    domain: str  # 'molecular' | 'morphological' | 'projection' | 'multi-modal'
-    gold_answer: Optional[str]  # 金标准答案 (如果有)
-    evaluation_criteria: Dict  # 评估标准
-    metadata: Dict = field(default_factory=dict)
-    ground_truth_cypher: Optional[str] = None
-    requires_kg: bool = True
+    domain: str
+
+    # ===== 可选字段（有默认值）=====
     expected_answer_contains: List[str] = field(default_factory=list)
     expected_entities: List[str] = field(default_factory=list)
+    requires_kg: bool = True
+    gold_answer: Optional[str] = None
+    ground_truth_cypher: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典（用于JSON序列化）"""
+        return {
+            'id': self.id,
+            'question': self.question,
+            'complexity': self.complexity.value,  # Enum -> string
+            'domain': self.domain,
+            'expected_answer_contains': self.expected_answer_contains,
+            'expected_entities': self.expected_entities,
+            'requires_kg': self.requires_kg,
+            'gold_answer': self.gold_answer,
+            'ground_truth_cypher': self.ground_truth_cypher
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'BenchmarkQuestion':
+        """从字典创建（用于JSON反序列化）"""
+        return cls(
+            id=data['id'],
+            question=data['question'],
+            complexity=QuestionComplexity(data['complexity']),  # string -> Enum
+            domain=data['domain'],
+            expected_answer_contains=data.get('expected_answer_contains', []),
+            expected_entities=data.get('expected_entities', []),
+            requires_kg=data.get('requires_kg', True),
+            gold_answer=data.get('gold_answer'),
+            ground_truth_cypher=data.get('ground_truth_cypher')
+        )
 
 
 

@@ -109,12 +109,12 @@ class ImprovedDomainEvaluator:
         # 合并所有可能的预测实体
         all_predicted = predicted_texts | answer_entities | question_entities
 
-        logger.info(f"    🔍 Entity matching:")
-        logger.info(f"       Expected: {expected_texts}")
-        logger.info(f"       Predicted (from agent): {predicted_texts}")
-        logger.info(f"       From answer: {answer_entities}")
-        logger.info(f"       From question: {question_entities}")
-        logger.info(f"       All predicted: {all_predicted}")
+        print(f"    🔍 Entity matching:")
+        print(f"       Expected: {expected_texts}")
+        print(f"       Predicted (from agent): {predicted_texts}")
+        print(f"       From answer: {answer_entities}")
+        print(f"       From question: {question_entities}")
+        print(f"       All predicted: {all_predicted}")
 
         # 🔧 FIX 2: 使用模糊匹配
         true_positives = 0
@@ -122,7 +122,7 @@ class ImprovedDomainEvaluator:
             for predicted in all_predicted:
                 if self._fuzzy_match(expected, predicted):
                     true_positives += 1
-                    logger.info(f"       ✓ Matched: '{expected}' ≈ '{predicted}'")
+                    print(f"       ✓ Matched: '{expected}' ≈ '{predicted}'")
                     break
 
         false_positives = len(all_predicted) - true_positives
@@ -136,7 +136,7 @@ class ImprovedDomainEvaluator:
         f1 = 2 * precision * recall / (precision + recall) \
             if (precision + recall) > 0 else 0.0
 
-        logger.info(f"       P={precision:.3f}, R={recall:.3f}, F1={f1:.3f}")
+        print(f"       P={precision:.3f}, R={recall:.3f}, F1={f1:.3f}")
 
         return {
             'entity_precision': precision,
@@ -145,22 +145,30 @@ class ImprovedDomainEvaluator:
         }
 
     def _extract_entities_from_text(self, text: str) -> set:
-        """从文本中提取可能的实体（脑区、基因等）"""
+        """从文本中提取实体（带KG验证）"""
         entities = set()
 
-        # 1. 提取脑区缩写 (2-5个大写字母)
+        # 1. 提取脑区缩写
         brain_regions = re.findall(r'\b[A-Z]{2,5}\b', text)
-        entities.update([r.lower() for r in brain_regions])
 
-        # 2. 提取基因名称 (首字母大写的单词，如Pvalb, Sst, Vip)
+        # 🔧 排除常见英文单词
+        common_words = ['WHAT', 'WHERE', 'WHICH', 'WHEN', 'WHO', 'WHY', 'HOW',
+                        'ARE', 'IS', 'WAS', 'WERE', 'BE', 'DO', 'DOES', 'DID']
+
+        for r in brain_regions:
+            if r not in common_words:
+                entities.add(r.lower())
+
+        # 2. 提取基因名称
         gene_names = re.findall(r'\b[A-Z][a-z]{2,10}\b', text)
-        entities.update([g.lower() for g in gene_names])
 
-        # 3. 提取常见神经科学术语
-        neuro_terms = ['cluster', 'subclass', 'neuron', 'cell']
-        for term in neuro_terms:
-            if term in text.lower():
-                entities.add(term)
+        # 🔧 排除常见单词
+        common_genes_to_exclude = ['What', 'Which', 'Where', 'When', 'Tell',
+                                   'Show', 'Give', 'Compare', 'About', 'Between']
+
+        for g in gene_names:
+            if g not in common_genes_to_exclude:
+                entities.add(g.lower())
 
         return entities
 
@@ -230,10 +238,10 @@ class ImprovedDomainEvaluator:
         # 合并所有模态
         all_modalities = modalities_from_steps | modalities_from_answer
 
-        logger.info(f"    🎨 Modality detection:")
-        logger.info(f"       From steps: {modalities_from_steps}")
-        logger.info(f"       From answer: {modalities_from_answer}")
-        logger.info(f"       Total: {all_modalities}")
+        print(f"    🎨 Modality detection:")
+        print(f"       From steps: {modalities_from_steps}")
+        print(f"       From answer: {modalities_from_answer}")
+        print(f"       Total: {all_modalities}")
 
         # 计算覆盖率
         available_modalities = {'molecular', 'morphological', 'projection'}
@@ -359,7 +367,7 @@ class ImprovedDomainEvaluator:
                      ground_truth: Optional[Dict] = None) -> DomainSpecificMetrics:
         """完整评估"""
 
-        logger.info(f"    📊 Evaluating: {question}")
+        print(f"    📊 Evaluating: {question}")
 
         # 1. 实体识别
         entity_metrics = self.evaluate_entity_recognition(
@@ -788,16 +796,38 @@ class ImprovedNatureMethodsBenchmark:
         if max_questions:
             questions = questions[:max_questions]
 
-        logger.info(f"🚀 Running Improved Benchmark on {len(questions)} questions")
-        logger.info(f"   Methods: AIPOM-CoT + {len(self.baselines)} baselines\n")
+        print(f"🚀 Running Improved Benchmark on {len(questions)} questions")
+        print(f"   Methods: AIPOM-CoT + {len(self.baselines)} baselines\n")
+
+        # 🔧 测试实体识别是否工作
+        print("🧪 Testing entity recognition...")
+        test_question = "What cells are in ACAd?"
+
+        # 尝试识别实体
+        from intelligent_entity_recognition import IntelligentEntityRecognizer
+        recognizer = IntelligentEntityRecognizer(
+            self.aipom.db,
+            self.aipom.schema
+        )
+        test_matches = recognizer.recognize_entities(test_question)
+
+        if test_matches:
+            print(f"   ✅ Entity recognition working: found {len(test_matches)} entities")
+            for m in test_matches[:3]:
+                print(f"      • {m.text} ({m.entity_type})")
+        else:
+            logger.error("   ❌ Entity recognition FAILED - no entities found!")
+            logger.error("   This will cause problems in the benchmark.")
+
+        print("")
 
         for q_idx, question in enumerate(tqdm(questions, desc="Testing")):
-            logger.info(f"\n{'='*80}")
-            logger.info(f"Question {q_idx+1}/{len(questions)}: {question['question']}")
-            logger.info('='*80)
+            print(f"\n{'='*80}")
+            print(f"Question {q_idx+1}/{len(questions)}: {question['question']}")
+            print('='*80)
 
             # 1. AIPOM-CoT
-            logger.info("\n[1/4] Running AIPOM-CoT...")
+            print("\n[1/4] Running AIPOM-CoT...")
             aipom_result = self._run_and_evaluate(
                 'AIPOM-CoT',
                 lambda q: self.aipom.answer(q, max_iterations=10),
@@ -807,7 +837,7 @@ class ImprovedNatureMethodsBenchmark:
 
             # 2. Baselines
             for idx, (name, baseline) in enumerate(self.baselines.items(), start=2):
-                logger.info(f"\n[{idx}/4] Running {name}...")
+                print(f"\n[{idx}/4] Running {name}...")
                 baseline_result = self._run_and_evaluate(
                     name,
                     baseline.answer,
@@ -824,7 +854,7 @@ class ImprovedNatureMethodsBenchmark:
         self._generate_statistical_analysis()
         self._generate_visualization()
 
-        logger.info(f"\n✅ Benchmark complete! Results in {self.output_dir}")
+        print(f"\n✅ Benchmark complete! Results in {self.output_dir}")
 
     def _run_and_evaluate(self, method_name: str, answer_fn, question: Dict) -> Dict:
         """运行并评估单个方法"""
@@ -856,11 +886,11 @@ class ImprovedNatureMethodsBenchmark:
             }
 
             # 打印关键指标
-            logger.info(f"  ✓ {method_name}:")
-            logger.info(f"    Entity F1: {metrics.entity_f1:.3f}")
-            logger.info(f"    Modality Coverage: {metrics.modality_coverage:.3f}")
-            logger.info(f"    Scientific Rigor: {metrics.scientific_rigor:.3f}")
-            logger.info(f"    Time: {metrics.execution_time:.2f}s")
+            print(f"  ✓ {method_name}:")
+            print(f"    Entity F1: {metrics.entity_f1:.3f}")
+            print(f"    Modality Coverage: {metrics.modality_coverage:.3f}")
+            print(f"    Scientific Rigor: {metrics.scientific_rigor:.3f}")
+            print(f"    Time: {metrics.execution_time:.2f}s")
 
             return result
 
@@ -912,13 +942,13 @@ class ImprovedNatureMethodsBenchmark:
         """保存最终结果"""
         filepath = self.output_dir / "final_results.json"
         self._save_intermediate_results()
-        logger.info(f"✅ Results saved to {filepath}")
+        print(f"✅ Results saved to {filepath}")
 
     def _generate_statistical_analysis(self):
         """生成统计分析"""
-        logger.info("\n" + "="*80)
-        logger.info("STATISTICAL ANALYSIS")
-        logger.info("="*80)
+        print("\n" + "="*80)
+        print("STATISTICAL ANALYSIS")
+        print("="*80)
 
         # 提取F1分数
         f1_scores = {}
@@ -949,9 +979,9 @@ class ImprovedNatureMethodsBenchmark:
 
     def _generate_visualization(self):
         """生成可视化"""
-        logger.info("\n" + "="*80)
-        logger.info("GENERATING VISUALIZATIONS")
-        logger.info("="*80)
+        print("\n" + "="*80)
+        print("GENERATING VISUALIZATIONS")
+        print("="*80)
 
         methods = list(self.results.keys())
 
@@ -1028,7 +1058,7 @@ class ImprovedNatureMethodsBenchmark:
         plt.savefig(self.output_dir / "benchmark_comparison.pdf", bbox_inches='tight')
         plt.close()
 
-        logger.info("✅ Visualizations saved")
+        print("✅ Visualizations saved")
 
 
 # ==================== 主函数 ====================
@@ -1041,7 +1071,7 @@ def run_improved_benchmark():
     # 加载问题
     questions_file = "test_questions.json"
     if not Path(questions_file).exists():
-        logger.info("Generating test questions...")
+        print("Generating test questions...")
         questions = BenchmarkQuestionBank.generate_questions()
         BenchmarkQuestionBank.save_to_json(questions, questions_file)
 
@@ -1097,7 +1127,7 @@ def run_improved_benchmark():
 
     benchmark.run_full_benchmark(questions_dict, max_questions=10)
 
-    logger.info("\n✅ Improved Benchmark Complete!")
+    print("\n✅ Improved Benchmark Complete!")
 
 
 if __name__ == "__main__":

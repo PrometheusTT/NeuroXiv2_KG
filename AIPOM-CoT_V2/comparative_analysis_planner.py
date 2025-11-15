@@ -197,20 +197,23 @@ class ComparativeAnalysisPlanner:
                 CandidateStep(
                     step_id='systematic_get_regions',
                     step_type='spatial',
-                    purpose='Identify all brain regions for systematic comparison',
-                    rationale='Unbiased whole-brain survey for cross-modal analysis',
+                    purpose='Identify top brain regions by neuron count',  # 修改purpose
+                    rationale='Select regions with most neurons for systematic comparison (Figure 4 method)',
                     priority=9.5,
-                    schema_path='Region nodes',
-                    expected_data='Complete list of regions with multi-modal data',
+                    schema_path='Region-Neuron relationship',
+                    expected_data='Top 30 regions ordered by neuron count',
+                    # 🎯 关键修改：使用Figure 4的查询
                     cypher_template="""
-                    MATCH (r:Region)
-                    WHERE exists((r)-[:HAS_CLUSTER]->())
-                      AND exists((r)-[:PROJECT_TO]->())
-                    RETURN r.acronym AS region,
-                           r.name AS region_name
-                    ORDER BY r.acronym
-                    LIMIT 100
-                    """,
+                        MATCH (r:Region)
+                        OPTIONAL MATCH (n:Neuron)-[:LOCATE_AT]->(r)
+                        WITH r, COUNT(DISTINCT n) AS neuron_count
+                        WHERE neuron_count > 0
+                        RETURN r.acronym AS region,
+                               r.name AS region_name,
+                               neuron_count
+                        ORDER BY neuron_count DESC
+                        LIMIT 30
+                        """,
                     parameters={},
                     depends_on=[]
                 )

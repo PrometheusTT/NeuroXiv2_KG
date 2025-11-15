@@ -413,6 +413,62 @@ class RealFingerprintAnalyzer:
             logger.error(f"Failed to get fingerprint for {region}: {e}")
             return None
 
+    def standardize_morphology_globally(self, regions: List[str]):
+        """
+        全局Z-score标准化形态指纹（对齐Ground Truth方法）
+
+        🎯 关键：在计算mismatch前，对所有regions的形态数据做一次性全局标准化
+
+        Args:
+            regions: 需要标准化的region列表
+        """
+        logger.info("   Performing global morphology standardization...")
+
+        # 收集所有regions的形态指纹
+        all_morph = []
+        valid_regions = []
+
+        for region in regions:
+            morph = self.compute_morphological_fingerprint(region)
+            if morph is not None:
+                all_morph.append(morph)
+                valid_regions.append(region)
+
+        if len(all_morph) < 2:
+            logger.warning("   Insufficient morphology data for standardization")
+            return
+
+        all_morph = np.array(all_morph)  # (N_regions, 8)
+
+        logger.info(f"      Morphology array shape: {all_morph.shape}")
+
+        # 处理dendritic特征的0值 (索引4-7)
+        dendritic_indices = [4, 5, 6, 7]
+        for i in dendritic_indices:
+            col = all_morph[:, i].copy()
+            zero_mask = np.abs(col) < 1e-6
+            n_zeros = zero_mask.sum()
+            if n_zeros > 0:
+                logger.debug(f"      Dendritic feature {i}: excluding {n_zeros}/{len(col)} zeros")
+                col[zero_mask] = np.nan
+                all_morph[:, i] = col
+
+        # 对每个特征维度进行z-score
+        from scipy.stats import zscore
+        for i in range(all_morph.shape[1]):
+            col = all_morph[:, i]
+            valid = ~np.isnan(col)
+            if valid.sum() > 1:
+                col[valid] = zscore(col[valid])
+                all_morph[:, i] = col
+
+        # 缓存结果
+        self._morph_cache = {}
+        for idx, region in enumerate(valid_regions):
+            self._morph_cache[region] = all_morph[idx]
+
+        logger.info(f"      ✓ Global standardization complete for {len(valid_regions)} regions")
+
 
 class Figure4PlottingTool:
     """
@@ -2275,14 +2331,305 @@ Return a JSON object with key "steps" containing an array:
         logger.warning("Correlation test not yet implemented")
         return {'success': False, 'error': 'Not implemented'}
 
+    # def _compute_mismatch_matrix(self, params: Dict, state: EnhancedAgentState) -> Dict:
+    #     """
+    #     计算cross-modal mismatch矩阵 (对齐Figure 4方法)
+    #
+    #     🎯 关键修复:
+    #     1. 先计算所有pairs的距离矩阵
+    #     2. 全局Min-Max归一化
+    #     3. 然后计算mismatch
+    #     """
+    #     import time
+    #     start_time = time.time()
+    #
+    #     # 获取regions
+    #     regions = state.analysis_state.discovered_entities.get('Region', [])
+    #
+    #     if not regions:
+    #         for key, data in state.intermediate_data.items():
+    #             if data and isinstance(data, list) and len(data) > 0:
+    #                 if 'region' in data[0]:
+    #                     regions = list(set([row['region'] for row in data if row.get('region')]))
+    #                     break
+    #
+    #     max_regions = params.get('max_regions', 15)
+    #     regions = regions[:max_regions]
+    #
+    #     if len(regions) < 2:
+    #         return {'success': False, 'error': 'Need at least 2 regions'}
+    #
+    #     n = len(regions)
+    #     logger.info(f"   🚀 Computing mismatch (Figure 4 method) for {n} regions...")
+    #
+    #     # 🚀 Step 1: 批量获取fingerprints
+    #     logger.info(f"   📊 Step 1/4: Batch fetching fingerprints...")
+    #
+    #     fingerprints = {}
+    #     failed_regions = []
+    #
+    #     for region in regions:
+    #         try:
+    #             mol = self.fingerprint.compute_molecular_fingerprint(region)
+    #             morph = self.fingerprint.compute_morphological_fingerprint(region)
+    #             proj = self.fingerprint.compute_projection_fingerprint(region)
+    #
+    #             if mol is not None and morph is not None and proj is not None:
+    #                 fingerprints[region] = {
+    #                     'molecular': mol,
+    #                     'morphological': morph,
+    #                     'projection': proj
+    #                 }
+    #             else:
+    #                 failed_regions.append(region)
+    #
+    #         except Exception as e:
+    #             logger.warning(f"      Failed {region}: {e}")
+    #             failed_regions.append(region)
+    #
+    #     valid_regions = [r for r in regions if r not in failed_regions]
+    #     n_valid = len(valid_regions)
+    #
+    #     logger.info(f"      ✓ Got fingerprints: {len(fingerprints)}/{n}")
+    #
+    #     if n_valid < 2:
+    #         return {'success': False, 'error': 'Insufficient valid regions'}
+    #     # 🆕 Step 1.5: Z-score标准化形态指纹 (Figure 4方法)
+    #     logger.info(f"   🔧 Step 1.5/4: Z-score standardization of morphology...")
+    #     import numpy as np
+    #     if len(fingerprints) >= 2:
+    #         # 提取所有形态指纹
+    #         all_morph = []
+    #         for region in valid_regions:
+    #             morph = fingerprints[region]['morphological']
+    #             all_morph.append(morph)
+    #
+    #         all_morph = np.array(all_morph)  # (N_regions, 8)
+    #
+    #         logger.info(f"      Morphology array shape: {all_morph.shape}")
+    #
+    #         # 处理dendritic特征的0值 (索引4-7)
+    #         dendritic_indices = [4, 5, 6, 7]
+    #         for i in dendritic_indices:
+    #             col = all_morph[:, i].copy()
+    #             zero_mask = np.abs(col) < 1e-6
+    #             n_zeros = zero_mask.sum()
+    #             if n_zeros > 0:
+    #                 logger.info(f"      Dendritic feature {i}: excluding {n_zeros}/{len(col)} zeros")
+    #                 col[zero_mask] = np.nan
+    #                 all_morph[:, i] = col
+    #
+    #         # 对每个特征维度进行z-score
+    #         from scipy.stats import zscore
+    #         for i in range(all_morph.shape[1]):
+    #             col = all_morph[:, i]
+    #             valid = ~np.isnan(col)
+    #             if valid.sum() > 1:
+    #                 col[valid] = zscore(col[valid])
+    #                 all_morph[:, i] = col
+    #
+    #         # 更新fingerprints
+    #         for idx, region in enumerate(valid_regions):
+    #             fingerprints[region]['morphological'] = all_morph[idx]
+    #
+    #         logger.info(f"      ✓ Z-score standardization complete")
+    #
+    #     # 🚀 Step 2: 构建距离矩阵 (NxN)
+    #     logger.info(f"   📏 Step 2/4: Building distance matrices...")
+    #
+    #     import numpy as np
+    #     from scipy.spatial.distance import cosine, euclidean
+    #
+    #     mol_dist_matrix = np.zeros((n_valid, n_valid))
+    #     morph_dist_matrix = np.zeros((n_valid, n_valid))
+    #     proj_dist_matrix = np.zeros((n_valid, n_valid))
+    #
+    #     # 在Step 2: 构建距离矩阵中
+    #     for i, region_a in enumerate(valid_regions):
+    #         for j, region_b in enumerate(valid_regions):
+    #             if i == j:
+    #                 mol_dist_matrix[i, j] = 0
+    #                 morph_dist_matrix[i, j] = 0
+    #                 proj_dist_matrix[i, j] = 0
+    #                 continue
+    #
+    #             fp_a = fingerprints[region_a]
+    #             fp_b = fingerprints[region_b]
+    #
+    #             # 分子距离 (保持不变)
+    #             try:
+    #                 mol_dist_matrix[i, j] = cosine(fp_a['molecular'], fp_b['molecular'])
+    #             except:
+    #                 mol_dist_matrix[i, j] = np.nan
+    #
+    #             # 🔧 形态距离 (修复 - 使用Euclidean)
+    #             try:
+    #                 morph_a = fp_a['morphological']
+    #                 morph_b = fp_b['morphological']
+    #
+    #                 # 检查NaN
+    #                 valid_mask = ~(np.isnan(morph_a) | np.isnan(morph_b))
+    #
+    #                 if valid_mask.sum() >= 4:  # 至少4个有效维度
+    #                     # 🎯 使用Euclidean距离（不是cosine）
+    #                     morph_dist_matrix[i, j] = euclidean(
+    #                         morph_a[valid_mask],
+    #                         morph_b[valid_mask]
+    #                     )
+    #                 else:
+    #                     morph_dist_matrix[i, j] = np.nan
+    #             except Exception as e:
+    #                 logger.debug(f"      Morph distance failed {region_a}-{region_b}: {e}")
+    #                 morph_dist_matrix[i, j] = np.nan
+    #
+    #             # 投射距离 (保持不变)
+    #             try:
+    #                 proj_dist_matrix[i, j] = cosine(fp_a['projection'], fp_b['projection'])
+    #             except:
+    #                 proj_dist_matrix[i, j] = np.nan
+    #
+    #     print(f"      ✓ Distance matrices built")
+    #     # 在 "✓ Distance matrices built" 后面添加
+    #     print(
+    #         f"      Molecular distance range: [{np.nanmin(mol_dist_matrix):.3f}, {np.nanmax(mol_dist_matrix):.3f}]")
+    #     print(
+    #         f"      Morphology distance range: [{np.nanmin(morph_dist_matrix):.3f}, {np.nanmax(morph_dist_matrix):.3f}]")
+    #     print(
+    #         f"      Projection distance range: [{np.nanmin(proj_dist_matrix):.3f}, {np.nanmax(proj_dist_matrix):.3f}]")
+    #
+    #     # 统计NaN数量
+    #     n_total = mol_dist_matrix.size
+    #     n_mol_nan = np.isnan(mol_dist_matrix).sum()
+    #     n_morph_nan = np.isnan(morph_dist_matrix).sum()
+    #     n_proj_nan = np.isnan(proj_dist_matrix).sum()
+    #
+    #     print(
+    #         f"      NaN counts: mol={n_mol_nan}/{n_total}, morph={n_morph_nan}/{n_total}, proj={n_proj_nan}/{n_total}")
+    #
+    #     # 🚀 Step 3: Min-Max归一化 (全局)
+    #     print(f"   🔧 Step 3/4: Normalizing distance matrices...")
+    #
+    #     def minmax_normalize(matrix):
+    #         """Min-Max归一化到[0,1]"""
+    #         valid = ~np.isnan(matrix)
+    #         if valid.sum() == 0:
+    #             return matrix
+    #
+    #         vmin = matrix[valid].min()
+    #         vmax = matrix[valid].max()
+    #
+    #         if vmax - vmin < 1e-9:
+    #             return np.zeros_like(matrix)
+    #
+    #         normalized = (matrix - vmin) / (vmax - vmin)
+    #         return normalized
+    #
+    #     mol_norm = minmax_normalize(mol_dist_matrix)
+    #     morph_norm = minmax_normalize(morph_dist_matrix)
+    #     proj_norm = minmax_normalize(proj_dist_matrix)
+    #
+    #     print(f"      ✓ Normalization complete")
+    #     print(f"      Normalized molecular range: [{np.nanmin(mol_norm):.3f}, {np.nanmax(mol_norm):.3f}]")
+    #     print(f"      Normalized morphology range: [{np.nanmin(morph_norm):.3f}, {np.nanmax(morph_norm):.3f}]")
+    #     print(f"      Normalized projection range: [{np.nanmin(proj_norm):.3f}, {np.nanmax(proj_norm):.3f}]")
+    #
+    #     # 🚀 Step 4: 计算Mismatch (归一化距离的差异)
+    #     print(f"   🧮 Step 4/4: Computing mismatches...")
+    #
+    #     mismatch_results = []
+    #
+    #     from itertools import combinations
+    #
+    #     for i, region1 in enumerate(valid_regions):
+    #         for j, region2 in enumerate(valid_regions):
+    #             if i >= j:  # 只计算上三角
+    #                 continue
+    #
+    #             # Mismatch = |normalized_distance_A - normalized_distance_B|
+    #             mismatch_GM = abs(mol_norm[i, j] - morph_norm[i, j])
+    #             mismatch_GP = abs(mol_norm[i, j] - proj_norm[i, j])
+    #             mismatch_MP = abs(morph_norm[i, j] - proj_norm[i, j])
+    #
+    #             mismatch_combined = (mismatch_GM + mismatch_GP + mismatch_MP) / 3
+    #
+    #             # 相似度 (用于报告)
+    #             sim_molecular = 1 - mol_dist_matrix[i, j]
+    #             sim_morphological = 1 - morph_norm[i, j]  # 归一化后的
+    #             sim_projection = 1 - proj_dist_matrix[i, j]
+    #
+    #             mismatch_results.append({
+    #                 'region1': region1,
+    #                 'region2': region2,
+    #                 'mismatch_GM': float(mismatch_GM),
+    #                 'mismatch_GP': float(mismatch_GP),
+    #                 'mismatch_MP': float(mismatch_MP),
+    #                 'mismatch_combined': float(mismatch_combined),
+    #                 'sim_molecular': float(sim_molecular),
+    #                 'sim_morphological': float(sim_morphological),
+    #                 'sim_projection': float(sim_projection),
+    #                 # 距离值 (调试用)
+    #                 'dist_molecular': float(mol_dist_matrix[i, j]),
+    #                 'dist_morphological': float(morph_dist_matrix[i, j]),
+    #                 'dist_projection': float(proj_dist_matrix[i, j])
+    #             })
+    #
+    #     # 统计检验
+    #     all_mismatches = [r['mismatch_combined'] for r in mismatch_results]
+    #     mean_m = np.mean(all_mismatches)
+    #     std_m = np.std(all_mismatches)
+    #
+    #     for result in mismatch_results:
+    #         m = result['mismatch_combined']
+    #
+    #         if std_m > 0:
+    #             z_score = (m - mean_m) / std_m
+    #             from scipy import stats
+    #             p_value = 2 * (1 - stats.norm.cdf(abs(z_score)))
+    #         else:
+    #             z_score = 0
+    #             p_value = 1.0
+    #
+    #         result['p_value'] = float(p_value)
+    #         result['z_score'] = float(z_score)
+    #         result['effect_size'] = float(m)
+    #         result['n_permutations'] = 0
+    #
+    #     mismatch_results.sort(key=lambda x: x['mismatch_combined'], reverse=True)
+    #
+    #     elapsed = time.time() - start_time
+    #
+    #     print(f"   ✅ Completed in {elapsed:.1f}s")
+    #     print(f"      Total pairs: {len(mismatch_results)}")
+    #
+    #     if mismatch_results:
+    #         top = mismatch_results[0]
+    #         print(f"      Top: {top['region1']}-{top['region2']}")
+    #         print(f"        Mismatch: {top['mismatch_combined']:.3f}")
+    #         print(f"        P-value: {top['p_value']:.4f}")
+    #
+    #         # 🔍 显示top 5用于验证
+    #         print(f"      Top 5 pairs:")
+    #         for i, pair in enumerate(mismatch_results[:5], 1):
+    #             print(f"        {i}. {pair['region1']}-{pair['region2']}: {pair['mismatch_combined']:.3f}")
+    #
+    #     return {
+    #         'success': True,
+    #         'data': mismatch_results,
+    #         'rows': len(mismatch_results),
+    #         'analysis_type': 'cross_modal_mismatch',
+    #         'computation_time': elapsed,
+    #         'method': 'figure4_compatible'
+    #     }
     def _compute_mismatch_matrix(self, params: Dict, state: EnhancedAgentState) -> Dict:
         """
-        计算cross-modal mismatch矩阵 (对齐Figure 4方法)
+        计算cross-modal mismatch矩阵 (完全对齐Ground Truth signaturev5.py)
 
-        🎯 关键修复:
-        1. 先计算所有pairs的距离矩阵
-        2. 全局Min-Max归一化
-        3. 然后计算mismatch
+        🔧 关键修复：
+        1. Step 0: 全局形态标准化（一次性，所有regions）
+        2. Step 1: 使用缓存的标准化数据
+        3. Step 2: 构建距离矩阵（形态距离用Euclidean）
+        4. Step 3: Min-Max归一化
+        5. Step 4: 计算Mismatch和相似度（统一用归一化距离）
         """
         import time
         start_time = time.time()
@@ -2297,7 +2644,7 @@ Return a JSON object with key "steps" containing an array:
                         regions = list(set([row['region'] for row in data if row.get('region')]))
                         break
 
-        max_regions = params.get('max_regions', 15)
+        max_regions = params.get('max_regions', 30)
         regions = regions[:max_regions]
 
         if len(regions) < 2:
@@ -2305,6 +2652,11 @@ Return a JSON object with key "steps" containing an array:
 
         n = len(regions)
         logger.info(f"   🚀 Computing mismatch (Figure 4 method) for {n} regions...")
+
+        # 🔧 Step 0: 全局形态标准化（只做一次）
+        logger.info(f"   🔧 Step 0/4: Global morphology standardization...")
+        if not hasattr(self.fingerprint, '_morph_cache'):
+            self.fingerprint.standardize_morphology_globally(regions)
 
         # 🚀 Step 1: 批量获取fingerprints
         logger.info(f"   📊 Step 1/4: Batch fetching fingerprints...")
@@ -2315,13 +2667,14 @@ Return a JSON object with key "steps" containing an array:
         for region in regions:
             try:
                 mol = self.fingerprint.compute_molecular_fingerprint(region)
-                morph = self.fingerprint.compute_morphological_fingerprint(region)
+                # 🔧 使用缓存的全局标准化形态数据
+                morph = self.fingerprint._morph_cache.get(region)
                 proj = self.fingerprint.compute_projection_fingerprint(region)
 
                 if mol is not None and morph is not None and proj is not None:
                     fingerprints[region] = {
                         'molecular': mol,
-                        'morphological': morph,
+                        'morphological': morph,  # 已经是z-scored的
                         'projection': proj
                     }
                 else:
@@ -2338,45 +2691,6 @@ Return a JSON object with key "steps" containing an array:
 
         if n_valid < 2:
             return {'success': False, 'error': 'Insufficient valid regions'}
-        # 🆕 Step 1.5: Z-score标准化形态指纹 (Figure 4方法)
-        logger.info(f"   🔧 Step 1.5/4: Z-score standardization of morphology...")
-        import numpy as np
-        if len(fingerprints) >= 2:
-            # 提取所有形态指纹
-            all_morph = []
-            for region in valid_regions:
-                morph = fingerprints[region]['morphological']
-                all_morph.append(morph)
-
-            all_morph = np.array(all_morph)  # (N_regions, 8)
-
-            logger.info(f"      Morphology array shape: {all_morph.shape}")
-
-            # 处理dendritic特征的0值 (索引4-7)
-            dendritic_indices = [4, 5, 6, 7]
-            for i in dendritic_indices:
-                col = all_morph[:, i].copy()
-                zero_mask = np.abs(col) < 1e-6
-                n_zeros = zero_mask.sum()
-                if n_zeros > 0:
-                    logger.info(f"      Dendritic feature {i}: excluding {n_zeros}/{len(col)} zeros")
-                    col[zero_mask] = np.nan
-                    all_morph[:, i] = col
-
-            # 对每个特征维度进行z-score
-            from scipy.stats import zscore
-            for i in range(all_morph.shape[1]):
-                col = all_morph[:, i]
-                valid = ~np.isnan(col)
-                if valid.sum() > 1:
-                    col[valid] = zscore(col[valid])
-                    all_morph[:, i] = col
-
-            # 更新fingerprints
-            for idx, region in enumerate(valid_regions):
-                fingerprints[region]['morphological'] = all_morph[idx]
-
-            logger.info(f"      ✓ Z-score standardization complete")
 
         # 🚀 Step 2: 构建距离矩阵 (NxN)
         logger.info(f"   📏 Step 2/4: Building distance matrices...")
@@ -2388,7 +2702,6 @@ Return a JSON object with key "steps" containing an array:
         morph_dist_matrix = np.zeros((n_valid, n_valid))
         proj_dist_matrix = np.zeros((n_valid, n_valid))
 
-        # 在Step 2: 构建距离矩阵中
         for i, region_a in enumerate(valid_regions):
             for j, region_b in enumerate(valid_regions):
                 if i == j:
@@ -2400,13 +2713,13 @@ Return a JSON object with key "steps" containing an array:
                 fp_a = fingerprints[region_a]
                 fp_b = fingerprints[region_b]
 
-                # 分子距离 (保持不变)
+                # 分子距离 (cosine)
                 try:
                     mol_dist_matrix[i, j] = cosine(fp_a['molecular'], fp_b['molecular'])
                 except:
                     mol_dist_matrix[i, j] = np.nan
 
-                # 🔧 形态距离 (修复 - 使用Euclidean)
+                # 🔧 形态距离 (Euclidean on z-scored features)
                 try:
                     morph_a = fp_a['morphological']
                     morph_b = fp_b['morphological']
@@ -2415,7 +2728,6 @@ Return a JSON object with key "steps" containing an array:
                     valid_mask = ~(np.isnan(morph_a) | np.isnan(morph_b))
 
                     if valid_mask.sum() >= 4:  # 至少4个有效维度
-                        # 🎯 使用Euclidean距离（不是cosine）
                         morph_dist_matrix[i, j] = euclidean(
                             morph_a[valid_mask],
                             morph_b[valid_mask]
@@ -2426,19 +2738,18 @@ Return a JSON object with key "steps" containing an array:
                     logger.debug(f"      Morph distance failed {region_a}-{region_b}: {e}")
                     morph_dist_matrix[i, j] = np.nan
 
-                # 投射距离 (保持不变)
+                # 投射距离 (cosine)
                 try:
                     proj_dist_matrix[i, j] = cosine(fp_a['projection'], fp_b['projection'])
                 except:
                     proj_dist_matrix[i, j] = np.nan
 
-        print(f"      ✓ Distance matrices built")
-        # 在 "✓ Distance matrices built" 后面添加
-        print(
+        logger.info(f"      ✓ Distance matrices built")
+        logger.info(
             f"      Molecular distance range: [{np.nanmin(mol_dist_matrix):.3f}, {np.nanmax(mol_dist_matrix):.3f}]")
-        print(
+        logger.info(
             f"      Morphology distance range: [{np.nanmin(morph_dist_matrix):.3f}, {np.nanmax(morph_dist_matrix):.3f}]")
-        print(
+        logger.info(
             f"      Projection distance range: [{np.nanmin(proj_dist_matrix):.3f}, {np.nanmax(proj_dist_matrix):.3f}]")
 
         # 统计NaN数量
@@ -2447,11 +2758,11 @@ Return a JSON object with key "steps" containing an array:
         n_morph_nan = np.isnan(morph_dist_matrix).sum()
         n_proj_nan = np.isnan(proj_dist_matrix).sum()
 
-        print(
+        logger.info(
             f"      NaN counts: mol={n_mol_nan}/{n_total}, morph={n_morph_nan}/{n_total}, proj={n_proj_nan}/{n_total}")
 
         # 🚀 Step 3: Min-Max归一化 (全局)
-        print(f"   🔧 Step 3/4: Normalizing distance matrices...")
+        logger.info(f"   🔧 Step 3/4: Normalizing distance matrices...")
 
         def minmax_normalize(matrix):
             """Min-Max归一化到[0,1]"""
@@ -2472,17 +2783,15 @@ Return a JSON object with key "steps" containing an array:
         morph_norm = minmax_normalize(morph_dist_matrix)
         proj_norm = minmax_normalize(proj_dist_matrix)
 
-        print(f"      ✓ Normalization complete")
-        print(f"      Normalized molecular range: [{np.nanmin(mol_norm):.3f}, {np.nanmax(mol_norm):.3f}]")
-        print(f"      Normalized morphology range: [{np.nanmin(morph_norm):.3f}, {np.nanmax(morph_norm):.3f}]")
-        print(f"      Normalized projection range: [{np.nanmin(proj_norm):.3f}, {np.nanmax(proj_norm):.3f}]")
+        logger.info(f"      ✓ Normalization complete")
+        logger.info(f"      Normalized molecular range: [{np.nanmin(mol_norm):.3f}, {np.nanmax(mol_norm):.3f}]")
+        logger.info(f"      Normalized morphology range: [{np.nanmin(morph_norm):.3f}, {np.nanmax(morph_norm):.3f}]")
+        logger.info(f"      Normalized projection range: [{np.nanmin(proj_norm):.3f}, {np.nanmax(proj_norm):.3f}]")
 
         # 🚀 Step 4: 计算Mismatch (归一化距离的差异)
-        print(f"   🧮 Step 4/4: Computing mismatches...")
+        logger.info(f"   🧮 Step 4/4: Computing mismatches...")
 
         mismatch_results = []
-
-        from itertools import combinations
 
         for i, region1 in enumerate(valid_regions):
             for j, region2 in enumerate(valid_regions):
@@ -2496,10 +2805,10 @@ Return a JSON object with key "steps" containing an array:
 
                 mismatch_combined = (mismatch_GM + mismatch_GP + mismatch_MP) / 3
 
-                # 相似度 (用于报告)
-                sim_molecular = 1 - mol_dist_matrix[i, j]
-                sim_morphological = 1 - morph_norm[i, j]  # 归一化后的
-                sim_projection = 1 - proj_dist_matrix[i, j]
+                # 🔧 Fix: 相似度统一使用归一化距离
+                sim_molecular = 1 - mol_norm[i, j]  # ← 修复：用归一化的
+                sim_morphological = 1 - morph_norm[i, j]  # ← 已经对的
+                sim_projection = 1 - proj_norm[i, j]  # ← 修复：用归一化的
 
                 mismatch_results.append({
                     'region1': region1,
@@ -2511,10 +2820,10 @@ Return a JSON object with key "steps" containing an array:
                     'sim_molecular': float(sim_molecular),
                     'sim_morphological': float(sim_morphological),
                     'sim_projection': float(sim_projection),
-                    # 距离值 (调试用)
-                    'dist_molecular': float(mol_dist_matrix[i, j]),
-                    'dist_morphological': float(morph_dist_matrix[i, j]),
-                    'dist_projection': float(proj_dist_matrix[i, j])
+                    # 归一化距离（调试用）
+                    'dist_molecular_norm': float(mol_norm[i, j]),
+                    'dist_morphological_norm': float(morph_norm[i, j]),
+                    'dist_projection_norm': float(proj_norm[i, j]),
                 })
 
         # 统计检验
@@ -2542,19 +2851,19 @@ Return a JSON object with key "steps" containing an array:
 
         elapsed = time.time() - start_time
 
-        print(f"   ✅ Completed in {elapsed:.1f}s")
-        print(f"      Total pairs: {len(mismatch_results)}")
+        logger.info(f"   ✅ Completed in {elapsed:.1f}s")
+        logger.info(f"      Total pairs: {len(mismatch_results)}")
 
         if mismatch_results:
             top = mismatch_results[0]
-            print(f"      Top: {top['region1']}-{top['region2']}")
-            print(f"        Mismatch: {top['mismatch_combined']:.3f}")
-            print(f"        P-value: {top['p_value']:.4f}")
+            logger.info(f"      Top: {top['region1']}-{top['region2']}")
+            logger.info(f"        Mismatch: {top['mismatch_combined']:.3f}")
+            logger.info(f"        P-value: {top['p_value']:.4f}")
 
             # 🔍 显示top 5用于验证
-            print(f"      Top 5 pairs:")
+            logger.info(f"      Top 5 pairs:")
             for i, pair in enumerate(mismatch_results[:5], 1):
-                print(f"        {i}. {pair['region1']}-{pair['region2']}: {pair['mismatch_combined']:.3f}")
+                logger.info(f"        {i}. {pair['region1']}-{pair['region2']}: {pair['mismatch_combined']:.3f}")
 
         return {
             'success': True,
@@ -2562,7 +2871,7 @@ Return a JSON object with key "steps" containing an array:
             'rows': len(mismatch_results),
             'analysis_type': 'cross_modal_mismatch',
             'computation_time': elapsed,
-            'method': 'figure4_compatible'
+            'method': 'figure4_fully_aligned'
         }
 
     def _compute_cosine_similarity(self, vec1, vec2):

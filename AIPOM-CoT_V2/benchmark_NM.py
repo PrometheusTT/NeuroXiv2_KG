@@ -84,39 +84,39 @@ class ImprovedDomainEvaluator:
                                     answer: str,
                                     question: str) -> Dict[str, float]:
         """
-        改进的实体识别评估
-
-        修复：
-        1. 支持模糊匹配（大小写不敏感）
-        2. 从答案文本中提取可能的实体
-        3. 使用部分匹配而非精确匹配
+        改进的实体识别评估（最终版）
         """
         # 提取预测的实体文本
         predicted_texts = set()
         for e in predicted_entities:
             if isinstance(e, dict):
-                predicted_texts.add(e.get('text', '').lower())
+                text = e.get('text', '').lower().strip()
+                if text:  # 只添加非空文本
+                    predicted_texts.add(text)
             else:
-                predicted_texts.add(str(e).lower())
+                text = str(e).lower().strip()
+                if text:
+                    predicted_texts.add(text)
 
         # 标准化expected entities
-        expected_texts = set([e.lower() for e in expected_entities])
+        expected_texts = set([e.lower().strip() for e in expected_entities if e])
 
-        # 🔧 FIX 1: 从答案中提取可能的实体（脑区缩写等）
+        # 🔧 从答案和问题中提取实体（使用严格过滤）
         answer_entities = self._extract_entities_from_text(answer)
         question_entities = self._extract_entities_from_text(question)
 
-        # 合并所有可能的预测实体
-        all_predicted = predicted_texts | answer_entities | question_entities
+        # 🔧 关键改进：只合并from agent和from question的实体
+        # 不合并from answer的，因为太多false positives
+        all_predicted = predicted_texts | question_entities
 
         print(f"    🔍 Entity matching:")
         print(f"       Expected: {expected_texts}")
         print(f"       Predicted (from agent): {predicted_texts}")
-        print(f"       From answer: {answer_entities}")
         print(f"       From question: {question_entities}")
+        print(f"       From answer (ignored): {len(answer_entities)} entities")
         print(f"       All predicted: {all_predicted}")
 
-        # 🔧 FIX 2: 使用模糊匹配
+        # 模糊匹配
         true_positives = 0
         for expected in expected_texts:
             for predicted in all_predicted:
@@ -130,9 +130,9 @@ class ImprovedDomainEvaluator:
 
         # 计算指标
         precision = true_positives / (true_positives + false_positives) \
-                   if (true_positives + false_positives) > 0 else 0.0
+            if (true_positives + false_positives) > 0 else 0.0
         recall = true_positives / (true_positives + false_negatives) \
-                if (true_positives + false_negatives) > 0 else 0.0
+            if (true_positives + false_negatives) > 0 else 0.0
         f1 = 2 * precision * recall / (precision + recall) \
             if (precision + recall) > 0 else 0.0
 
@@ -145,30 +145,113 @@ class ImprovedDomainEvaluator:
         }
 
     def _extract_entities_from_text(self, text: str) -> set:
-        """从文本中提取实体（带KG验证）"""
+        """
+        从文本中提取实体（严格版 - 只提取真正的实体）
+
+        🔧 关键改进：
+        1. 极严格的英文单词过滤
+        2. 只提取明显的脑区缩写和基因名
+        3. 不提取通用术语
+        """
         entities = set()
 
-        # 1. 提取脑区缩写
+        # ===== 1. 提取脑区缩写 (2-5个大写字母) =====
         brain_regions = re.findall(r'\b[A-Z]{2,5}\b', text)
 
-        # 🔧 排除常见英文单词
-        common_words = ['WHAT', 'WHERE', 'WHICH', 'WHEN', 'WHO', 'WHY', 'HOW',
-                        'ARE', 'IS', 'WAS', 'WERE', 'BE', 'DO', 'DOES', 'DID']
+        # 🔧 超严格的过滤 - 排除所有可能的英文单词
+        common_words = {
+            # 疑问词
+            'WHAT', 'WHERE', 'WHICH', 'WHEN', 'WHO', 'WHY', 'HOW',
+            # be动词
+            'ARE', 'IS', 'WAS', 'WERE', 'BE', 'BEEN', 'BEING', 'AM',
+            # 助动词
+            'DO', 'DOES', 'DID', 'DONE', 'DOING',
+            'HAVE', 'HAS', 'HAD', 'HAVING',
+            'CAN', 'COULD', 'WILL', 'WOULD', 'SHALL', 'SHOULD',
+            'MAY', 'MIGHT', 'MUST',
+            # 介词
+            'IN', 'ON', 'AT', 'TO', 'FOR', 'OF', 'WITH', 'BY', 'FROM',
+            # 连词
+            'AND', 'OR', 'BUT', 'SO', 'YET', 'NOR',
+            # 冠词
+            'THE', 'AN', 'A',
+            # 代词
+            'IT', 'ITS', 'THEY', 'THEIR', 'THEM', 'THIS', 'THAT', 'THESE', 'THOSE',
+            # 常见动词
+            'GET', 'GOT', 'GIVE', 'GAVE', 'SHOW', 'TELL', 'TOLD', 'MAKE', 'MADE',
+            # 其他常见词
+            'NOT', 'ALL', 'SOME', 'ANY', 'EACH', 'EVERY', 'BOTH', 'FEW', 'MORE',
+            'MOST', 'OTHER', 'SUCH', 'NO', 'NOR', 'ONLY', 'OWN', 'SAME', 'THAN',
+            'TOO', 'VERY', 'JUST', 'NOW', 'THEN', 'ALSO', 'HERE', 'THERE',
+            # 神经科学常见缩写（不是脑区）
+            'ACC', 'CT', 'MRI', 'BOLD', 'ROI', 'VOI', 'DTI', 'FA', 'MD',
+            # 其他
+            'VS', 'ETC', 'IE', 'EG', 'PS', 'PPS'
+        }
 
         for r in brain_regions:
-            if r not in common_words:
-                entities.add(r.lower())
+            # 排除常见单词
+            if r in common_words:
+                continue
 
-        # 2. 提取基因名称
+            # 🔧 额外检查：长度必须 >= 2 且 <= 5
+            if not (2 <= len(r) <= 5):
+                continue
+
+            # 🔧 检查是否全是元音（很可能是单词片段）
+            if all(c in 'AEIOU' for c in r):
+                continue
+
+            entities.add(r.lower())
+
+        # ===== 2. 提取基因名称（首字母大写+小写） =====
         gene_names = re.findall(r'\b[A-Z][a-z]{2,10}\b', text)
 
-        # 🔧 排除常见单词
-        common_genes_to_exclude = ['What', 'Which', 'Where', 'When', 'Tell',
-                                   'Show', 'Give', 'Compare', 'About', 'Between']
+        # 🔧 超严格的过滤
+        common_gene_words = {
+            # 疑问词
+            'what', 'which', 'where', 'when', 'who', 'why', 'how',
+            # 动词
+            'tell', 'show', 'give', 'make', 'take', 'find', 'get',
+            'compare', 'describe', 'explain', 'identify', 'analyze',
+            # 名词
+            'cells', 'neurons', 'brain', 'regions', 'area', 'areas',
+            'tissue', 'structure', 'system', 'network', 'circuit',
+            'data', 'result', 'results', 'study', 'analysis',
+            # 介词/连词
+            'about', 'between', 'within', 'across', 'through',
+            # 形容词
+            'these', 'those', 'their', 'there', 'other', 'some',
+            # 其他
+            'does', 'have', 'this', 'that', 'they', 'them',
+            'integration', 'limitations', 'validation', 'statistical',
+            'cellular', 'molecular', 'spatial', 'patterns', 'features',
+            'landscape', 'unveiling', 'despite', 'while', 'future',
+            'anterior', 'dorsal', 'cingulate', 'target', 'loop', 'part',
+            'modal', 'multi', 'our', 'for', 'the'
+        }
 
         for g in gene_names:
-            if g not in common_genes_to_exclude:
-                entities.add(g.lower())
+            g_lower = g.lower()
+
+            # 排除常见单词
+            if g_lower in common_gene_words:
+                continue
+
+            # 🔧 额外检查：长度必须 >= 3
+            if len(g) < 3:
+                continue
+
+            # 🔧 检查是否是句首单词（很可能不是基因）
+            # 通过检查前面是否有标点符号
+            pattern = r'[.!?]\s+' + re.escape(g)
+            if re.search(pattern, text):
+                continue
+
+            entities.add(g_lower)
+
+        # ===== 3. 不提取通用术语 =====
+        # 'cluster', 'subclass', 'neuron', 'cell' 这些不是实体，会误导评估
 
         return entities
 

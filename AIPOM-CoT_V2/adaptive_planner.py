@@ -253,9 +253,16 @@ class AdaptivePlanner:
         return candidates
 
     def _generate_molecular_candidates(self,
-                                      state: AnalysisState,
-                                      analysis: Dict) -> List[CandidateStep]:
-        """生成分子层面的候选步骤"""
+                                       state: AnalysisState,
+                                       analysis: Dict) -> List[CandidateStep]:
+        """
+        生成分子层面的候选步骤（增强版 v2.0）
+
+        🔧 关键修复：
+        1. 提高闭环步骤优先级
+        2. 添加智能fallback提取targets
+        3. 增强日志
+        """
         candidates = []
 
         # 🔹 Candidate 1: Gene -> Subclass
@@ -336,8 +343,9 @@ class AdaptivePlanner:
                 depends_on=['mol_gene_to_cluster']
             ))
 
-        # 🔹 Candidate 4: Region -> Cluster composition (if we have regions but haven't analyzed composition)
-        if analysis['has_regions'] and not any('composition' in s['purpose'].lower() for s in state.executed_steps):
+        # 🔹 Candidate 4: Region -> Cluster composition
+        if analysis['has_regions'] and not any('composition' in s['purpose'].lower()
+                                               for s in state.executed_steps):
             regions = state.discovered_entities.get('Region', [])[:5]
 
             candidates.append(CandidateStep(
@@ -362,17 +370,75 @@ class AdaptivePlanner:
                 depends_on=['mol_cluster_to_region']
             ))
 
-        # 🔹 Candidate 5: Projection Target -> Molecular composition (闭环!)
+        # 🔹 Candidate 5: Projection Target -> Molecular composition (闭环!) 🔥
+        # 🔧 关键修复：提高优先级 + 智能fallback
         if analysis['has_projections'] and not analysis['projection_targets_analyzed']:
+
+            # 尝试从discovered_entities获取targets
             targets = state.discovered_entities.get('ProjectionTarget', [])[:5]
 
+            # 🔧 Fallback 1: 如果没有discovered targets，从最近的projection步骤提取
+            if not targets:
+                logger.info(f"   🔍 Fallback: Extracting targets from recent projection steps")
+
+                for step in reversed(state.executed_steps[-5:]):  # 检查最近5步
+                    if 'projection' in step.get('purpose', '').lower():
+                        step_num = step.get('step_number', 0)
+                        step_data_key = f"step_{step_num}"
+
+                        # 从intermediate_data获取
+                        if hasattr(state, 'intermediate_data'):
+                            step_data = getattr(state, 'intermediate_data', {}).get(step_data_key, [])
+                        else:
+                            step_data = []
+
+                        if step_data and isinstance(step_data, list) and len(step_data) > 0:
+                            # 尝试多个字段名
+                            target_fields = ['target', 'target_region', 'target_acronym',
+                                             'tgt', 'downstream_region']
+
+                            for field in target_fields:
+                                if field in step_data[0]:
+                                    targets = [
+                                        row.get(field)
+                                        for row in step_data[:5]
+                                        if row.get(field)
+                                    ]
+                                    if targets:
+                                        logger.info(f"      ✓ Extracted {len(targets)} targets from '{field}' field")
+                                        break
+
+                            if targets:
+                                break
+
+            # 🔧 Fallback 2: 如果还是没有，从projection步骤的purpose提取
+            if not targets:
+                logger.warning(f"   ⚠️ Could not extract targets from data, trying purpose text")
+
+                for step in reversed(state.executed_steps[-5:]):
+                    purpose = step.get('purpose', '').lower()
+                    if 'projection' in purpose or 'target' in purpose:
+                        # 尝试提取大写字母组合（可能是region acronyms）
+                        import re
+                        potential_targets = re.findall(r'\b[A-Z]{2,5}\b', step.get('purpose', ''))
+
+                        if potential_targets:
+                            # 过滤掉常见非region词
+                            stopwords = {'MOp', 'MOs', 'SSp', 'VISp'}  # 源region
+                            targets = [t for t in potential_targets if t not in stopwords][:5]
+
+                            if targets:
+                                logger.info(f"      ✓ Extracted {len(targets)} targets from purpose text: {targets}")
+                                break
+
+            # 如果有targets，生成闭环步骤
             if targets:
                 candidates.append(CandidateStep(
                     step_id='mol_target_composition',
                     step_type='molecular',
-                    purpose='Analyze molecular composition of projection target regions',
+                    purpose=f'Analyze molecular composition of projection target regions (CLOSED LOOP!)',
                     rationale='Complete the circuit analysis loop by characterizing downstream target cell types',
-                    priority=8.5,  # 高优先级 - 这是闭环的关键!
+                    priority=9.8,  # 🔧 提高优先级！(原8.5 → 9.8)
                     schema_path='Target_Region -[HAS_CLUSTER]-> Cluster',
                     expected_data='Cell type composition of target regions',
                     cypher_template="""
@@ -389,6 +455,16 @@ class AdaptivePlanner:
                     parameters={'targets': targets},
                     depends_on=['proj_identify_targets']
                 ))
+
+                logger.info(f"   🔥 Generated CLOSED LOOP step for {len(targets)} targets")
+                logger.info(f"      Priority: 9.8 (highest!)")
+                logger.info(f"      Targets: {targets}")
+            else:
+                # 如果有projections但真的提取不到targets
+                if analysis['has_projections']:
+                    logger.warning(f"   ❌ Has projections but could NOT extract any targets")
+                    logger.warning(f"      This will prevent closed-loop analysis")
+                    logger.warning(f"      Recent steps: {[s['purpose'][:50] for s in state.executed_steps[-3:]]}")
 
         return candidates
 
@@ -687,57 +763,175 @@ Return JSON: {{"continue": true/false, "reason": "..."}}
 
 # ==================== Utility Functions ====================
 
+# 在原文件中找到这两个方法，替换为以下代码
+
 def determine_analysis_depth(question: str) -> AnalysisDepth:
     """
-    根据问题确定分析深度 (修复版)
+    根据问题确定分析深度（优化版 v2.0）
 
-    🔧 策略: 更aggressive的DEEP判断
-
-    Args:
-        question: 用户问题
-
-    Returns:
-        AnalysisDepth enum
+    🔧 修复：
+    - 更精确的shallow/medium/deep判断
+    - 避免过度aggressive的深度分类
+    - 确保simple问题不会被误判为deep
     """
     question_lower = question.lower()
 
-    # 🔹 Shallow keywords (明确要求简单)
-    shallow_keywords = [
-        'briefly', 'quick', 'summary', 'overview',
-        'simple', 'short', 'just tell', 'in brief',
-        'one sentence', 'tldr', 'concise'
+    # ====== Priority 1: Explicit SHALLOW indicators ======
+    shallow_patterns = [
+        # 简单查询
+        'what is', 'what are', 'define', 'definition of',
+
+        # 名称查询
+        'acronym', 'full name', 'abbreviation', 'stands for',
+        'name of', 'called',
+
+        # 快速查询
+        'briefly', 'quick', 'simple', 'short', 'summarize',
+        'in brief', 'concise',
+
+        # 计数查询
+        'how many', 'count', 'number of',
     ]
-    if any(kw in question_lower for kw in shallow_keywords):
-        logger.info(f"   Detected SHALLOW depth")
+
+    if any(pattern in question_lower for pattern in shallow_patterns):
+        logger.info(f"   Detected SHALLOW depth: explicit indicator found")
         return AnalysisDepth.SHALLOW
 
-    # 🔹 Deep keywords (深度分析)
-    deep_keywords = [
-        'comprehensive', 'detailed', 'analyze', 'analysis',
-        'compare', 'characterize', 'investigate', 'explore',
-        'everything', 'all', 'complete', 'in-depth', 'thorough'
+    # ====== Priority 2: Explicit DEEP indicators ======
+    deep_patterns = [
+        # 全面分析
+        'comprehensive', 'comprehensive analysis', 'complete analysis',
+        'detailed', 'detailed analysis', 'in-depth', 'thorough',
+
+        # 分析动词
+        'analyze', 'analysis', 'characterize', 'characterization',
+        'investigate', 'examination', 'explore', 'exploration',
+
+        # Profile patterns
+        'profile', 'profiling',
+
+        # "Tell me about" patterns
+        'tell me about', 'tell me everything about',
+        'explain about', 'describe in detail',
     ]
 
-    # 优先检查deep
-    if any(kw in question_lower for kw in deep_keywords):
-        matched = [kw for kw in deep_keywords if kw in question_lower]
-        logger.info(f"   Detected DEEP depth: {matched}")
-        return AnalysisDepth.DEEP
+    for pattern in deep_patterns:
+        if pattern in question_lower:
+            logger.info(f"   Detected DEEP depth: '{pattern}'")
+            return AnalysisDepth.DEEP
 
-    # 🔧 "tell me about" / "about" 默认DEEP
-    if 'tell me about' in question_lower or ' about ' in question_lower:
-        logger.info(f"   'tell me about' question → DEEP")
-        return AnalysisDepth.DEEP
+    # 特殊处理："about X"模式
+    # "Tell me about Car3" → DEEP
+    # "Information about Car3" → MEDIUM
+    if ' about ' in question_lower:
+        words_before_about = question_lower.split(' about ')[0].split()
 
-    # 🔹 Medium keywords
-    medium_keywords = ['what is', 'describe', 'explain']
-    if any(kw in question_lower for kw in medium_keywords):
+        # 如果"about"前面少于5个词，且不是"information/data/facts"
+        if len(words_before_about) <= 4:
+            preceding_words = set(words_before_about[-2:]) if len(words_before_about) >= 2 else set(words_before_about)
+            shallow_about_words = {'information', 'data', 'facts', 'details', 'some'}
+
+            if not preceding_words & shallow_about_words:
+                logger.info(f"   Detected DEEP depth: 'about X' pattern")
+                return AnalysisDepth.DEEP
+
+    # ====== Priority 3: MEDIUM indicators ======
+    medium_patterns = [
+        # 比较
+        'compare', 'comparison', 'versus', 'vs ', 'vs.',
+        'difference between', 'differences between', 'contrast',
+
+        # 描述
+        'describe', 'explain', 'what are the',
+
+        # 列举
+        'list', 'identify', 'find',
+    ]
+
+    if any(pattern in question_lower for pattern in medium_patterns):
         logger.info(f"   Detected MEDIUM depth")
         return AnalysisDepth.MEDIUM
 
-    # 🔧 默认: DEEP (更aggressive)
-    logger.info(f"   Default to DEEP depth")
-    return AnalysisDepth.DEEP
+    # ====== Default: MEDIUM (NOT DEEP!) ======
+    # 🔧 关键修复：默认为MEDIUM，不是DEEP
+    logger.info(f"   Default to MEDIUM depth")
+    return AnalysisDepth.MEDIUM
+
+
+def should_continue(self, state: AnalysisState, question: str) -> bool:
+    """
+    判断是否继续规划下一步（优化版 v2.0）
+
+    🔧 修复：
+    - 确保至少执行1步
+    - 为shallow问题设置合理的最小步数
+    - 为deep问题确保足够的步数
+    """
+
+    # 🔧 Fix: 确保至少执行1步
+    if len(state.executed_steps) == 0:
+        logger.info("   Continue: Must execute at least 1 step")
+        return True
+
+    # 检查当前步数
+    current_steps = len(state.executed_steps)
+
+    # 🔧 根据目标深度设置最小和最大步数
+    if state.target_depth == AnalysisDepth.SHALLOW:
+        min_steps = 1
+        max_steps = 2
+    elif state.target_depth == AnalysisDepth.MEDIUM:
+        min_steps = 2
+        max_steps = 4
+    else:  # DEEP
+        min_steps = 4
+        max_steps = 8
+
+    # 🔧 如果未达到最小步数，继续
+    if current_steps < min_steps:
+        logger.info(f"   Continue: {current_steps} < min_steps({min_steps}) for {state.target_depth.value}")
+        return True
+
+    # 如果超过最大步数，停止
+    if current_steps >= max_steps:
+        logger.info(f"   Stop: Reached max_steps({max_steps}) for {state.target_depth.value}")
+        return False
+
+    # 检查是否有待执行的候选步骤
+    if not hasattr(state, 'candidate_steps') or not state.candidate_steps:
+        logger.info("   Stop: No more candidate steps")
+        return False
+
+    # 检查是否所有必要的模态都已覆盖
+    expected_modalities = self._get_expected_modalities(question)
+    covered_modalities = set(state.modalities_covered)
+
+    if expected_modalities and not expected_modalities.issubset(covered_modalities):
+        missing = expected_modalities - covered_modalities
+        logger.info(f"   Continue: Missing modalities: {missing}")
+        return True
+
+    # 🔧 对于DEEP问题，检查是否完成了闭环
+    if state.target_depth == AnalysisDepth.DEEP:
+        # 检查是否有projection步骤
+        has_projection = any('projection' in s.get('purpose', '').lower()
+                             for s in state.executed_steps)
+
+        # 检查是否有target composition步骤
+        has_target_composition = any(
+            ('target' in s.get('purpose', '').lower() and
+             'composition' in s.get('purpose', '').lower())
+            for s in state.executed_steps
+        )
+
+        # 如果有projection但没有target composition，继续（尝试闭环）
+        if has_projection and not has_target_composition:
+            logger.info(f"   Continue: Attempting closed-loop (has projection but no target composition)")
+            return True
+
+    # 默认：如果在合理范围内且有候选步骤，继续
+    logger.info(f"   Continue: Within reasonable range ({current_steps}/{max_steps})")
+    return True
 
 
 # ==================== Test ====================

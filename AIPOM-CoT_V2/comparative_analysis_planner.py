@@ -175,108 +175,152 @@ class ComparativeAnalysisPlanner:
 
     def _systematic_screening_plan(self, state, question) -> List:
         """
-        Systematic全脑筛选计划 (修复版 - 防止重复)
+        Systematic全脑筛选计划（防重复版）
 
-        🔧 修复: 检查已执行的步骤，避免重复
+        🔧 关键修复：
+        1. 检查已执行步骤
+        2. 避免重复执行
+        3. 添加调试日志
+
+        Steps:
+        1. Get top regions by neuron count
+        2. Compute cross-modal mismatch
+        3. FDR correction
+        4. Characterize top pairs
         """
         from adaptive_planner import CandidateStep
 
         candidates = []
 
-        # 🔧 检查已执行步骤
-        executed_step_ids = [
-            step.get('step_id', step.get('purpose', '').lower().replace(' ', '_'))
-            for step in state.executed_steps
-        ]
+        # 🔧 获取已执行步骤的ID
+        executed_step_ids = set()
+        for step in state.executed_steps:
+            # ✅ 兼容dict和对象两种格式
+            if isinstance(step, dict):
+                step_id = step.get('step_id', '')
+                if not step_id:
+                    # Fallback: 从purpose生成ID
+                    purpose = step.get('purpose', '')
+                    step_id = purpose.lower().replace(' ', '_')[:30]
+                executed_step_ids.add(step_id)
+            elif hasattr(step, 'step_id'):
+                executed_step_ids.add(step.step_id)
 
         logger.info(f"   Already executed: {executed_step_ids}")
 
-        # Step 1: Get regions (只执行一次)
+        # ===== Step 1: Get regions (只执行一次) =====
         if 'systematic_get_regions' not in executed_step_ids:
+            logger.info("   Adding Step 1: Get top regions")
             candidates.append(
                 CandidateStep(
                     step_id='systematic_get_regions',
                     step_type='spatial',
-                    purpose='Identify top brain regions by neuron count',  # 修改purpose
+                    purpose='Identify top brain regions by neuron count',
                     rationale='Select regions with most neurons for systematic comparison (Figure 4 method)',
                     priority=9.5,
                     schema_path='Region-Neuron relationship',
                     expected_data='Top 30 regions ordered by neuron count',
-                    # 🎯 关键修改：使用Figure 4的查询
                     cypher_template="""
-                        MATCH (r:Region)
-                        OPTIONAL MATCH (n:Neuron)-[:LOCATE_AT]->(r)
-                        WITH r, COUNT(DISTINCT n) AS neuron_count
-                        WHERE neuron_count > 0
-                        RETURN r.acronym AS region,
-                               r.name AS region_name,
-                               neuron_count
-                        ORDER BY neuron_count DESC
-                        LIMIT 30
-                        """,
+                    MATCH (r:Region)
+                    OPTIONAL MATCH (n:Neuron)-[:LOCATE_AT]->(r)
+                    WITH r, COUNT(DISTINCT n) AS neuron_count
+                    WHERE neuron_count > 0
+                    RETURN r.acronym AS region,
+                           r.name AS region_name,
+                           neuron_count
+                    ORDER BY neuron_count DESC
+                    LIMIT 30
+                    """,
                     parameters={},
                     depends_on=[]
                 )
             )
+        else:
+            logger.info("   Skipping Step 1: Already executed")
 
-        # Step 2: Compute mismatch (只执行一次)
+        # ===== Step 2: Compute mismatch (只执行一次) =====
         if 'systematic_mismatch' not in executed_step_ids:
-            candidates.append(
-                CandidateStep(
-                    step_id='systematic_mismatch',
-                    step_type='multi-modal',
-                    purpose='Compute cross-modal mismatch index for all region pairs',
-                    rationale='Mismatch quantifies molecular-morphological-projection discordance',
-                    priority=10.0,
-                    schema_path='Fingerprint computation',
-                    expected_data='Mismatch matrix with p-values and similarity scores',
-                    cypher_template='',  # Python计算
-                    parameters={
-                        'analysis_type': 'cross_modal_mismatch',
-                        'modalities': ['molecular', 'morphological', 'projection'],
-                        'n_pairs': self.config['max_regions'] * 10
-                    },
-                    depends_on=['systematic_get_regions']
+            # ✅ 确保Step 1已执行
+            if 'systematic_get_regions' in executed_step_ids or 'systematic_get_regions' in [c.step_id for c in
+                                                                                             candidates]:
+                logger.info("   Adding Step 2: Compute mismatch")
+                candidates.append(
+                    CandidateStep(
+                        step_id='systematic_mismatch',
+                        step_type='multi-modal',
+                        purpose='Compute cross-modal mismatch index for all region pairs',
+                        rationale='Mismatch quantifies molecular-morphological-projection discordance',
+                        priority=10.0,
+                        schema_path='Fingerprint computation',
+                        expected_data='Mismatch matrix with p-values and similarity scores',
+                        cypher_template='',  # Python计算
+                        parameters={
+                            'analysis_type': 'cross_modal_mismatch',
+                            'modalities': ['molecular', 'morphological', 'projection'],
+                            'n_pairs': self.config['max_regions'] * 10
+                        },
+                        depends_on=['systematic_get_regions']
+                    )
                 )
-            )
+            else:
+                logger.warning("   Cannot add Step 2: Step 1 not ready")
+        else:
+            logger.info("   Skipping Step 2: Already executed")
 
-        # Step 3: FDR correction (只执行一次)
-        if 'systematic_fdr' not in executed_step_ids and 'systematic_mismatch' in executed_step_ids:
-            candidates.append(
-                CandidateStep(
-                    step_id='systematic_fdr',
-                    step_type='statistical',
-                    purpose='FDR correction for multiple testing',
-                    rationale='Control false discovery rate in large-scale screening',
-                    priority=9.5,
-                    schema_path='FDR correction',
-                    expected_data='Significant pairs after FDR adjustment',
-                    cypher_template='',
-                    parameters={
-                        'test_type': 'fdr',
-                        'alpha': self.config['fdr_alpha']
-                    },
-                    depends_on=['systematic_mismatch']
+        # ===== Step 3: FDR correction (只执行一次) =====
+        if 'systematic_fdr' not in executed_step_ids:
+            # ✅ 确保Step 2已执行
+            if 'systematic_mismatch' in executed_step_ids:
+                logger.info("   Adding Step 3: FDR correction")
+                candidates.append(
+                    CandidateStep(
+                        step_id='systematic_fdr',
+                        step_type='statistical',
+                        purpose='FDR correction for multiple testing',
+                        rationale='Control false discovery rate in large-scale screening',
+                        priority=9.5,
+                        schema_path='FDR correction',
+                        expected_data='Significant pairs after FDR adjustment',
+                        cypher_template='',
+                        parameters={
+                            'test_type': 'fdr',
+                            'alpha': self.config['fdr_alpha']
+                        },
+                        depends_on=['systematic_mismatch']
+                    )
                 )
-            )
+            else:
+                logger.info("   Skipping Step 3: Step 2 not ready yet")
+        else:
+            logger.info("   Skipping Step 3: Already executed")
 
-        # Step 4: Case study (只执行一次)
-        if 'systematic_characterize_top' not in executed_step_ids and 'systematic_fdr' in executed_step_ids:
-            candidates.append(
-                CandidateStep(
-                    step_id='systematic_characterize_top',
-                    step_type='molecular',
-                    purpose='Deep characterization of top mismatch pairs',
-                    rationale='Understand biological mechanisms driving high mismatch',
-                    priority=8.5,
-                    schema_path='Multi-modal queries',
-                    expected_data='Detailed profiles of high-mismatch region pairs',
-                    cypher_template='',
-                    parameters={
-                        'n_top_pairs': self.config['n_top_pairs']
-                    },
-                    depends_on=['systematic_fdr']
+        # ===== Step 4: Case study (只执行一次) =====
+        if 'systematic_characterize_top' not in executed_step_ids:
+            # ✅ 确保Step 3已执行
+            if 'systematic_fdr' in executed_step_ids:
+                logger.info("   Adding Step 4: Characterize top pairs")
+                candidates.append(
+                    CandidateStep(
+                        step_id='systematic_characterize_top',
+                        step_type='molecular',
+                        purpose='Deep characterization of top mismatch pairs',
+                        rationale='Understand biological mechanisms driving high mismatch',
+                        priority=8.5,
+                        schema_path='Multi-modal queries',
+                        expected_data='Detailed profiles of high-mismatch region pairs',
+                        cypher_template='',
+                        parameters={
+                            'n_top_pairs': self.config['n_top_pairs']
+                        },
+                        depends_on=['systematic_fdr']
+                    )
                 )
-            )
+            else:
+                logger.info("   Skipping Step 4: Step 3 not ready yet")
+        else:
+            logger.info("   Skipping Step 4: Already executed")
+
+        if not candidates:
+            logger.info("   No new steps to add (all systematic steps completed or waiting)")
 
         return candidates

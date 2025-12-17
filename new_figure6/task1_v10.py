@@ -5,8 +5,9 @@
 1.使用soma周围200μm内MERFISH细胞的subclass分布作为分子环境
 2.加载预计算的局部分子环境缓存
 3.跨模态预测添加Cosine Similarity指标
+4.三个数据集：Full-morph, Axon-only, Dendrite-only
 
-作者:PrometheusTT
+作者: PrometheusTT
 日期:2025-07-30
 """
 
@@ -71,7 +72,7 @@ class PredictionResult:
     mean_cosine_sim:float
     std_cosine_sim:float
     mean_jsd_sim:float
-    std_jsd_sim:float
+    std_jsd_sim: float
     mean_r2:float
     predicted:np.ndarray
     actual:np.ndarray
@@ -89,15 +90,15 @@ class CrossModalPredictionResult:
     r2_score:float
     mean_corr:float
     std_corr:float
-    per_feature_corrs:np.ndarray
+    per_feature_corrs: np.ndarray
     # Cosine Similarity（逐样本）
     cosine_similarities:np.ndarray
     mean_cosine_sim:float
-    std_cosine_sim:float
+    std_cosine_sim: float
     # JSD（仅对投射有效）
     jsd_similarities:np.ndarray
     mean_jsd_sim:float
-    std_jsd_sim:float
+    std_jsd_sim: float
     # 元信息
     n_neurons:int
     n_input_features:int
@@ -152,12 +153,12 @@ class NeuronMultimodalPredictorV10:
         初始化预测器
 
         参数:
-            uri:Neo4j连接URI
+            uri: Neo4j连接URI
             user:用户名
             password:密码
             data_dir: 数据目录（包含缓存文件）
             database:数据库名
-            search_radius: 搜索半径（体素单位，1体素=25μm）
+            search_radius:搜索半径（体素单位，1体素=25μm）
         """
         self.driver = neo4j.GraphDatabase.driver(uri, auth=(user, password))
         self.database = database
@@ -165,19 +166,19 @@ class NeuronMultimodalPredictorV10:
         self.search_radius = search_radius
 
         # 神经元列表
-        self.all_neuron_ids:List[str] = []
+        self.all_neuron_ids: List[str] = []
         self.neurons_with_dendrite:List[str] = []
 
         # 特征字典
         self.axon_features:Dict[str, np.ndarray] = {}
         self.dendrite_features:Dict[str, np.ndarray] = {}
-        self.local_gene_features:Dict[str, np.ndarray] = {}  # 局部分子环境
+        self.local_gene_features:Dict[str, np.ndarray] = {}
         self.projection_vectors:Dict[str, np.ndarray] = {}
 
         # 全局维度
         self.all_subclasses:List[str] = []
         self.all_target_regions:List[str] = []
-        self.n_subclasses:int = 0
+        self.n_subclasses: int = 0
 
         # 结果
         self.results:Dict[str, PredictionResult] = {}
@@ -262,22 +263,37 @@ class NeuronMultimodalPredictorV10:
         cache_file = self.data_dir / "cache" / f"local_env_r{self.search_radius}_mirrored.pkl"
 
         if not cache_file.exists():
-            raise FileNotFoundError(f"缓存文件不存在:{cache_file}")
+            raise FileNotFoundError(f"缓存文件不存在:  {cache_file}")
 
-        print(f"\n加载局部分子环境缓存: {cache_file}")
+        print(f"\n加载局部分子环境缓存:  {cache_file}")
 
         with open(cache_file, 'rb') as f:
             cache_data = pickle.load(f)
 
-        # 解析缓存数据
-        self.local_gene_features = cache_data['environments']
-        self.all_subclasses = cache_data['subclasses']
+        # 解析缓存数据 - 使用正确的键名
+        self.local_gene_features = cache_data['local_environments']
+        self.all_subclasses = cache_data['all_subclasses']
         self.n_subclasses = len(self.all_subclasses)
+
+        # 额外信息
+        cells_per_neuron = cache_data.get('cells_per_neuron', {})
+        search_radius = cache_data.get('search_radius', self.search_radius)
+        min_cells = cache_data.get('min_cells', 10)
+        mirrored = cache_data.get('mirrored', True)
 
         # 统计
         n_neurons = len(self.local_gene_features)
         print(f"  加载了 {n_neurons} 个神经元的局部分子环境")
-        print(f"  Subclass维度:{self.n_subclasses}")
+        print(f"  Subclass维度: {self.n_subclasses}")
+        print(f"  搜索半径: {search_radius} 体素 = {search_radius * 25}μm")
+        print(f"  最小细胞数: {min_cells}")
+        print(f"  镜像处理: {mirrored}")
+
+        # 细胞数统计
+        if cells_per_neuron:
+            cell_counts = list(cells_per_neuron.values())
+            print(f"  每个神经元周围细胞数: 均值={np.mean(cell_counts):.1f}, "
+                  f"范围=[{min(cell_counts)}, {max(cell_counts)}]")
 
         # 诊断
         sample_vectors = list(self.local_gene_features.values())[:1000]
@@ -287,9 +303,9 @@ class NeuronMultimodalPredictorV10:
         nonzero_per_neuron = (sample_array > 0).sum(axis=1).mean()
 
         print(f"\n局部分子环境质量诊断:")
-        print(f"  唯一模式数（前1000）:{n_unique} ({n_unique / len(sample_vectors) * 100:.1f}%)")
-        print(f"  零值比例:{zero_ratio:.1%}")
-        print(f"  平均非零subclass数:{nonzero_per_neuron:.1f} / {self.n_subclasses}")
+        print(f"  唯一模式数（前1000）:  {n_unique} ({n_unique / len(sample_vectors) * 100:.1f}%)")
+        print(f"  零值比例: {zero_ratio:.1%}")
+        print(f"  平均非零subclass数:  {nonzero_per_neuron:.1f} / {self.n_subclasses}")
 
     def _get_global_dimensions(self):
         """获取全局特征维度"""
@@ -306,7 +322,7 @@ class NeuronMultimodalPredictorV10:
         print(f"  轴突特征: {len(self.AXONAL_FEATURES)} 维")
         print(f"  树突特征:{len(self.DENDRITIC_FEATURES)} 维")
         print(f"  Subclass: {self.n_subclasses} 种（从缓存）")
-        print(f"  投射目标: {len(self.all_target_regions)} 个")
+        print(f"  投射目标:{len(self.all_target_regions)} 个")
 
     def _get_valid_neurons(self):
         """获取有效神经元"""
@@ -347,7 +363,7 @@ class NeuronMultimodalPredictorV10:
                 record = result.single()
                 if record:
                     features = [float(record[f]) if record[f] is not None else 0.0
-                    for f in self.AXONAL_FEATURES]
+                                for f in self.AXONAL_FEATURES]
                     self.axon_features[neuron_id] = np.array(features)
                     loaded += 1
 
@@ -391,7 +407,7 @@ class NeuronMultimodalPredictorV10:
         print("\n加载投射向量...")
 
         query = """
-        MATCH (n:Neuron {neuron_id: $neuron_id})-[p:PROJECT_TO]->(t:Subregion)
+        MATCH (n:Neuron {neuron_id:$neuron_id})-[p:PROJECT_TO]->(t:Subregion)
         WHERE p.weight IS NOT NULL AND p.weight > 0
         RETURN t.acronym AS target, p.weight AS weight
         """
@@ -424,9 +440,8 @@ class NeuronMultimodalPredictorV10:
         """过滤数据完整的神经元"""
         print("\n过滤数据完整的神经元...")
 
-        print(f"  过滤前: {len(self.all_neuron_ids)} 个")
-        print(
-            f"  有轴突: {len(self.axon_features)}, 有局部环境:{len(self.local_gene_features)}, 有投射:{len(self.projection_vectors)}")
+        print(f"  过滤前:{len(self.all_neuron_ids)} 个")
+        print(f"  有轴突: {len(self.axon_features)}, 有局部环境:{len(self.local_gene_features)}, 有投射:{len(self.projection_vectors)}")
 
         valid_all = [n for n in self.all_neuron_ids
                      if n in self.axon_features
@@ -438,7 +453,7 @@ class NeuronMultimodalPredictorV10:
         self.all_neuron_ids = valid_all
         self.neurons_with_dendrite = valid_dendrite
 
-        print(f"  过滤后 - 全量: {len(self.all_neuron_ids)}, 有dendrite:{len(self.neurons_with_dendrite)}")
+        print(f"  过滤后 - 全量:{len(self.all_neuron_ids)}, 有dendrite:{len(self.neurons_with_dendrite)}")
 
     # ==================== 特征准备 ====================
 
@@ -456,8 +471,8 @@ class NeuronMultimodalPredictorV10:
         X_gene_raw = np.array([self.local_gene_features[nid] for nid in neurons])
         Y = np.array([self.projection_vectors[nid] for nid in neurons])
 
-        print(f"  神经元数: {n}")
-        print(f"  形态特征: {X_morph_raw.shape[1]} 维 (axon+dendrite)")
+        print(f"  神经元数:{n}")
+        print(f"  形态特征:{X_morph_raw.shape[1]} 维 (axon+dendrite)")
         print(f"  分子特征:{X_gene_raw.shape[1]} 维 (局部环境)")
         print(f"  投射向量:{Y.shape[1]} 维")
 
@@ -509,9 +524,38 @@ class NeuronMultimodalPredictorV10:
 
         return X_morph_scaled, X_gene_scaled, X_multi, X_shuffle, Y, neurons
 
+    def prepare_features_dendrite_only(self) -> Tuple:
+        """准备Dendrite-only特征"""
+        print("\n准备Dendrite-only特征矩阵...")
+
+        neurons = self.neurons_with_dendrite
+        n = len(neurons)
+
+        X_morph_raw = np.array([self.dendrite_features[nid] for nid in neurons])
+        X_gene_raw = np.array([self.local_gene_features[nid] for nid in neurons])
+        Y = np.array([self.projection_vectors[nid] for nid in neurons])
+
+        print(f"  神经元数:{n}")
+        print(f"  形态特征:{X_morph_raw.shape[1]} 维 (dendrite-only)")
+
+        X_morph_log = np.log1p(X_morph_raw)
+        X_morph_scaled = RobustScaler().fit_transform(X_morph_log)
+
+        X_gene_clr = self.clr_transform(X_gene_raw)
+        X_gene_scaled = StandardScaler().fit_transform(X_gene_clr)
+
+        X_multi = np.hstack([X_morph_scaled, X_gene_scaled])
+
+        np.random.seed(42)
+        X_gene_shuffled = X_gene_scaled.copy()
+        np.random.shuffle(X_gene_shuffled)
+        X_shuffle = np.hstack([X_morph_scaled, X_gene_shuffled])
+
+        return X_morph_scaled, X_gene_scaled, X_multi, X_shuffle, Y, neurons
+
     # ==================== 模型训练 ====================
 
-    def train_and_predict(self, X:np.ndarray, Y:np.ndarray,
+    def train_and_predict(self, X: np.ndarray, Y:np.ndarray,
                           condition_name:str, dataset_name:str,
                           model_name:str = "RF",
                           n_folds:int = 5) -> PredictionResult:
@@ -601,13 +645,23 @@ class NeuronMultimodalPredictorV10:
         results['axon_morph_gene'] = self.train_and_predict(X_multi, Y, 'Morph+Gene', 'axon_only', model_name)
         results['axon_shuffle'] = self.train_and_predict(X_shuffle, Y, 'Shuffle', 'axon_only', model_name)
 
+        # Dendrite-only
+        print("\n--- Dendrite-only ---")
+        X_morph, X_gene, X_multi, X_shuffle, Y, neurons = self.prepare_features_dendrite_only()
+        print(f"  N={len(neurons)}, Morph={X_morph.shape[1]}D, Gene={X_gene.shape[1]}D, Proj={Y.shape[1]}D")
+
+        results['dend_morph_only'] = self.train_and_predict(X_morph, Y, 'Morph-only', 'dendrite_only', model_name)
+        results['dend_gene_only'] = self.train_and_predict(X_gene, Y, 'Gene-only', 'dendrite_only', model_name)
+        results['dend_morph_gene'] = self.train_and_predict(X_multi, Y, 'Morph+Gene', 'dendrite_only', model_name)
+        results['dend_shuffle'] = self.train_and_predict(X_shuffle, Y, 'Shuffle', 'dendrite_only', model_name)
+
         self.results = results
         return results
 
     def run_cross_modal_prediction_experiment(self, model_name:str = "RF"):
         """运行跨模态预测实验（增强版：添加Cosine Similarity）"""
         print("\n" + "=" * 80)
-        print(f"【实验2】跨模态预测实验 (模型: {model_name})")
+        print(f"【实验2】跨模态预测实验 (模型:{model_name})")
         print("=" * 80)
 
         neurons = self.neurons_with_dendrite
@@ -619,14 +673,15 @@ class NeuronMultimodalPredictorV10:
             for nid in neurons
         ])
         X_gene_raw = np.array([self.local_gene_features[nid] for nid in neurons])
-        X_proj_raw = np.array([self.projection_vectors[nid] for nid in neurons])
+        Y_proj_raw = np.array([self.projection_vectors[nid] for nid in neurons])
 
         # 处理特征
         X_morph = RobustScaler().fit_transform(np.log1p(X_morph_raw))
         X_gene = StandardScaler().fit_transform(self.clr_transform(X_gene_raw))
-        X_proj = StandardScaler().fit_transform(X_proj_raw)
+        # 投射向量不做StandardScaler，保持原始分布以便计算JSD
+        Y_proj = Y_proj_raw
 
-        print(f"\n  Morph:{X_morph.shape[1]}D, Gene:{X_gene.shape[1]}D, Proj:{X_proj.shape[1]}D, N={n}")
+        print(f"\n  Morph: {X_morph.shape[1]}D, Gene:{X_gene.shape[1]}D, Proj:{Y_proj.shape[1]}D, N={n}")
 
         cross_results = {}
 
@@ -634,31 +689,31 @@ class NeuronMultimodalPredictorV10:
         print("\n--- Target: Projection ---")
         X_morph_gene = np.hstack([X_morph, X_gene])
         cross_results['morph_gene_to_proj'] = self._train_cross_modal(
-            X_morph_gene, X_proj, 'Morph+Gene', 'Projection', model_name)
+            X_morph_gene, Y_proj, 'Morph+Gene', 'Projection', model_name)
         cross_results['morph_to_proj'] = self._train_cross_modal(
-            X_morph, X_proj, 'Morph', 'Projection', model_name)
+            X_morph, Y_proj, 'Morph', 'Projection', model_name)
         cross_results['gene_to_proj'] = self._train_cross_modal(
-            X_gene, X_proj, 'Gene', 'Projection', model_name)
+            X_gene, Y_proj, 'Gene', 'Projection', model_name)
 
         # ===== 预测 Gene =====
-        print("\n--- Target: Gene ---")
-        X_morph_proj = np.hstack([X_morph, X_proj])
+        print("\n--- Target:Gene ---")
+        X_morph_proj = np.hstack([X_morph, Y_proj])
         cross_results['morph_proj_to_gene'] = self._train_cross_modal(
             X_morph_proj, X_gene, 'Morph+Proj', 'Gene', model_name)
         cross_results['morph_to_gene'] = self._train_cross_modal(
             X_morph, X_gene, 'Morph', 'Gene', model_name)
         cross_results['proj_to_gene'] = self._train_cross_modal(
-            X_proj, X_gene, 'Proj', 'Gene', model_name)
+            Y_proj, X_gene, 'Proj', 'Gene', model_name)
 
         # ===== 预测 Morphology =====
-        print("\n--- Target: Morphology ---")
-        X_gene_proj = np.hstack([X_gene, X_proj])
+        print("\n--- Target:Morphology ---")
+        X_gene_proj = np.hstack([X_gene, Y_proj])
         cross_results['gene_proj_to_morph'] = self._train_cross_modal(
             X_gene_proj, X_morph, 'Gene+Proj', 'Morphology', model_name)
         cross_results['gene_to_morph'] = self._train_cross_modal(
             X_gene, X_morph, 'Gene', 'Morphology', model_name)
         cross_results['proj_to_morph'] = self._train_cross_modal(
-            X_proj, X_morph, 'Proj', 'Morphology', model_name)
+            Y_proj, X_morph, 'Proj', 'Morphology', model_name)
 
         self.cross_modal_results = cross_results
         return cross_results
@@ -710,6 +765,8 @@ class NeuronMultimodalPredictorV10:
         # 打印结果
         print(f"    Cosine:{np.mean(cosine_sims):.4f} ± {np.std(cosine_sims):.4f}")
         print(f"    R²:{global_r2:.4f}, Mean Dim Corr:{mean_corr:.4f}")
+        if target_name == 'Projection':
+            print(f"    JSD Sim:{np.mean(jsd_sims):.4f} ± {np.std(jsd_sims):.4f}")
 
         return CrossModalPredictionResult(
             input_modalities=input_name,
@@ -748,7 +805,7 @@ class NeuronMultimodalPredictorV10:
 
         stats = {}
 
-        for dataset in ['full', 'axon']:
+        for dataset in ['full', 'axon', 'dend']:
             prefix = f'{dataset}_'
             if f'{prefix}morph_only' not in self.results:
                 continue
@@ -778,7 +835,7 @@ class NeuronMultimodalPredictorV10:
                 }
 
                 sig = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else ''
-                print(f"  {name}: p={p_val:.2e}{sig}, d={cohens_d:.3f}, Δ={improve:.1f}%")
+                print(f"  {name}:p={p_val:.2e}{sig}, d={cohens_d:.3f}, Δ={improve:.1f}%")
 
         return stats
 
@@ -802,17 +859,18 @@ class NeuronMultimodalPredictorV10:
         self._plot_cross_modal_summary(output_dir)
         self._plot_cross_modal_cosine(output_dir)
         self._plot_delta_distribution(output_dir)
+        self._plot_comparison_all_datasets(output_dir)
 
         print(f"\n✓ 所有图表已保存到: {output_dir}")
 
     def _plot_projection_prediction_summary(self, output_dir:str):
         """投射预测汇总图"""
-        datasets = [(p, n) for p, n in [('full', 'Full-morph'), ('axon', 'Axon-only')]
+        datasets = [(p, n) for p, n in [('full', 'Full-morph'), ('axon', 'Axon-only'), ('dend', 'Dendrite-only')]
                     if f'{p}_morph_only' in self.results]
         conditions = ['Morph-only', 'Gene-only', 'Morph+Gene', 'Shuffle']
         colors = ['#3498DB', '#27AE60', '#E74C3C', '#95A5A6']
 
-        fig, axes = plt.subplots(1, len(datasets), figsize=(7 * len(datasets), 6))
+        fig, axes = plt.subplots(1, len(datasets), figsize=(6 * len(datasets), 6))
         if len(datasets) == 1:
             axes = [axes]
 
@@ -834,7 +892,7 @@ class NeuronMultimodalPredictorV10:
             ax.set_title(f'{title} (N={self.results[keys[0]].n_neurons})\n'
                          f'Radius: {self.search_radius * 25}μm', fontsize=13, fontweight='bold')
             ax.set_xticks(range(len(conditions)))
-            ax.set_xticklabels(conditions)
+            ax.set_xticklabels(conditions, rotation=15, ha='right')
             ax.grid(axis='y', alpha=0.3)
             for spine in ['top', 'right']:
                 ax.spines[spine].set_visible(False)
@@ -868,7 +926,7 @@ class NeuronMultimodalPredictorV10:
                             textcoords='offset points', ha='center', fontweight='bold')
 
             gain = r2s[0] - max(r2s[1:])
-            ax.text(0.5, 0.95, f'Gain: {gain:+.4f}', transform=ax.transAxes,
+            ax.text(0.5, 0.95, f'Gain:{gain:+.4f}', transform=ax.transAxes,
                     ha='center', va='top', fontweight='bold',
                     color='#27AE60' if gain > 0 else '#E74C3C',
                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
@@ -912,13 +970,13 @@ class NeuronMultimodalPredictorV10:
                             textcoords='offset points', ha='center', fontweight='bold')
 
             gain = cosines[0] - max(cosines[1:])
-            ax.text(0.5, 0.95, f'Gain: {gain:+.4f}', transform=ax.transAxes,
+            ax.text(0.5, 0.95, f'Gain:{gain:+.4f}', transform=ax.transAxes,
                     ha='center', va='top', fontweight='bold',
                     color='#27AE60' if gain > 0 else '#E74C3C',
                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
             ax.set_ylabel('Cosine Similarity')
-            ax.set_title(f'Predict:{target}', fontweight='bold')
+            ax.set_title(f'Predict: {target}', fontweight='bold')
             ax.set_xticks(range(len(labels)))
             ax.set_xticklabels(labels)
             ax.grid(axis='y', alpha=0.3)
@@ -929,7 +987,7 @@ class NeuronMultimodalPredictorV10:
         plt.tight_layout()
         self._save_figure(fig, output_dir, "3_cross_modal_cosine.png")
 
-    def _plot_delta_distribution(self, output_dir:str):
+    def _plot_delta_distribution(self, output_dir: str):
         """Delta分布图"""
         prefix = 'full' if 'full_morph_only' in self.results else 'axon'
 
@@ -966,6 +1024,59 @@ class NeuronMultimodalPredictorV10:
         plt.tight_layout()
         self._save_figure(fig, output_dir, "4_delta_distribution.png")
 
+    def _plot_comparison_all_datasets(self, output_dir:str):
+        """三个数据集对比图"""
+        datasets = [('full', 'Full-morph'), ('axon', 'Axon-only'), ('dend', 'Dendrite-only')]
+        conditions = ['Morph-only', 'Gene-only', 'Morph+Gene', 'Shuffle']
+        bar_colors = ['#3498DB', '#27AE60', '#E74C3C', '#95A5A6']
+
+        fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+
+        for ax_idx, (prefix, title) in enumerate(datasets):
+            ax = axes[ax_idx]
+
+            if f'{prefix}_morph_only' not in self.results:
+                ax.set_visible(False)
+                continue
+
+            keys = [f'{prefix}_morph_only', f'{prefix}_gene_only', f'{prefix}_morph_gene', f'{prefix}_shuffle']
+            x = np.arange(len(conditions))
+            width = 0.35
+
+            cos_means = [self.results[k].mean_cosine_sim for k in keys]
+            cos_stds = [self.results[k].std_cosine_sim for k in keys]
+            bars1 = ax.bar(x - width / 2, cos_means, width, yerr=cos_stds, capsize=3,
+                           label='Cosine Sim', color=bar_colors, alpha=0.85,
+                           edgecolor='black', linewidth=1)
+
+            jsd_means = [self.results[k].mean_jsd_sim for k in keys]
+            jsd_stds = [self.results[k].std_jsd_sim for k in keys]
+            bars2 = ax.bar(x + width / 2, jsd_means, width, yerr=jsd_stds, capsize=3,
+                           label='JSD Sim', color=bar_colors, alpha=0.4,
+                           edgecolor='black', linewidth=1, hatch='//')
+
+            ax.set_ylabel('Similarity', fontsize=11)
+            ax.set_title(f'{title}\n(N={self.results[keys[0]].n_neurons})',
+                         fontsize=12, fontweight='bold')
+            ax.set_xticks(x)
+            ax.set_xticklabels(conditions, fontsize=9, rotation=15, ha='right')
+            ax.legend(fontsize=8, loc='upper right')
+            ax.grid(axis='y', alpha=0.3)
+
+            # 标注最高值
+            best_idx = np.argmax(cos_means)
+            ax.annotate(f'{cos_means[best_idx]:.3f}',
+                        xy=(x[best_idx] - width / 2, cos_means[best_idx]),
+                        xytext=(0, 8), textcoords='offset points',
+                        ha='center', fontsize=9, fontweight='bold')
+
+            for spine in ['top', 'right']:
+                ax.spines[spine].set_visible(False)
+
+        plt.suptitle('Performance Comparison Across Datasets', fontsize=14, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        self._save_figure(fig, output_dir, "5_comparison_all_datasets.png")
+
     # ==================== 保存结果 ====================
 
     def save_results(self, output_dir:str = "."):
@@ -985,7 +1096,7 @@ class NeuronMultimodalPredictorV10:
                 'std_cosine_sim':result.std_cosine_sim,
                 'mean_jsd_sim':result.mean_jsd_sim,
                 'std_jsd_sim':result.std_jsd_sim,
-                'r2_score':result.mean_r2,
+                'r2_score': result.mean_r2,
                 'search_radius_um':self.search_radius * 25
             })
         pd.DataFrame(rows).to_csv(f"{output_dir}/projection_prediction.csv", index=False)
@@ -996,12 +1107,14 @@ class NeuronMultimodalPredictorV10:
             for key, result in self.cross_modal_results.items():
                 cross_rows.append({
                     'key':key,
-                    'input':result.input_modalities,
+                    'input': result.input_modalities,
                     'target':result.target_modality,
                     'r2_score':result.r2_score,
                     'mean_corr':result.mean_corr,
                     'mean_cosine_sim':result.mean_cosine_sim,
                     'std_cosine_sim':result.std_cosine_sim,
+                    'mean_jsd_sim':result.mean_jsd_sim,
+                    'std_jsd_sim':result.std_jsd_sim,
                     'n_neurons':result.n_neurons,
                     'n_input_features':result.n_input_features,
                     'n_target_features':result.n_target_features
@@ -1012,11 +1125,11 @@ class NeuronMultimodalPredictorV10:
 
     # ==================== 主流程 ====================
 
-    def run_full_pipeline(self, output_dir:str = "./task1_results_v10", model_name:str = "RF"):
+    def run_full_pipeline(self, output_dir:str = "./task1_results_v10",                         model_name: str = "RF"):
         """运行完整流程"""
         print("\n" + "=" * 80)
         print("任务1: Neuron-level 多模态预测 (V10 - 精确局部分子环境)")
-        print(f"搜索半径: {self.search_radius} 体素 = {self.search_radius * 25}μm")
+        print(f"搜索半径:{self.search_radius} 体素 = {self.search_radius * 25}μm")
         print("=" * 80)
 
         n_all, n_dendrite = self.load_all_data()
@@ -1043,8 +1156,8 @@ class NeuronMultimodalPredictorV10:
         print(f"\n【设置】半径={self.search_radius * 25}μm")
 
         # 投射预测
-        print(f"\n【实验1:投射预测】")
-        for prefix, name in [('full', 'Full-morph'), ('axon', 'Axon-only')]:
+        print(f"\n【实验1: 投射预测】")
+        for prefix, name in [('full', 'Full-morph'), ('axon', 'Axon-only'), ('dend', 'Dendrite-only')]:
             if f'{prefix}_morph_only' not in self.results:
                 continue
 
@@ -1055,29 +1168,64 @@ class NeuronMultimodalPredictorV10:
 
             print(f"\n  {name} (N={self.results[f'{prefix}_morph_only'].n_neurons}):")
             print(f"    Morph: {morph:.4f}, Gene:{gene:.4f}, Multi: {multi:.4f}, Shuffle:{shuffle:.4f}")
-            print(f"    Multi vs Morph:{multi - morph:+.4f} ({(multi - morph) / morph * 100:+.1f}%)")
-            print(f"    Multi vs Gene:{multi - gene:+.4f} ({(multi - gene) / gene * 100:+.1f}%)")
-            print(f"    Shuffle vs Morph:{shuffle - morph:+.4f}")
+
+            # 计算改进百分比
+            if morph > 0:
+                improve_vs_morph = (multi - morph) / morph * 100
+                print(f"    Multi vs Morph:{multi - morph:+.4f} ({improve_vs_morph:+.1f}%)")
+            if gene > 0:
+                improve_vs_gene = (multi - gene) / gene * 100
+                print(f"    Multi vs Gene:{multi - gene:+.4f} ({improve_vs_gene:+.1f}%)")
+            if morph > 0:
+                print(f"    Shuffle vs Morph: {shuffle - morph:+.4f}")
 
         # 跨模态预测
         if self.cross_modal_results:
             print(f"\n【实验2:跨模态预测】")
+            print("-" * 70)
+            print(f"  {'Target':<12} {'Input':<12} {'Cosine':>10} {'R²':>10} {'JSD':>10}")
+            print("-" * 70)
+
+            for target in ['Projection', 'Gene', 'Morphology']:
+                relevant = [(k, v) for k, v in self.cross_modal_results.items()
+                            if v.target_modality == target]
+                for key, result in sorted(relevant, key=lambda x:-x[1].mean_cosine_sim):
+                    jsd_str = f"{result.mean_jsd_sim:.4f}" if target == 'Projection' else "N/A"
+                    print(f"  {target:<12} {result.input_modalities:<12} "
+                          f"{result.mean_cosine_sim:>10.4f} {result.r2_score:>10.4f} {jsd_str:>10}")
+
+            # 增益分析
+            print(f"\n【双模态增益分析】")
+            print("-" * 70)
             for target, dual_key, single_keys in [
                 ('Projection', 'morph_gene_to_proj', ['morph_to_proj', 'gene_to_proj']),
                 ('Gene', 'morph_proj_to_gene', ['morph_to_gene', 'proj_to_gene']),
                 ('Morphology', 'gene_proj_to_morph', ['gene_to_morph', 'proj_to_morph']),
             ]:
+                if dual_key not in self.cross_modal_results:
+                    continue
+
                 dual_cos = self.cross_modal_results[dual_key].mean_cosine_sim
                 single_cos = [self.cross_modal_results[k].mean_cosine_sim for k in single_keys]
-                gain = dual_cos - max(single_cos)
+                gain_cos = dual_cos - max(single_cos)
 
                 dual_r2 = self.cross_modal_results[dual_key].r2_score
                 single_r2 = [self.cross_modal_results[k].r2_score for k in single_keys]
                 gain_r2 = dual_r2 - max(single_r2)
 
-                status = "✓" if gain > 0 else "✗"
-                print(
-                    f"  预测{target}: Cos={dual_cos:.4f} (gain={gain:+.4f}{status}), R²={dual_r2:.4f} (gain={gain_r2:+.4f})")
+                status_cos = "✓" if gain_cos > 0 else "✗"
+                status_r2 = "✓" if gain_r2 > 0 else "✗"
+
+                print(f"  预测 {target}:")
+                print(f"    Cosine:{dual_cos:.4f} (gain:{gain_cos:+.4f} {status_cos})")
+                print(f"    R²:     {dual_r2:.4f} (gain:{gain_r2:+.4f} {status_r2})")
+
+                if target == 'Projection':
+                    dual_jsd = self.cross_modal_results[dual_key].mean_jsd_sim
+                    single_jsd = [self.cross_modal_results[k].mean_jsd_sim for k in single_keys]
+                    gain_jsd = dual_jsd - max(single_jsd)
+                    status_jsd = "✓" if gain_jsd > 0 else "✗"
+                    print(f"    JSD:   {dual_jsd:.4f} (gain:{gain_jsd:+.4f} {status_jsd})")
 
 
 def main():
@@ -1088,8 +1236,8 @@ def main():
     NEO4J_DATABASE = "neo4j"
 
     DATA_DIR = "/home/wlj/NeuroXiv2/data"  # 包含cache/local_env_r8.0_mirrored.pkl
-    OUTPUT_DIR = "./task1_results_v10_local_env"
-    MODEL_NAME = "RF"
+    OUTPUT_DIR = "./task1_results_v10_local_env_Ridge_R8"
+    MODEL_NAME = "Ridge"
     SEARCH_RADIUS = 8.0  # 8 × 25μm = 200μm
 
     # ==================== 运行 ====================
@@ -1106,3 +1254,25 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # import pickle
+    #
+    # cache_file = "/home/wlj/NeuroXiv2/data/cache/local_env_r8.0_mirrored.pkl"
+    #
+    # with open(cache_file, 'rb') as f:
+    #     cache_data = pickle.load(f)
+    #
+    # print("缓存文件的键:")
+    # for key, value in cache_data.items():
+    #     if isinstance(value, dict):
+    #         print(f"  '{key}': dict, {len(value)} items")
+    #         if len(value) > 0:
+    #             first_key = list(value.keys())[0]
+    #             first_val = value[first_key]
+    #             print(
+    #                 f"    示例: {first_key} -> type={type(first_val)}, shape={getattr(first_val, 'shape', len(first_val) if hasattr(first_val, '__len__') else 'N/A')}")
+    #     elif isinstance(value, (list, tuple)):
+    #         print(f"  '{key}': {type(value).__name__}, {len(value)} items")
+    #     elif hasattr(value, 'shape'):
+    #         print(f"  '{key}': {type(value).__name__}, shape={value.shape}")
+    #     else:
+    #         print(f"  '{key}': {type(value).__name__}, value={value}")

@@ -1236,9 +1236,9 @@ def main():
     NEO4J_DATABASE = "neo4j"
 
     DATA_DIR = "/home/wlj/NeuroXiv2/data"  # 包含cache/local_env_r8.0_mirrored.pkl
-    OUTPUT_DIR = "./task1_results_v10_local_env_Ridge_R8"
+    OUTPUT_DIR = "./task1_results_v10_local_env_Ridge_R4"
     MODEL_NAME = "Ridge"
-    SEARCH_RADIUS = 8.0  # 8 × 25μm = 200μm
+    SEARCH_RADIUS = 4.0  # 8 × 25μm = 200μm
 
     # ==================== 运行 ====================
     with NeuronMultimodalPredictorV10(

@@ -2,11 +2,11 @@
 Task 1: Cluster Label Classification V3 (Fixed Version)
 ========================================================
 关键修复：
-1. 聚类只在训练集上 fit，测试集用 kmeans.predict() 分配标签
-2. 添加后期融合 (Late Fusion) 选项
-3. 添加对等降维 (Equal Dimension) 选项
-4. 增加粗搜索最小样本数检查
-5. 添加分层采样选项
+1.聚类只在训练集上 fit，测试集用 kmeans.predict() 分配标签
+2.添加后期融合 (Late Fusion) 选项
+3.添加对等降维 (Equal Dimension) 选项
+4.增加粗搜索最小样本数检查
+5.添加分层采样选项
 
 Author: Claude (Fixed)
 Date: 2025-01
@@ -91,9 +91,9 @@ class ClusterClassificationV3:
     修正版聚类分类实验
 
     关键修复：
-    1. 聚类只在训练集上 fit，测试集用 predict
-    2. 支持后期融合 (Late Fusion)
-    3. 支持对等降维
+    1.聚类只在训练集上 fit，测试集用 predict
+    2.支持后期融合 (Late Fusion)
+    3.支持对等降维
     """
 
     AXONAL_FEATURES = [
@@ -1036,9 +1036,9 @@ def main():
     OUTPUT_DIR = "./classification_results_v3"
 
     FIXED_K = {
-        'Morph': 7,
-        'Gene': 15,  # 降低 K 值，因为原来 K=25 时 silhouette 为负
-        'Proj': 10,
+        'Morph': 11,
+        'Gene': 7,  # 降低 K 值，因为原来 K=25 时 silhouette 为负
+        'Proj': 12,
     }
 
     with ClusterClassificationV3(

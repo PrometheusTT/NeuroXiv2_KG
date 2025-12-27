@@ -174,7 +174,7 @@ def plot_classification_comparison(df: pd.DataFrame, output_path:  str = None,
 
     # 总标题
     fusion_type = 'Late Fusion' if use_late_fusion else 'Feature Concat'
-    plt.suptitle(f'Classification Accuracy ({fusion_type})',
+    plt.suptitle(f'Classification Accuracy',
                 fontsize=15, fontweight='bold', y=1.02)
 
     plt.tight_layout()
@@ -217,9 +217,9 @@ def plot_both_fusion_methods(df: pd.DataFrame, output_dir: str = "."):
 
 def main():
     parser = argparse.ArgumentParser(description='Plot classification results from CSV')
-    parser.add_argument('--csv', type=str, default='./classification_results_v3/classification_results.csv',
+    parser.add_argument('--csv', type=str, default='./classification_results/classification_results.csv',
                        help='Path to classification_results.csv')
-    parser.add_argument('--output', type=str, default='./classification_results_v3',
+    parser.add_argument('--output', type=str, default='./classification_results',
                        help='Output directory for figures')
     parser.add_argument('--fusion-type', type=str, choices=['late', 'concat', 'both'], default='both',
                        help='Which fusion type to plot')

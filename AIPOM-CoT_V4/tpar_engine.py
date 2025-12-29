@@ -1,708 +1,745 @@
 """
-TPAR Engine - Think-Plan-Act-Reflect Core Loop
-===============================================
-NeuroXiv-KG Agent的核心推理引擎
+TPAR Engine - Think-Plan-Act-Reflect循环引擎
+=============================================
 
-完整实现Figure 2C的TPAR循环：
-1. Think: 解析问题，识别实体和意图
-2. Plan: 选择规划器，生成步骤
-3. Act: 执行步骤，收集证据
-4. Reflect: 评估结果，决定下一步
-5. Synthesize: 综合生成答案
+实现手稿Figure 2描述的完整TPAR循环:
+1. Think: 问题理解、实体识别、意图分类
+2. Plan: 路径规划、步骤生成
+3. Act: 查询执行、数据获取
+4. Reflect: 结果评估、决策制定
+
+集成修复:
+- 分析深度与手稿一致
+- 统计验证真正实现
+- 三模态指纹集成
 
 Author: Lijun
 Date: 2025-01
 """
 
-import json
 import time
 import logging
-import re
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Any, Optional, Tuple
+from dataclasses import dataclass, field
 
-from core_structures import (
-    AnalysisState, AnalysisDepth, Modality, QuestionIntent,
-    PlannerType, ReflectionDecision, EvidenceRecord, EvidenceBuffer,
-    Entity, EntityCluster, CandidateStep, StructuredReflection,
-    SessionMemory, AgentConfig
+from .core_structures import (
+    AnalysisState, AnalysisDepth, QuestionIntent,
+    Modality, ReflectionDecision, ValidationStatus,
+    Entity, EntityCluster, SchemaPath, CandidateStep,
+    EvidenceRecord, StatisticalEvidence, StructuredReflection,
+    AgentConfig, SessionMemory, PlannerType,
+    ThinkResult, PlanResult, ActResult, ReflectResult,
+    TPARIteration, AgentOutput
 )
-
-from llm_intelligence import (
-    LLMClient, LLMIntentClassifier, LLMEntityRecognizer,
-    IntentClassification
-)
-
-from adaptive_planner import AdaptivePlanner, SchemaGraph
-
-from llm_reflector import LLMReflector, ReflectionAggregator
+from .scientific_operators import OperatorRegistry, OperatorResult
 
 logger = logging.getLogger(__name__)
 
 
+class IntentClassifier:
+    """
+    意图分类器 - 与手稿Figure 2A对齐
+
+    5种主要意图:
+    - simple_query: 简单查询
+    - profiling: 深度剖析
+    - comparison: 比较分析
+    - screening: 筛选排序
+    - explanation: 解释说明
+    """
+
+    INTENT_PATTERNS = {
+        QuestionIntent.SIMPLE_QUERY: [
+            r'what is', r'what are', r'define', r'meaning of',
+            r'什么是', r'是什么'
+        ],
+        QuestionIntent.DEEP_PROFILING: [
+            r'tell me about', r'describe', r'profile', r'characterize',
+            r'what can you tell', r'详细介绍', r'描述'
+        ],
+        QuestionIntent.COMPARISON: [
+            r'compare', r'difference between', r'vs', r'versus',
+            r'similar to', r'比较', r'区别'
+        ],
+        QuestionIntent.SCREENING: [
+            r'which', r'find all', r'list', r'rank', r'top',
+            r'highest', r'lowest', r'筛选', r'排序'
+        ],
+        QuestionIntent.EXPLANATION: [
+            r'why', r'how does', r'explain', r'reason',
+            r'mechanism', r'为什么', r'如何'
+        ],
+    }
+
+    INTENT_TO_DEPTH = {
+        QuestionIntent.SIMPLE_QUERY: AnalysisDepth.SHALLOW,
+        QuestionIntent.DEFINITION: AnalysisDepth.SHALLOW,
+        QuestionIntent.DEEP_PROFILING: AnalysisDepth.DEEP,
+        QuestionIntent.COMPARISON: AnalysisDepth.MEDIUM,
+        QuestionIntent.SCREENING: AnalysisDepth.MEDIUM,
+        QuestionIntent.EXPLANATION: AnalysisDepth.DEEP,
+        QuestionIntent.CONNECTIVITY: AnalysisDepth.MEDIUM,
+        QuestionIntent.COMPOSITION: AnalysisDepth.MEDIUM,
+        QuestionIntent.QUANTIFICATION: AnalysisDepth.SHALLOW,
+    }
+
+    def classify(self, question: str) -> Tuple[QuestionIntent, AnalysisDepth]:
+        """分类问题意图并确定分析深度"""
+        question_lower = question.lower()
+
+        import re
+        for intent, patterns in self.INTENT_PATTERNS.items():
+            for pattern in patterns:
+                if re.search(pattern, question_lower):
+                    depth = self.INTENT_TO_DEPTH.get(intent, AnalysisDepth.MEDIUM)
+                    return intent, depth
+
+        return QuestionIntent.UNKNOWN, AnalysisDepth.MEDIUM
+
+
+class EntityRecognizer:
+    """实体识别器"""
+
+    ENTITY_PATTERNS = {
+        'GeneMarker': [
+            r'\b(Car3|Slc17a7|Gad1|Gad2|Vip|Sst|Pvalb|Lamp5)\b',
+            r'\b[A-Z][a-z]+\d*\b',  # 基因命名模式
+        ],
+        'Region': [
+            r'\b(CLA|claustrum|cortex|thalamus|hippocampus|striatum)\b',
+            r'\b(VIS|ACA|MOp|SSp|RSP|AUD|TEa|PERI|ECT)\b',
+        ],
+        'CellType': [
+            r'\b(neuron|interneuron|pyramidal|stellate|granule)\b',
+            r'\b(excitatory|inhibitory|glutamatergic|GABAergic)\b',
+        ],
+    }
+
+    def recognize(self, text: str) -> Dict[str, List[str]]:
+        """识别文本中的实体"""
+        import re
+
+        entities = {}
+        for entity_type, patterns in self.ENTITY_PATTERNS.items():
+            matches = []
+            for pattern in patterns:
+                found = re.findall(pattern, text, re.IGNORECASE)
+                matches.extend(found)
+            if matches:
+                entities[entity_type] = list(set(matches))
+
+        return entities
+
+
+class SchemaGraph:
+    """Schema图谱 - 用于路径规划"""
+
+    def __init__(self, schema_path: str = None):
+        self.schema_path = schema_path
+        self.node_labels = []
+        self.relationship_types = []
+        self._load_schema()
+
+    def _load_schema(self):
+        """加载schema定义"""
+        # 默认schema（如果没有文件）
+        self.node_labels = [
+            'Region', 'Cell', 'Cluster', 'Gene', 'Neuron',
+            'Morphology', 'Projection'
+        ]
+        self.relationship_types = [
+            'LOCATED_IN', 'EXPRESSES', 'BELONGS_TO',
+            'PROJECTS_TO', 'HAS_MORPHOLOGY', 'SIMILAR_TO'
+        ]
+
+    def find_paths(self, start_label: str, end_label: str,
+                  max_hops: int = 3) -> List[SchemaPath]:
+        """查找两节点类型之间的路径"""
+        # 简化实现 - 实际应该从schema推导
+        paths = []
+
+        # 常见路径模式
+        common_paths = [
+            ('Region', 'Gene', [('Region', 'LOCATED_IN', 'Cell'),
+                               ('Cell', 'EXPRESSES', 'Gene')]),
+            ('Region', 'Neuron', [('Region', 'LOCATED_IN', 'Neuron')]),
+            ('Region', 'Projection', [('Region', 'PROJECTS_TO', 'Region')]),
+            ('Cluster', 'Gene', [('Cluster', 'CONTAINS', 'Cell'),
+                                ('Cell', 'EXPRESSES', 'Gene')]),
+        ]
+
+        for s, e, hops in common_paths:
+            if s == start_label and e == end_label:
+                paths.append(SchemaPath(
+                    path_id=f"{s}_to_{e}",
+                    start_label=s,
+                    end_label=e,
+                    hops=hops,
+                    score=1.0
+                ))
+
+        return paths
+
+
+class AdaptivePlanner:
+    """
+    自适应规划器 - 与手稿Figure 2B对齐
+
+    三种规划策略:
+    - Focus-Driven: 深度剖析单一实体
+    - Comparative: 系统对比/筛选
+    - Adaptive: 自适应探索
+    """
+
+    def __init__(self, schema_graph: SchemaGraph):
+        self.schema = schema_graph
+
+    def select_planner_type(self, intent: QuestionIntent,
+                           entities: Dict[str, List[str]]) -> PlannerType:
+        """选择规划器类型"""
+        if intent in [QuestionIntent.DEEP_PROFILING, QuestionIntent.EXPLANATION]:
+            return PlannerType.FOCUS_DRIVEN
+        elif intent in [QuestionIntent.COMPARISON, QuestionIntent.SCREENING]:
+            return PlannerType.COMPARATIVE
+        else:
+            return PlannerType.ADAPTIVE
+
+    def generate_plan(self, state: AnalysisState) -> List[CandidateStep]:
+        """生成执行计划"""
+        steps = []
+        entities = state.discovered_entities
+        intent = state.question_intent
+
+        # 确定需要覆盖的模态
+        target_modalities = self._determine_target_modalities(intent)
+
+        # 为每个模态生成步骤
+        for i, modality in enumerate(target_modalities):
+            step = CandidateStep(
+                step_id=f"step_{len(state.executed_steps) + i}",
+                step_type=modality,
+                purpose=f"Gather {modality} data",
+                rationale=f"Required for {intent.value} analysis",
+                priority=1.0 - i * 0.1,
+                parameters={'entities': entities}
+            )
+            steps.append(step)
+
+        # 添加统计验证步骤
+        if len(steps) >= 2:
+            steps.append(CandidateStep(
+                step_id=f"step_{len(state.executed_steps) + len(steps)}",
+                step_type='statistical',
+                purpose='Statistical validation',
+                rationale='Validate findings with statistical tests',
+                priority=0.5,
+                parameters={'analysis_type': 'comprehensive'}
+            ))
+
+        # 添加多模态整合步骤（如果是深度分析）
+        if state.target_depth == AnalysisDepth.DEEP:
+            steps.append(CandidateStep(
+                step_id=f"step_{len(state.executed_steps) + len(steps)}",
+                step_type='multimodal',
+                purpose='Tri-modal fingerprint analysis',
+                rationale='Integrate molecular, morphological, projection data',
+                priority=0.4,
+                parameters={}
+            ))
+
+        return steps
+
+    def _determine_target_modalities(self, intent: QuestionIntent) -> List[str]:
+        """确定目标模态"""
+        if intent == QuestionIntent.DEEP_PROFILING:
+            return ['molecular', 'morphological', 'projection']
+        elif intent == QuestionIntent.COMPARISON:
+            return ['molecular', 'projection']
+        elif intent == QuestionIntent.SCREENING:
+            return ['molecular']
+        else:
+            return ['molecular']
+
+
+class ReflectionEngine:
+    """
+    反思引擎 - 与手稿Figure 2C对齐
+
+    5种战略决策:
+    - continue: 继续执行
+    - replan: 重新规划
+    - deepen: 加深分析
+    - pivot: 转向替代
+    - terminate: 证据充足，终止
+    """
+
+    def __init__(self, confidence_threshold: float = 0.75):
+        self.confidence_threshold = confidence_threshold
+
+    def reflect(self, state: AnalysisState,
+               last_result: OperatorResult) -> StructuredReflection:
+        """执行反思"""
+        step_number = len(state.executed_steps)
+
+        # 1. 验证结果
+        validation_status, validation_reason = self._validate_result(last_result)
+
+        # 2. 评估不确定性
+        uncertainty, uncertainty_sources = self._assess_uncertainty(state, last_result)
+
+        # 3. 提取发现
+        findings, surprises = self._extract_findings(state, last_result)
+
+        # 4. 计算置信度
+        confidence, confidence_factors = self._compute_confidence(state)
+
+        # 5. 做出决策
+        decision, decision_reason = self._make_decision(
+            state, validation_status, confidence, uncertainty
+        )
+
+        # 6. 生成建议
+        suggestions = self._generate_suggestions(state, decision)
+
+        return StructuredReflection(
+            step_number=step_number,
+            validation_status=validation_status,
+            validation_reasoning=validation_reason,
+            uncertainty_level=uncertainty,
+            uncertainty_sources=uncertainty_sources,
+            key_findings=findings,
+            surprising_results=surprises,
+            decision=decision,
+            decision_reasoning=decision_reason,
+            next_step_suggestions=suggestions,
+            alternative_approaches=[],
+            confidence_score=confidence,
+            confidence_factors=confidence_factors,
+            summary=self._generate_summary(state, decision, confidence)
+        )
+
+    def _validate_result(self, result: OperatorResult) -> Tuple[ValidationStatus, str]:
+        """验证执行结果"""
+        if not result.success:
+            return ValidationStatus.FAILED, f"Execution failed: {result.error}"
+
+        if result.row_count == 0:
+            return ValidationStatus.EMPTY, "No data returned"
+
+        if result.row_count < 5:
+            return ValidationStatus.PARTIAL, f"Limited data: {result.row_count} rows"
+
+        return ValidationStatus.PASSED, f"Success with {result.row_count} rows"
+
+    def _assess_uncertainty(self, state: AnalysisState,
+                           result: OperatorResult) -> Tuple[float, List[str]]:
+        """评估不确定性"""
+        sources = []
+        uncertainty = 0.0
+
+        # 数据量不足
+        if result.row_count < 10:
+            uncertainty += 0.2
+            sources.append("Limited data")
+
+        # 模态覆盖不足
+        if len(state.modalities_covered) < 2:
+            uncertainty += 0.2
+            sources.append("Limited modality coverage")
+
+        # 执行步骤少
+        if len(state.executed_steps) < state.target_depth.get_min_steps():
+            uncertainty += 0.1
+            sources.append("Insufficient exploration")
+
+        return min(1.0, uncertainty), sources
+
+    def _extract_findings(self, state: AnalysisState,
+                         result: OperatorResult) -> Tuple[List[str], List[str]]:
+        """提取关键发现"""
+        findings = []
+        surprises = []
+
+        if result.success and result.row_count > 0:
+            findings.append(f"Retrieved {result.row_count} data points")
+            findings.append(f"Operator: {result.operator_name}")
+
+        # 检查是否有意外结果
+        if result.row_count > 100:
+            surprises.append("Unexpectedly large result set")
+
+        return findings, surprises
+
+    def _compute_confidence(self, state: AnalysisState) -> Tuple[float, Dict[str, float]]:
+        """计算置信度"""
+        factors = {}
+
+        # 1. 证据置信度
+        evidence_conf = state.evidence_buffer.get_overall_confidence()
+        factors['evidence_strength'] = evidence_conf
+
+        # 2. 数据完整度
+        completeness = state.evidence_buffer.get_data_completeness()
+        factors['data_completeness'] = completeness
+
+        # 3. 模态覆盖度
+        modality_coverage = len(state.modalities_covered) / 3.0
+        factors['modality_coverage'] = modality_coverage
+
+        # 4. 步骤进度
+        progress = len(state.executed_steps) / state.target_depth.get_max_steps()
+        factors['progress'] = min(1.0, progress)
+
+        # 加权平均
+        total_conf = (
+            0.35 * evidence_conf +
+            0.25 * completeness +
+            0.25 * modality_coverage +
+            0.15 * progress
+        )
+
+        return total_conf, factors
+
+    def _make_decision(self, state: AnalysisState,
+                      validation: ValidationStatus,
+                      confidence: float,
+                      uncertainty: float) -> Tuple[ReflectionDecision, str]:
+        """做出战略决策"""
+        budget = state.check_budget()
+
+        # 预算耗尽
+        if not budget['can_continue']:
+            return ReflectionDecision.TERMINATE, "Budget exhausted"
+
+        # 置信度足够高
+        if confidence >= self.confidence_threshold:
+            return ReflectionDecision.TERMINATE, f"Confidence {confidence:.2f} >= threshold"
+
+        # 验证失败需要重规划
+        if validation == ValidationStatus.FAILED:
+            if state.replanning_count < state.max_replanning:
+                return ReflectionDecision.REPLAN, "Execution failed, replanning"
+            else:
+                return ReflectionDecision.TERMINATE, "Max replanning reached"
+
+        # 空结果尝试转向
+        if validation == ValidationStatus.EMPTY:
+            return ReflectionDecision.PIVOT, "Empty results, trying alternative"
+
+        # 不确定性高需要加深
+        if uncertainty > 0.5:
+            return ReflectionDecision.DEEPEN, "High uncertainty, deepening analysis"
+
+        # 默认继续
+        return ReflectionDecision.CONTINUE, "Continuing analysis"
+
+    def _generate_suggestions(self, state: AnalysisState,
+                             decision: ReflectionDecision) -> List[str]:
+        """生成下一步建议"""
+        suggestions = []
+
+        if decision == ReflectionDecision.CONTINUE:
+            # 建议覆盖未探索的模态
+            covered = state.modalities_covered
+            if Modality.MOLECULAR not in covered:
+                suggestions.append("Query molecular/gene expression data")
+            if Modality.MORPHOLOGICAL not in covered:
+                suggestions.append("Query morphological features")
+            if Modality.PROJECTION not in covered:
+                suggestions.append("Query projection patterns")
+
+        elif decision == ReflectionDecision.DEEPEN:
+            suggestions.append("Perform statistical validation")
+            suggestions.append("Build tri-modal fingerprint")
+
+        elif decision == ReflectionDecision.PIVOT:
+            suggestions.append("Try alternative query approach")
+            suggestions.append("Broaden search criteria")
+
+        return suggestions
+
+    def _generate_summary(self, state: AnalysisState,
+                         decision: ReflectionDecision,
+                         confidence: float) -> str:
+        """生成反思摘要"""
+        return (
+            f"Step {len(state.executed_steps)}: "
+            f"Decision={decision.value}, "
+            f"Confidence={confidence:.2f}, "
+            f"Modalities={len(state.modalities_covered)}/3"
+        )
+
+
 class TPAREngine:
     """
-    TPAR推理引擎 - NeuroXiv-KG Agent的核心
+    TPAR循环引擎 - 主控制器
 
-    关键特性：
-    1. LLM深度参与每个阶段
-    2. 统一的证据缓冲
-    3. 预算控制
-    4. 智能终止
-    5. 闭环分析支持
+    实现完整的Think-Plan-Act-Reflect循环
     """
 
-    def __init__(self,
-                 db_executor,
-                 llm_client: LLMClient,
-                 schema: SchemaGraph = None,
-                 config: AgentConfig = None):
-        """
-        初始化TPAR引擎
-
-        Args:
-            db_executor: Neo4j数据库执行器
-            llm_client: LLM客户端
-            schema: Schema图
-            config: Agent配置
-        """
-        self.db = db_executor
-        self.llm = llm_client
-        self.schema = schema or SchemaGraph()
+    def __init__(self, config: AgentConfig = None, neo4j_driver=None):
         self.config = config or AgentConfig()
+        self.driver = neo4j_driver
 
-        # 核心组件
-        self.intent_classifier = LLMIntentClassifier(llm_client)
-        self.entity_recognizer = LLMEntityRecognizer(llm_client, db_executor)
-        self.planner = AdaptivePlanner(llm_client, self.schema)
-        self.reflector = LLMReflector(llm_client)
-        self.reflection_aggregator = ReflectionAggregator()
+        # 组件初始化
+        self.intent_classifier = IntentClassifier()
+        self.entity_recognizer = EntityRecognizer()
+        self.schema_graph = SchemaGraph(self.config.schema_json_path)
+        self.planner = AdaptivePlanner(self.schema_graph)
+        self.reflection_engine = ReflectionEngine(self.config.confidence_threshold)
+        self.operator_registry = OperatorRegistry(neo4j_driver, {})
 
         # 会话记忆
         self.session_memory = SessionMemory()
 
-        logger.info("🚀 TPAR Engine initialized")
-
-    # ==================== Main Entry ====================
-
-    def answer(self,
-               question: str,
-               max_iterations: int = None) -> Dict[str, Any]:
+    def run(self, question: str) -> AgentOutput:
         """
-        主入口：回答问题
+        运行TPAR循环
 
-        完整的TPAR循环实现
+        Args:
+            question: 用户问题
+
+        Returns:
+            完整的Agent输出
         """
-        logger.info(f"\n{'=' * 70}")
-        logger.info(f"🎯 Question: {question}")
-        logger.info(f"{'=' * 70}\n")
-
         start_time = time.time()
-        max_iter = max_iterations or self.config.max_iterations
+        iterations = []
 
         # 初始化状态
-        state = AnalysisState(question=question)
-        state.budget['max_steps'] = max_iter
+        state = self._initialize_state(question)
 
-        # 获取会话上下文
-        session_context = self.session_memory.get_relevant_context(question)
+        logger.info(f"Starting TPAR loop for: {question[:50]}...")
+        logger.info(f"Intent: {state.question_intent.value}, Depth: {state.target_depth.value}")
 
-        try:
-            # ===== PHASE 1: THINK =====
-            entities, classification = self._think_phase(state, session_context)
+        # TPAR循环
+        while state.check_budget()['can_continue']:
+            iteration = TPARIteration(iteration_number=len(iterations))
 
-            # ===== PHASE 2-4: PLAN-ACT-REFLECT LOOP =====
-            iteration = 0
-            while iteration < max_iter:
-                # 检查预算
-                if not state.check_budget()['can_continue']:
-                    logger.info("📌 Budget exhausted")
-                    break
+            # Think
+            think_result = self._think(state)
+            iteration.think = think_result
 
-                # PLAN
-                next_steps = self._plan_phase(state, entities, classification)
+            # Plan
+            plan_result = self._plan(state)
+            iteration.plan = plan_result
 
-                if not next_steps:
-                    logger.info("📌 No more steps")
-                    break
+            # Act
+            act_result = self._act(state, plan_result)
+            iteration.act = act_result
 
-                # ACT + REFLECT
-                should_continue = True
-                for step in next_steps:
-                    if iteration >= max_iter:
-                        break
+            # Reflect
+            reflect_result = self._reflect(state, act_result)
+            iteration.reflect = reflect_result
 
-                    # ACT
-                    evidence = self._act_phase(state, step, iteration + 1)
+            iterations.append(iteration)
 
-                    # REFLECT
-                    reflection = self._reflect_phase(state, step, evidence)
+            # 检查是否终止
+            if reflect_result.decision == ReflectionDecision.TERMINATE:
+                logger.info(f"Terminating: {reflect_result.reasoning}")
+                break
 
-                    # 处理决策
-                    should_continue = self._handle_decision(state, reflection, classification)
+            # 处理重规划
+            if reflect_result.decision == ReflectionDecision.REPLAN:
+                state.replanning_count += 1
+                logger.info(f"Replanning (count: {state.replanning_count})")
 
-                    if not should_continue:
-                        break
+        # 生成最终答案
+        answer = self._generate_answer(state)
 
-                    iteration += 1
-
-                if not should_continue:
-                    break
-
-                # 检查是否应该继续
-                if not self.planner.should_continue(state, classification):
-                    break
-
-            # ===== PHASE 5: SYNTHESIZE =====
-            final_answer = self._synthesize_phase(state)
-
-            # 记录到会话
-            self.session_memory.add_qa(question, final_answer, state.discovered_entities)
-
-            return self._build_result(state, final_answer, start_time)
-
-        except Exception as e:
-            logger.error(f"TPAR loop failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return self._build_error_result(question, str(e), start_time)
-
-    # ==================== THINK Phase ====================
-
-    def _think_phase(self,
-                     state: AnalysisState,
-                     context: str = "") -> Tuple[List[Entity], IntentClassification]:
-        """
-        Think阶段
-
-        1. 实体识别
-        2. 意图分类
-        3. 初始化状态
-        """
-        logger.info("🧠 THINK PHASE")
-        logger.info("-" * 50)
-
-        # 1. 实体识别
-        logger.info("  [1/2] Entity recognition...")
-        state.increment_budget('llm')
-        entities = self.entity_recognizer.recognize(state.question)
-
-        # 填充state
-        for entity in entities:
-            if entity.entity_type not in state.discovered_entities:
-                state.discovered_entities[entity.entity_type] = []
-            if entity.name not in state.discovered_entities[entity.entity_type]:
-                state.discovered_entities[entity.entity_type].append(entity.name)
-
-        logger.info(f"       Found {len(entities)} entities")
-        for e in entities[:5]:
-            logger.info(f"         • {e.name} ({e.entity_type})")
-
-        # 2. 意图分类
-        logger.info("  [2/2] Intent classification...")
-        state.increment_budget('llm')
-        classification = self.intent_classifier.classify(state.question, context)
-
-        # 更新状态
-        state.question_intent = classification.intent
-        state.target_depth = classification.recommended_depth
-        state._classification = classification
-
-        logger.info(f"       Intent: {classification.intent.value}")
-        logger.info(f"       Depth: {classification.recommended_depth.value}")
-        logger.info(f"       Planner: {classification.recommended_planner.value}")
-
-        logger.info("  ✅ Think phase complete\n")
-
-        return entities, classification
-
-    # ==================== PLAN Phase ====================
-
-    def _plan_phase(self,
-                    state: AnalysisState,
-                    entities: List[Entity],
-                    classification: IntentClassification) -> List[CandidateStep]:
-        """
-        Plan阶段
-
-        1. 生成候选步骤
-        2. LLM评估排序
-        3. 返回最优步骤
-        """
-        logger.info("📋 PLAN PHASE")
-        logger.info("-" * 50)
-
-        state.increment_budget('llm')
-
-        candidates = self.planner.plan_next_steps(
-            state=state,
-            question=state.question,
-            entities=entities,
-            classification=classification,
-            max_steps=2
+        return AgentOutput(
+            question=question,
+            answer=answer,
+            iterations=iterations,
+            final_state=state,
+            total_time=time.time() - start_time,
+            task_status="completed"
         )
 
-        logger.info(f"  Selected {len(candidates)} steps")
-        logger.info("  ✅ Plan phase complete\n")
+    def _initialize_state(self, question: str) -> AnalysisState:
+        """初始化分析状态"""
+        # 意图分类
+        intent, depth = self.intent_classifier.classify(question)
 
-        return candidates
+        # 实体识别
+        entities = self.entity_recognizer.recognize(question)
 
-    # ==================== ACT Phase ====================
+        # 创建状态
+        state = AnalysisState(
+            question=question,
+            question_intent=intent,
+            target_depth=depth,
+            discovered_entities=entities
+        )
 
-    def _act_phase(self,
-                   state: AnalysisState,
-                   step: CandidateStep,
-                   step_number: int) -> EvidenceRecord:
-        """
-        Act阶段
+        # 设置预算
+        state.budget['max_steps'] = depth.get_max_steps()
 
-        1. 执行步骤
-        2. 收集证据
-        3. 更新状态
-        """
-        logger.info(f"⚙️ ACT PHASE - Step {step_number}")
-        logger.info("-" * 50)
-        logger.info(f"  Purpose: {step.purpose}")
+        # 如果有主要实体，设置焦点
+        if 'Region' in entities and entities['Region']:
+            state.primary_focus = Entity(
+                name=entities['Region'][0],
+                entity_type='Region'
+            )
+        elif 'GeneMarker' in entities and entities['GeneMarker']:
+            state.primary_focus = Entity(
+                name=entities['GeneMarker'][0],
+                entity_type='GeneMarker'
+            )
+
+        return state
+
+    def _think(self, state: AnalysisState) -> ThinkResult:
+        """Think阶段"""
+        # 提取实体
+        entities = [
+            Entity(name=name, entity_type=etype)
+            for etype, names in state.discovered_entities.items()
+            for name in names
+        ]
+
+        # 确定关注模态
+        modalities = []
+        if state.question_intent in [QuestionIntent.DEEP_PROFILING]:
+            modalities = [Modality.MOLECULAR, Modality.MORPHOLOGICAL, Modality.PROJECTION]
+        elif state.question_intent == QuestionIntent.COMPARISON:
+            modalities = [Modality.MOLECULAR, Modality.PROJECTION]
+        else:
+            modalities = [Modality.MOLECULAR]
+
+        return ThinkResult(
+            entities=entities,
+            intent=state.question_intent,
+            focus_modalities=modalities,
+            key_constraints={},
+            reasoning=f"Identified {len(entities)} entities with intent {state.question_intent.value}"
+        )
+
+    def _plan(self, state: AnalysisState) -> PlanResult:
+        """Plan阶段"""
+        # 选择规划器类型
+        planner_type = self.planner.select_planner_type(
+            state.question_intent,
+            state.discovered_entities
+        )
+
+        # 生成计划
+        steps = self.planner.generate_plan(state)
+
+        return PlanResult(
+            selected_paths=[],
+            planner_type=planner_type,
+            steps=steps,
+            reasoning=f"Generated {len(steps)} steps using {planner_type.value} planner"
+        )
+
+    def _act(self, state: AnalysisState, plan: PlanResult) -> ActResult:
+        """Act阶段"""
+        if not plan.steps:
+            return ActResult(
+                step_id="no_steps",
+                success=False,
+                data=[],
+                row_count=0,
+                execution_time=0,
+                operator="none"
+            )
+
+        # 执行第一个待执行步骤
+        step = plan.steps[0]
 
         start_time = time.time()
-
-        # 执行
-        result = self._execute_step(step, state)
-
+        result = self.operator_registry.execute(step, state)
         execution_time = time.time() - start_time
 
-        # 创建证据记录
-        evidence = self._create_evidence(step, result, step_number, execution_time)
-
         # 更新状态
-        self._update_state(state, step, result, step_number)
-
-        # 记录步骤
         state.executed_steps.append({
-            'step_number': step_number,
-            'step_id': step.step_id,
-            'purpose': step.purpose,
-            'modality': step.step_type,
-            'success': result.get('success', False),
-            'row_count': len(result.get('data', [])),
-            'execution_time': execution_time
-        })
-
-        state.evidence_buffer.add(evidence)
-
-        logger.info(f"  Time: {execution_time:.2f}s")
-        logger.info(f"  Rows: {len(result.get('data', []))}")
-        logger.info("  ✅ Act phase complete\n")
-
-        return evidence
-
-    def _execute_step(self, step: CandidateStep, state: AnalysisState) -> Dict:
-        """执行步骤"""
-        query = step.cypher_template.strip()
-        params = step.parameters.copy()
-
-        # 解析参数依赖
-        params = self._resolve_params(params, state)
-
-        # 特殊处理：非Cypher步骤
-        if not query:
-            if step.step_type == 'multi-modal':
-                return self._execute_multimodal(step, state)
-            elif step.step_type == 'statistical':
-                return self._execute_statistical(step, state)
-            else:
-                return {'success': False, 'error': 'No query template', 'data': []}
-
-        # 确保LIMIT
-        if not re.search(r'\bLIMIT\b', query, re.IGNORECASE):
-            query = f"{query}\nLIMIT 100"
-
-        state.increment_budget('cypher')
-        return self.db.run(query, params)
-
-    def _execute_multimodal(self, step: CandidateStep, state: AnalysisState) -> Dict:
-        """执行多模态分析"""
-        # TODO: 实现指纹分析
-        logger.info("  Executing multi-modal analysis...")
-        return {'success': True, 'data': [], 'note': 'Multi-modal analysis placeholder'}
-
-    def _execute_statistical(self, step: CandidateStep, state: AnalysisState) -> Dict:
-        """执行统计分析"""
-        # TODO: 实现统计检验
-        logger.info("  Executing statistical analysis...")
-        return {'success': True, 'data': [], 'note': 'Statistical analysis placeholder'}
-
-    def _resolve_params(self, params: Dict, state: AnalysisState) -> Dict:
-        """解析参数依赖"""
-        resolved = params.copy()
-
-        # 从中间数据中提取
-        for key, data in state.intermediate_data.items():
-            if not data or not isinstance(data, list):
-                continue
-
-            if not data:
-                continue
-
-            first_row = data[0]
-
-            # 提取regions
-            if 'regions' not in resolved or not resolved['regions']:
-                if 'region' in first_row or 'acronym' in first_row:
-                    regions = [row.get('region') or row.get('acronym')
-                              for row in data
-                              if row.get('region') or row.get('acronym')]
-                    if regions:
-                        resolved['regions'] = list(set(regions))[:10]
-
-            # 提取targets
-            if 'targets' not in resolved or not resolved['targets']:
-                if 'target' in first_row or 'target_region' in first_row:
-                    targets = [row.get('target') or row.get('target_region')
-                              for row in data
-                              if row.get('target') or row.get('target_region')]
-                    if targets:
-                        resolved['targets'] = list(set(targets))[:10]
-
-        return resolved
-
-    def _create_evidence(self,
-                         step: CandidateStep,
-                         result: Dict,
-                         step_number: int,
-                         execution_time: float) -> EvidenceRecord:
-        """创建证据记录"""
-        data = result.get('data', [])
-
-        # 计算完整性
-        if data:
-            total = sum(len(row) for row in data if isinstance(row, dict))
-            non_null = sum(1 for row in data if isinstance(row, dict)
-                          for v in row.values() if v is not None)
-            completeness = non_null / total if total > 0 else 0.0
-        else:
-            completeness = 0.0
-
-        # 模态
-        modality_map = {
-            'molecular': Modality.MOLECULAR,
-            'morphological': Modality.MORPHOLOGICAL,
-            'projection': Modality.PROJECTION,
-            'spatial': Modality.SPATIAL,
-            'statistical': Modality.STATISTICAL,
-        }
-        modality = modality_map.get(step.step_type)
-
-        return EvidenceRecord(
-            step_number=step_number,
-            query_hash=EvidenceRecord.compute_query_hash(step.cypher_template, step.parameters),
-            execution_time=execution_time,
-            data_completeness=completeness,
-            row_count=len(data),
-            column_count=len(data[0]) if data and isinstance(data[0], dict) else 0,
-            modality=modality,
-            raw_data_key=f"step_{step_number}",
-            confidence_score=0.8 if result.get('success') else 0.2
-        )
-
-    def _update_state(self,
-                      state: AnalysisState,
-                      step: CandidateStep,
-                      result: Dict,
-                      step_number: int):
-        """更新状态"""
-        data = result.get('data', [])
-
-        # 存储中间数据
-        state.intermediate_data[f"step_{step_number}"] = data
-
-        # 更新模态覆盖
-        modality_map = {
-            'molecular': Modality.MOLECULAR,
-            'morphological': Modality.MORPHOLOGICAL,
-            'projection': Modality.PROJECTION,
-            'spatial': Modality.SPATIAL,
-        }
-        if step.step_type in modality_map:
-            state.add_modality(modality_map[step.step_type])
-
-        if not data:
-            return
-
-        first_row = data[0] if data else {}
-
-        # 提取发现的实体
-
-        # Regions
-        if 'region' in first_row or 'acronym' in first_row:
-            regions = list(set([
-                row.get('region') or row.get('acronym')
-                for row in data
-                if row.get('region') or row.get('acronym')
-            ]))
-            existing = state.discovered_entities.setdefault('Region', [])
-            for r in regions:
-                if r and r not in existing:
-                    existing.append(r)
-
-        # Projection targets
-        if 'target' in first_row or 'target_region' in first_row:
-            targets = list(set([
-                row.get('target') or row.get('target_region')
-                for row in data
-                if row.get('target') or row.get('target_region')
-            ]))
-            existing = state.discovered_entities.setdefault('ProjectionTarget', [])
-            for t in targets:
-                if t and t not in existing:
-                    existing.append(t)
-
-        # 记录路径
-        state.add_path({
             'step_id': step.step_id,
             'step_type': step.step_type,
-            'result_count': len(data)
+            'success': result.success,
+            'row_count': result.row_count
         })
 
-    # ==================== REFLECT Phase ====================
+        if result.success and step.step_type in ['molecular', 'morphological', 'projection']:
+            modality = Modality(step.step_type) if step.step_type in [m.value for m in Modality] else None
+            if modality:
+                state.add_modality(modality)
 
-    def _reflect_phase(self,
-                       state: AnalysisState,
-                       step: CandidateStep,
-                       evidence: EvidenceRecord) -> StructuredReflection:
-        """
-        Reflect阶段
+        state.increment_budget('cypher')
 
-        LLM驱动的深度反思
-        """
-        logger.info("🤔 REFLECT PHASE")
-        logger.info("-" * 50)
-
-        state.increment_budget('llm')
-
-        # 获取实际结果
-        actual_result = {
-            'success': evidence.row_count > 0 or evidence.confidence_score > 0.5,
-            'data': state.intermediate_data.get(evidence.raw_data_key, [])
-        }
-
-        reflection = self.reflector.reflect(
-            step_number=evidence.step_number,
-            purpose=step.purpose,
-            expected_result=step.rationale,
-            actual_result=actual_result,
-            state=state,
-            use_llm=True
+        return ActResult(
+            step_id=step.step_id,
+            success=result.success,
+            data=result.data if isinstance(result.data, list) else [],
+            row_count=result.row_count,
+            execution_time=execution_time,
+            operator=result.operator_name,
+            modality=result.modality
         )
 
+    def _reflect(self, state: AnalysisState, act_result: ActResult) -> ReflectResult:
+        """Reflect阶段"""
+        # 将ActResult转换为OperatorResult
+        op_result = OperatorResult(
+            success=act_result.success,
+            data=act_result.data,
+            row_count=act_result.row_count,
+            execution_time=act_result.execution_time,
+            operator_name=act_result.operator,
+            modality=act_result.modality
+        )
+
+        reflection = self.reflection_engine.reflect(state, op_result)
+
         # 记录反思
-        state.reflections.append({
-            'step_number': evidence.step_number,
-            'decision': reflection.decision.value,
-            'confidence': reflection.confidence_score,
-            'summary': reflection.summary
-        })
+        state.reflections.append(reflection.to_dict())
 
-        logger.info(f"  Decision: {reflection.decision.value}")
-        logger.info(f"  Confidence: {reflection.confidence_score:.2f}")
-        logger.info("  ✅ Reflect phase complete\n")
+        return ReflectResult(
+            reflection=reflection,
+            decision=reflection.decision,
+            reasoning=reflection.decision_reasoning
+        )
 
-        return reflection
+    def _generate_answer(self, state: AnalysisState) -> str:
+        """生成最终答案"""
+        # 收集关键信息
+        parts = []
 
-    def _handle_decision(self,
-                         state: AnalysisState,
-                         reflection: StructuredReflection,
-                         classification: IntentClassification) -> bool:
-        """处理反思决策"""
-        decision = reflection.decision
+        # 开头
+        if state.primary_focus:
+            parts.append(f"Analysis of {state.primary_focus.name}:")
+        else:
+            parts.append("Analysis results:")
 
-        if decision == ReflectionDecision.CONTINUE:
-            return True
+        # 模态覆盖
+        modalities = [m.value for m in state.modalities_covered]
+        if modalities:
+            parts.append(f"Modalities analyzed: {', '.join(modalities)}")
 
-        elif decision == ReflectionDecision.TERMINATE:
-            logger.info("📌 Analysis complete (TERMINATE)")
-            return False
+        # 证据摘要
+        evidence = state.evidence_buffer.summarize()
+        parts.append(f"Evidence confidence: {evidence['confidence_score']:.2f}")
+        parts.append(f"Data completeness: {evidence['data_completeness']:.2f}")
 
-        elif decision == ReflectionDecision.REPLAN:
-            if state.replanning_count < state.max_replanning:
-                logger.info("🔄 Replanning...")
-                state.replanning_count += 1
-                # 重新分类
-                state._classification = self.intent_classifier.classify(state.question)
-                return True
-            else:
-                logger.info("📌 Max replanning reached")
-                return False
+        # 统计结果（如果有）
+        if 'statistical_results' in state.intermediate_data:
+            stats = state.intermediate_data['statistical_results']
+            if 'p_value' in stats:
+                parts.append(f"Statistical validation: p={stats['p_value']:.4f}")
 
-        elif decision == ReflectionDecision.DEEPEN:
-            logger.info("🔍 Deepening analysis")
-            if state.target_depth == AnalysisDepth.SHALLOW:
-                state.target_depth = AnalysisDepth.MEDIUM
-            elif state.target_depth == AnalysisDepth.MEDIUM:
-                state.target_depth = AnalysisDepth.DEEP
-            return True
-
-        elif decision == ReflectionDecision.PIVOT:
-            logger.info("↪️ Pivoting direction")
-            state.replanning_count += 1
-            return True
-
-        return True
-
-    # ==================== SYNTHESIZE Phase ====================
-
-    def _synthesize_phase(self, state: AnalysisState) -> str:
-        """
-        Synthesize阶段 - 生成最终答案
-        """
-        logger.info("📝 SYNTHESIZE PHASE")
-        logger.info("-" * 50)
-
-        state.increment_budget('llm')
-
-        # 准备上下文
-        evidence_summary = state.evidence_buffer.summarize()
-
-        # 准备关键数据
-        key_data = {}
-        for step in state.executed_steps:
-            step_key = f"step_{step['step_number']}"
-            if step_key in state.intermediate_data:
-                data = state.intermediate_data[step_key]
-                if data:
-                    key_data[step['purpose'][:50]] = data[:5]
-
-        system_prompt = self._get_synthesis_system_prompt()
-        user_prompt = self._build_synthesis_prompt(state, evidence_summary, key_data)
-
-        try:
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-
-            answer = self.llm.chat(messages, temperature=0.3, max_tokens=2000)
-
-            logger.info("  ✅ Synthesis complete\n")
-
-            return answer.strip()
-
-        except Exception as e:
-            logger.error(f"Synthesis failed: {e}")
-            return self._fallback_synthesis(state)
-
-    def _get_synthesis_system_prompt(self) -> str:
-        return """You are a neuroscience writer synthesizing research analysis results.
-
-Write a comprehensive, publication-quality answer that:
-1. Directly answers the original question
-2. Cites specific quantitative findings
-3. Connects findings across modalities (molecular → morphological → projection)
-4. Acknowledges limitations
-
-Write in active voice. Be precise with numbers. Be concise but thorough."""
-
-    def _build_synthesis_prompt(self,
-                                state: AnalysisState,
-                                evidence_summary: Dict,
-                                key_data: Dict) -> str:
-
-        steps_summary = "\n".join([
-            f"- Step {s['step_number']}: {s['purpose']} ({s['row_count']} results)"
-            for s in state.executed_steps
-        ])
-
-        reflections_summary = "\n".join([
-            f"- Step {r['step_number']}: {r['summary'][:80]}..."
-            for r in state.reflections[-5:]
-        ])
-
-        return f"""Synthesize a comprehensive answer:
-
-**Original Question:** {state.question}
-
-**Analysis Steps:**
-{steps_summary}
-
-**Modalities Covered:** {[m.value for m in state.modalities_covered]}
-
-**Evidence Summary:**
-- Records: {evidence_summary.get('total_records', 0)}
-- Completeness: {evidence_summary.get('data_completeness', 0):.2f}
-- Confidence: {evidence_summary.get('confidence_score', 0):.2f}
-
-**Reflections:**
-{reflections_summary}
-
-**Key Data:**
-{json.dumps(key_data, indent=2, default=str)[:3000]}
-
-Write a structured answer:
-1. **Main Finding** - Direct answer
-2. **Supporting Evidence** - Key quantitative results
-3. **Multi-Modal Integration** - How modalities connect
-4. **Limitations** - What we don't know
-
-Be concise but comprehensive."""
-
-    def _fallback_synthesis(self, state: AnalysisState) -> str:
-        """Fallback答案生成"""
-        parts = [f"Analysis of '{state.question}':"]
-
-        for step in state.executed_steps:
-            parts.append(f"- {step['purpose']}: {step['row_count']} results")
-
-        parts.append(f"\nModalities covered: {[m.value for m in state.modalities_covered]}")
-        parts.append(f"Confidence: {state.evidence_buffer.get_overall_confidence():.2f}")
+        # 指纹分析（如果有）
+        if state.fingerprints:
+            parts.append(f"Fingerprint analysis: {len(state.fingerprints)} regions profiled")
 
         return "\n".join(parts)
-
-    # ==================== Result Building ====================
-
-    def _build_result(self,
-                      state: AnalysisState,
-                      answer: str,
-                      start_time: float) -> Dict:
-        """构建返回结果"""
-        return {
-            'question': state.question,
-            'answer': answer,
-
-            'entities_recognized': state.discovered_entities,
-            'executed_steps': state.executed_steps,
-            'evidence_summary': state.evidence_buffer.summarize(),
-            'reflections': state.reflections,
-
-            'analysis_info': {
-                'intent': state.question_intent.value,
-                'target_depth': state.target_depth.value,
-                'modalities_covered': [m.value for m in state.modalities_covered],
-                'paths_used': state.paths_used,
-                'replanning_count': state.replanning_count,
-                'budget_used': {
-                    'cypher_calls': state.budget['current_cypher_calls'],
-                    'llm_calls': state.budget['current_llm_calls']
-                }
-            },
-
-            'confidence_score': state.evidence_buffer.get_overall_confidence(),
-            'execution_time': time.time() - start_time,
-            'total_steps': len(state.executed_steps),
-
-            'intermediate_data': state.intermediate_data,
-            'success': True
-        }
-
-    def _build_error_result(self, question: str, error: str, start_time: float) -> Dict:
-        """构建错误结果"""
-        return {
-            'question': question,
-            'answer': f"Analysis failed: {error}",
-            'error': error,
-            'execution_time': time.time() - start_time,
-            'success': False
-        }
 
 
 # ==================== Export ====================
 
-__all__ = ['TPAREngine']
+__all__ = [
+    'IntentClassifier',
+    'EntityRecognizer',
+    'SchemaGraph',
+    'AdaptivePlanner',
+    'ReflectionEngine',
+    'TPAREngine'
+]

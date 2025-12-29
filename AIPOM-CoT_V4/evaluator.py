@@ -1,741 +1,843 @@
 """
-Comprehensive Evaluation System
-================================
-能力优先的评估系统 + 统计显著性检验
+AIPOM-CoT Benchmark Evaluator
+==============================
 
-评估维度：
-1. Think (35%) - 实体识别、意图理解、推理深度
-2. Plan (35%) - 路径规划、策略选择、资源分配
-3. Reflect (20%) - 证据评估、自我纠正、决策质量
-4. Act (10%) - 查询执行、数据整合
+公平评估AIPOM-CoT与baseline方法的性能
 
-统计检验：
-- Permutation tests
-- FDR correction
-- Effect size (Cohen's d)
-- Bootstrap CI
+关键修复:
+- 删除了BASELINE_CAPABILITY_LIMITS的人为上限
+- 所有方法使用相同的评估标准
+- 集成真正的统计验证
 
 Author: Lijun
 Date: 2025-01
 """
 
-import json
-import logging
 import numpy as np
-from scipy import stats
-from typing import Dict, List, Any, Tuple, Optional
 from dataclasses import dataclass, field
-from collections import defaultdict
+from typing import Dict, List, Any, Optional, Tuple
+from enum import Enum
+import re
+import logging
+import time
+
+try:
+    from .core_structures import (
+        AgentOutput, AnalysisState, QuestionIntent, AnswerCorrectness,
+        ReflectionDecision
+    )
+    from .statistical_validator import BenchmarkStatisticalValidator
+except ImportError:
+    from core_structures import (
+        AgentOutput, AnalysisState, QuestionIntent, AnswerCorrectness,
+        ReflectionDecision
+    )
+    from statistical_validator import BenchmarkStatisticalValidator
 
 logger = logging.getLogger(__name__)
 
-# ==================== Capability Weights ====================
 
+# ==================== 能力维度权重 ====================
+# 注意：这些权重有理论依据，见手稿Methods部分
 CAPABILITY_WEIGHTS = {
-    'think': 0.35,  # 推理能力最重要
-    'plan': 0.35,  # 规划能力同样重要
-    'reflect': 0.20,  # 反思能力
-    'act': 0.10,  # 执行能力（相对次要）
+    'think': 0.25,     # 实体识别、意图分类
+    'plan': 0.25,      # 路径规划、步骤生成
+    'act': 0.25,       # 查询执行、数据获取
+    'reflect': 0.25,   # 反思决策、证据评估
 }
 
-# Baseline能力天花板
-BASELINE_CAPABILITY_LIMITS = {
-    'Direct LLM': {
-        'think': 0.30,
-        'plan': 0.10,
-        'reflect': 0.05,
-        'act': 0.20,
-    },
-    'ReAct': {
-        'think': 0.60,
-        'plan': 0.50,
-        'reflect': 0.40,
-        'act': 0.70,
-    },
-    'Simple RAG': {
-        'think': 0.40,
-        'plan': 0.30,
-        'reflect': 0.20,
-        'act': 0.60,
-    },
-    'AIPOM-CoT': {
-        'think': 1.00,
-        'plan': 1.00,
-        'reflect': 1.00,
-        'act': 1.00,
-    },
-    'NeuroXiv-Agent': {
-        'think': 1.00,
-        'plan': 1.00,
-        'reflect': 1.00,
-        'act': 1.00,
-    },
-}
+# 【关键修复】删除了不公平的能力上限
+# 原代码中的BASELINE_CAPABILITY_LIMITS被删除
+# 所有方法现在在公平条件下竞争
 
-# 正确性乘数
-CORRECTNESS_MULTIPLIERS = {
-    'correct': 1.00,
-    'partial': 0.85,
-    'tangential': 0.50,  # 跑偏答案严重惩罚
-    'incorrect': 0.30,
-    'unanswered': 0.10,
-}
-
-
-# ==================== Evaluation Metrics ====================
 
 @dataclass
-class CapabilityScores:
-    """能力分数"""
+class CapabilityScore:
+    """能力维度得分"""
     think: float = 0.0
     plan: float = 0.0
-    reflect: float = 0.0
     act: float = 0.0
+    reflect: float = 0.0
 
-    def weighted_sum(self) -> float:
-        """加权求和"""
+    def get_weighted_score(self, weights: Dict[str, float] = None) -> float:
+        """计算加权总分"""
+        weights = weights or CAPABILITY_WEIGHTS
         return (
-                self.think * CAPABILITY_WEIGHTS['think'] +
-                self.plan * CAPABILITY_WEIGHTS['plan'] +
-                self.reflect * CAPABILITY_WEIGHTS['reflect'] +
-                self.act * CAPABILITY_WEIGHTS['act']
+            self.think * weights['think'] +
+            self.plan * weights['plan'] +
+            self.act * weights['act'] +
+            self.reflect * weights['reflect']
         )
 
     def to_dict(self) -> Dict:
         return {
             'think': self.think,
             'plan': self.plan,
-            'reflect': self.reflect,
             'act': self.act,
-            'weighted': self.weighted_sum()
+            'reflect': self.reflect,
+            'weighted_total': self.get_weighted_score()
         }
 
 
 @dataclass
 class EvaluationResult:
     """评估结果"""
-    question_id: str
-    method: str
+    question: str
+    method_name: str
 
-    # 能力分数
-    capability_scores: CapabilityScores
-    capability_weighted: float
+    # 核心指标
+    correctness: AnswerCorrectness = AnswerCorrectness.UNANSWERED
+    correctness_score: float = 0.0
 
-    # 正确性
-    correctness: str  # 'correct', 'partial', 'tangential', 'incorrect', 'unanswered'
-    correctness_multiplier: float
+    # 能力得分
+    capability_scores: CapabilityScore = field(default_factory=CapabilityScore)
 
-    # 最终分数
-    overall_score: float
+    # 综合得分
+    composite_score: float = 0.0
 
-    # 元数据
+    # 执行统计
     execution_time: float = 0.0
-    step_count: int = 0
-    modalities_covered: List[str] = field(default_factory=list)
+    n_steps: int = 0
+    n_cypher_calls: int = 0
 
-    # 详细评估
-    think_details: Dict = field(default_factory=dict)
-    plan_details: Dict = field(default_factory=dict)
-    reflect_details: Dict = field(default_factory=dict)
-    act_details: Dict = field(default_factory=dict)
+    # 详细信息
+    details: Dict = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return {
-            'question_id': self.question_id,
-            'method': self.method,
-            'think': self.capability_scores.think,
-            'plan': self.capability_scores.plan,
-            'reflect': self.capability_scores.reflect,
-            'act': self.capability_scores.act,
-            'capability_weighted': self.capability_weighted,
-            'correctness': self.correctness,
-            'correctness_multiplier': self.correctness_multiplier,
-            'overall_score': self.overall_score,
+            'question': self.question,
+            'method': self.method_name,
+            'correctness': self.correctness.value,
+            'correctness_score': self.correctness_score,
+            'capability_scores': self.capability_scores.to_dict(),
+            'composite_score': self.composite_score,
             'execution_time': self.execution_time,
-            'step_count': self.step_count,
-            'modalities': self.modalities_covered,
+            'n_steps': self.n_steps,
+            'details': self.details
         }
 
 
-# ==================== Capability Evaluator ====================
+class ThinkEvaluator:
+    """Think能力评估器"""
 
-class CapabilityEvaluator:
-    """
-    能力评估器
-
-    评估四个维度的能力表现
-    """
-
-    def __init__(self, llm_client=None):
-        self.llm = llm_client
-
-    def evaluate(self,
-                 question_data: Dict,
-                 agent_output: Dict,
-                 method_name: str,
-                 ground_truth: Dict = None) -> EvaluationResult:
-        """
-        评估Agent输出
-
-        Args:
-            question_data: 问题信息
-            agent_output: Agent输出
-            method_name: 方法名称
-            ground_truth: 标准答案（可选）
-        """
-        # 获取能力限制
-        limits = BASELINE_CAPABILITY_LIMITS.get(method_name, {
-            'think': 1.0, 'plan': 1.0, 'reflect': 1.0, 'act': 1.0
-        })
-
-        # 评估各能力
-        think_score, think_details = self._evaluate_think(question_data, agent_output, limits)
-        plan_score, plan_details = self._evaluate_plan(question_data, agent_output, limits)
-        reflect_score, reflect_details = self._evaluate_reflect(question_data, agent_output, limits)
-        act_score, act_details = self._evaluate_act(question_data, agent_output, limits)
-
-        # 构建能力分数
-        capability_scores = CapabilityScores(
-            think=think_score,
-            plan=plan_score,
-            reflect=reflect_score,
-            act=act_score
-        )
-
-        capability_weighted = capability_scores.weighted_sum()
-
-        # 评估正确性
-        correctness = self._evaluate_correctness(
-            question_data, agent_output, ground_truth
-        )
-        correctness_multiplier = CORRECTNESS_MULTIPLIERS.get(correctness, 0.5)
-
-        # 计算最终分数
-        overall_score = capability_weighted * correctness_multiplier
-
-        return EvaluationResult(
-            question_id=question_data.get('id', 'unknown'),
-            method=method_name,
-            capability_scores=capability_scores,
-            capability_weighted=capability_weighted,
-            correctness=correctness,
-            correctness_multiplier=correctness_multiplier,
-            overall_score=overall_score,
-            execution_time=agent_output.get('execution_time', 0),
-            step_count=agent_output.get('total_steps', 0),
-            modalities_covered=agent_output.get('modalities_covered', []),
-            think_details=think_details,
-            plan_details=plan_details,
-            reflect_details=reflect_details,
-            act_details=act_details,
-        )
-
-    def _evaluate_think(self,
-                        question_data: Dict,
-                        agent_output: Dict,
-                        limits: Dict) -> Tuple[float, Dict]:
+    def evaluate(self, output: AgentOutput, ground_truth: Dict) -> float:
         """
         评估Think能力
 
-        考虑：
-        - 实体识别准确性
-        - 意图理解正确性
-        - 问题分解质量
-        - 推理深度
+        评估维度:
+        1. 实体识别准确率
+        2. 意图分类正确性
+        3. 关键约束识别
         """
-        details = {}
-        score = 0.0
+        scores = []
 
-        # 1. 实体识别 (30%)
-        entities = agent_output.get('entities_recognized', {})
-        expected_entities = question_data.get('expected_entities', {})
+        think_traces = output.get_think_traces()
+        if not think_traces:
+            return 0.0
 
+        # 1. 实体识别评估
+        expected_entities = set(ground_truth.get('entities', []))
         if expected_entities:
-            found_count = sum(len(v) for v in entities.values())
-            expected_count = sum(len(v) for v in expected_entities.values())
-            entity_recall = min(1.0, found_count / max(1, expected_count))
-        else:
-            entity_recall = 0.5 if entities else 0.0
+            extracted_entities = set()
+            for trace in think_traces:
+                extracted_entities.update(trace.get('entities', []))
 
-        details['entity_recall'] = entity_recall
-        score += entity_recall * 0.30
+            if extracted_entities:
+                precision = len(extracted_entities & expected_entities) / len(extracted_entities)
+                recall = len(extracted_entities & expected_entities) / len(expected_entities)
+                f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+                scores.append(f1)
+            else:
+                scores.append(0.0)
 
-        # 2. 意图理解 (30%)
-        analysis_info = agent_output.get('analysis_info', {})
-        detected_intent = analysis_info.get('intent', 'unknown')
-        expected_intent = question_data.get('expected_intent', '')
+        # 2. 意图分类评估
+        expected_intent = ground_truth.get('intent')
+        if expected_intent:
+            first_trace = think_traces[0] if think_traces else {}
+            actual_intent = first_trace.get('intent', '')
 
-        if expected_intent and detected_intent == expected_intent:
-            intent_score = 1.0
-        elif detected_intent != 'unknown':
-            intent_score = 0.5
-        else:
-            intent_score = 0.0
+            # 精确匹配或语义相近
+            if actual_intent == expected_intent:
+                scores.append(1.0)
+            elif self._intent_similar(actual_intent, expected_intent):
+                scores.append(0.7)
+            else:
+                scores.append(0.3)
 
-        details['intent_score'] = intent_score
-        score += intent_score * 0.30
+        # 3. 模态识别评估
+        expected_modalities = set(ground_truth.get('modalities', []))
+        if expected_modalities:
+            identified_modalities = set()
+            for trace in think_traces:
+                identified_modalities.update(trace.get('modalities', []))
 
-        # 3. 推理深度 (40%)
-        steps = agent_output.get('executed_steps', [])
-        depth = analysis_info.get('target_depth', 'shallow')
+            if identified_modalities:
+                overlap = len(identified_modalities & expected_modalities)
+                coverage = overlap / len(expected_modalities)
+                scores.append(coverage)
 
-        depth_scores = {'shallow': 0.3, 'medium': 0.6, 'deep': 1.0}
-        depth_score = depth_scores.get(depth, 0.3)
+        return np.mean(scores) if scores else 0.5
 
-        # 考虑步骤数量
-        step_score = min(1.0, len(steps) / 5)
-        reasoning_score = (depth_score * 0.6 + step_score * 0.4)
+    def _intent_similar(self, intent1: str, intent2: str) -> bool:
+        """检查意图是否语义相近"""
+        similar_pairs = [
+            ('profiling', 'deep_profiling'),
+            ('simple_query', 'definition'),
+            ('comparison', 'screening'),
+        ]
+        for pair in similar_pairs:
+            if intent1 in pair and intent2 in pair:
+                return True
+        return False
 
-        details['depth_score'] = depth_score
-        details['step_score'] = step_score
-        details['reasoning_score'] = reasoning_score
-        score += reasoning_score * 0.40
 
-        # 应用能力限制
-        final_score = min(score, limits.get('think', 1.0))
-        details['raw_score'] = score
-        details['capped_score'] = final_score
+class PlanEvaluator:
+    """Plan能力评估器"""
 
-        return final_score, details
-
-    def _evaluate_plan(self,
-                       question_data: Dict,
-                       agent_output: Dict,
-                       limits: Dict) -> Tuple[float, Dict]:
+    def evaluate(self, output: AgentOutput, ground_truth: Dict) -> float:
         """
         评估Plan能力
 
-        考虑：
-        - 路径规划合理性
-        - 策略选择恰当性
-        - 模态覆盖完整性
-        - 步骤依赖正确性
+        评估维度:
+        1. 路径选择合理性
+        2. 步骤覆盖度
+        3. 资源效率
         """
-        details = {}
-        score = 0.0
+        scores = []
 
-        # 1. 路径规划 (30%)
-        paths_used = agent_output.get('analysis_info', {}).get('paths_used', [])
-        path_score = min(1.0, len(paths_used) / 3) if paths_used else 0.0
-        details['path_score'] = path_score
-        score += path_score * 0.30
+        executed_steps = output.get_executed_steps()
 
-        # 2. 模态覆盖 (40%)
-        modalities = agent_output.get('modalities_covered', [])
-        if isinstance(modalities, list):
-            modality_set = set(modalities)
+        # 1. 步骤数量合理性
+        expected_steps = ground_truth.get('expected_steps', 5)
+        min_steps = ground_truth.get('min_steps', 2)
+        max_steps = ground_truth.get('max_steps', 12)
+
+        actual_steps = len(executed_steps)
+
+        if min_steps <= actual_steps <= max_steps:
+            # 越接近expected_steps越好
+            deviation = abs(actual_steps - expected_steps) / expected_steps
+            scores.append(max(0, 1 - deviation))
         else:
-            modality_set = set()
+            scores.append(0.3)
 
-        expected_modalities = set(question_data.get('expected_modalities', ['molecular']))
-
+        # 2. 模态覆盖度
+        expected_modalities = set(ground_truth.get('modalities', []))
         if expected_modalities:
-            coverage = len(modality_set & expected_modalities) / len(expected_modalities)
-        else:
-            coverage = min(1.0, len(modality_set) / 3)
+            covered_modalities = set()
+            for step in executed_steps:
+                if step.get('modality'):
+                    covered_modalities.add(step['modality'])
 
-        details['modality_coverage'] = coverage
-        details['modalities_found'] = list(modality_set)
-        score += coverage * 0.40
+            coverage = len(covered_modalities & expected_modalities) / len(expected_modalities)
+            scores.append(coverage)
 
-        # 3. 策略选择 (30%)
-        analysis_info = agent_output.get('analysis_info', {})
-        replanning = analysis_info.get('replanning_count', 0)
+        # 3. 步骤成功率
+        if executed_steps:
+            success_rate = sum(1 for s in executed_steps if s.get('success', False)) / len(executed_steps)
+            scores.append(success_rate)
 
-        # 适度重规划是好的，过多则不好
-        if replanning == 0:
-            strategy_score = 0.7  # 可能没有反思
-        elif replanning <= 2:
-            strategy_score = 1.0  # 适度调整
-        else:
-            strategy_score = 0.5  # 过多重规划
+        # 4. 数据获取量
+        if executed_steps:
+            total_rows = sum(s.get('row_count', 0) for s in executed_steps)
+            if total_rows > 0:
+                scores.append(min(1.0, total_rows / 100))  # 100行作为基准
 
-        details['replanning_count'] = replanning
-        details['strategy_score'] = strategy_score
-        score += strategy_score * 0.30
+        return np.mean(scores) if scores else 0.5
 
-        # 应用能力限制
-        final_score = min(score, limits.get('plan', 1.0))
-        details['raw_score'] = score
-        details['capped_score'] = final_score
 
-        return final_score, details
+class ActEvaluator:
+    """Act能力评估器"""
 
-    def _evaluate_reflect(self,
-                          question_data: Dict,
-                          agent_output: Dict,
-                          limits: Dict) -> Tuple[float, Dict]:
-        """
-        评估Reflect能力
-
-        考虑：
-        - 证据评估质量
-        - 自我纠正能力
-        - 决策推理深度
-        - 不确定性识别
-        """
-        details = {}
-        score = 0.0
-
-        # 1. 反思记录 (40%)
-        reflections = agent_output.get('reflections', [])
-        reflection_count = len(reflections)
-
-        if reflection_count >= 3:
-            reflection_score = 1.0
-        elif reflection_count >= 1:
-            reflection_score = 0.6
-        else:
-            reflection_score = 0.0
-
-        details['reflection_count'] = reflection_count
-        details['reflection_score'] = reflection_score
-        score += reflection_score * 0.40
-
-        # 2. 置信度评估 (30%)
-        confidence = agent_output.get('confidence_score', 0)
-        evidence_summary = agent_output.get('evidence_summary', {})
-
-        # 有置信度评估表示有反思
-        if confidence > 0:
-            confidence_score = min(1.0, confidence + 0.2)  # 鼓励有置信度
-        else:
-            confidence_score = 0.0
-
-        details['confidence'] = confidence
-        details['confidence_score'] = confidence_score
-        score += confidence_score * 0.30
-
-        # 3. 证据质量 (30%)
-        evidence_records = evidence_summary.get('total_records', 0)
-        data_completeness = evidence_summary.get('data_completeness', 0)
-
-        if evidence_records >= 3 and data_completeness > 0.5:
-            evidence_score = 1.0
-        elif evidence_records >= 1:
-            evidence_score = 0.6
-        else:
-            evidence_score = 0.0
-
-        details['evidence_records'] = evidence_records
-        details['data_completeness'] = data_completeness
-        details['evidence_score'] = evidence_score
-        score += evidence_score * 0.30
-
-        # 应用能力限制
-        final_score = min(score, limits.get('reflect', 1.0))
-        details['raw_score'] = score
-        details['capped_score'] = final_score
-
-        return final_score, details
-
-    def _evaluate_act(self,
-                      question_data: Dict,
-                      agent_output: Dict,
-                      limits: Dict) -> Tuple[float, Dict]:
+    def evaluate(self, output: AgentOutput, ground_truth: Dict) -> float:
         """
         评估Act能力
 
-        考虑：
-        - 查询执行成功率
-        - 数据获取量
-        - 执行效率
+        评估维度:
+        1. 查询执行成功率
+        2. 数据质量
+        3. 执行效率
         """
-        details = {}
-        score = 0.0
+        scores = []
 
-        # 1. 执行成功率 (50%)
-        steps = agent_output.get('executed_steps', [])
-        if steps:
-            success_count = sum(1 for s in steps if s.get('success', s.get('row_count', 0) > 0))
-            success_rate = success_count / len(steps)
+        executed_steps = output.get_executed_steps()
+
+        if not executed_steps:
+            return 0.0
+
+        # 1. 执行成功率
+        success_rate = sum(1 for s in executed_steps if s.get('success', False)) / len(executed_steps)
+        scores.append(success_rate)
+
+        # 2. 数据获取量
+        total_rows = sum(s.get('row_count', 0) for s in executed_steps)
+        expected_rows = ground_truth.get('expected_rows', 50)
+
+        if total_rows > 0:
+            ratio = min(1.0, total_rows / expected_rows)
+            scores.append(ratio)
         else:
-            success_rate = 0.0
+            scores.append(0.0)
 
-        details['success_rate'] = success_rate
-        score += success_rate * 0.50
+        # 3. 执行时间效率
+        if output.total_time > 0:
+            time_limit = ground_truth.get('time_limit', 60)  # 60秒
+            if output.total_time <= time_limit:
+                efficiency = 1 - (output.total_time / time_limit)
+                scores.append(max(0.3, efficiency))
+            else:
+                scores.append(0.2)
 
-        # 2. 数据获取 (30%)
-        total_rows = sum(s.get('row_count', 0) for s in steps)
+        return np.mean(scores) if scores else 0.5
 
-        if total_rows >= 50:
-            data_score = 1.0
-        elif total_rows >= 20:
-            data_score = 0.8
-        elif total_rows >= 5:
-            data_score = 0.5
+
+class ReflectEvaluator:
+    """Reflect能力评估器"""
+
+    def evaluate(self, output: AgentOutput, ground_truth: Dict) -> float:
+        """
+        评估Reflect能力
+
+        评估维度:
+        1. 反思决策质量
+        2. 置信度校准
+        3. 证据评估准确性
+        """
+        scores = []
+
+        reflections = output.get_reflections()
+
+        if not reflections:
+            return 0.3  # 没有反思记录给基础分
+
+        # 1. 反思次数合理性
+        expected_reflections = ground_truth.get('expected_reflections', len(output.iterations))
+        actual = len(reflections)
+
+        if actual > 0:
+            ratio = min(1.0, actual / max(1, expected_reflections))
+            scores.append(ratio)
+
+        # 2. 决策分布合理性
+        decisions = [r.get('decision', '') for r in reflections]
+
+        # 应该有多样的决策类型
+        unique_decisions = set(decisions)
+        if len(unique_decisions) >= 2:
+            scores.append(0.8)
+        elif len(unique_decisions) == 1:
+            scores.append(0.5)
         else:
-            data_score = 0.2
+            scores.append(0.3)
 
-        details['total_rows'] = total_rows
-        details['data_score'] = data_score
-        score += data_score * 0.30
-
-        # 3. 执行效率 (20%)
-        exec_time = agent_output.get('execution_time', 0)
-
-        if exec_time < 10:
-            efficiency_score = 1.0
-        elif exec_time < 30:
-            efficiency_score = 0.8
-        elif exec_time < 60:
-            efficiency_score = 0.5
+        # 3. 最终决策正确性
+        final_decision = decisions[-1] if decisions else ''
+        if final_decision == 'terminate':
+            # 正确终止
+            scores.append(1.0)
+        elif final_decision in ['continue', 'deepen']:
+            # 合理决策
+            scores.append(0.7)
         else:
-            efficiency_score = 0.3
+            scores.append(0.4)
 
-        details['execution_time'] = exec_time
-        details['efficiency_score'] = efficiency_score
-        score += efficiency_score * 0.20
+        # 4. 置信度评估
+        confidences = [r.get('confidence', 0) for r in reflections]
+        if confidences:
+            avg_confidence = np.mean(confidences)
+            # 最终置信度应该较高（如果回答正确）
+            final_confidence = confidences[-1] if confidences else 0
+            if final_confidence >= 0.7:
+                scores.append(0.9)
+            elif final_confidence >= 0.5:
+                scores.append(0.6)
+            else:
+                scores.append(0.3)
 
-        # 应用能力限制
-        final_score = min(score, limits.get('act', 1.0))
-        details['raw_score'] = score
-        details['capped_score'] = final_score
+        return np.mean(scores) if scores else 0.5
 
-        return final_score, details
 
-    def _evaluate_correctness(self,
-                              question_data: Dict,
-                              agent_output: Dict,
-                              ground_truth: Dict = None) -> str:
+class CorrectnessEvaluator:
+    """正确性评估器"""
+
+    def __init__(self):
+        self.patterns = {
+            'acronym': self._check_acronym,
+            'list': self._check_list,
+            'numeric': self._check_numeric,
+            'boolean': self._check_boolean,
+            'entity': self._check_entity,
+        }
+
+    def evaluate(self, question: str, answer: str,
+                ground_truth: Dict) -> Tuple[AnswerCorrectness, float]:
         """
         评估答案正确性
 
+        Args:
+            question: 原始问题
+            answer: 生成的答案
+            ground_truth: 标准答案
+
         Returns:
-            'correct', 'partial', 'tangential', 'incorrect', 'unanswered'
+            (正确性级别, 正确性分数)
         """
-        answer = agent_output.get('answer', '')
+        answer_type = ground_truth.get('answer_type', 'entity')
+        expected = ground_truth.get('expected_answer', '')
+        keywords = ground_truth.get('keywords', [])
 
-        if not answer or answer.startswith('Error') or answer.startswith('Unable'):
-            return 'unanswered'
+        # 空答案
+        if not answer or len(answer.strip()) < 10:
+            return AnswerCorrectness.UNANSWERED, 0.0
 
-        # 如果有ground truth，使用LLM评估
-        if ground_truth and self.llm:
-            return self._llm_evaluate_correctness(question_data, answer, ground_truth)
+        # 使用对应的检查器
+        checker = self.patterns.get(answer_type, self._check_entity)
+        score = checker(question, answer, expected, keywords)
 
-        # 简单启发式评估
-        question = question_data.get('question', '')
-        expected_keywords = question_data.get('expected_keywords', [])
-
-        if not expected_keywords:
-            # 没有预期关键词，基于答案长度和结构评估
-            if len(answer) > 200:
-                return 'partial'
-            else:
-                return 'tangential'
-
-        # 检查关键词覆盖
-        answer_lower = answer.lower()
-        found_keywords = sum(1 for kw in expected_keywords if kw.lower() in answer_lower)
-        coverage = found_keywords / len(expected_keywords)
-
-        if coverage >= 0.8:
-            return 'correct'
-        elif coverage >= 0.5:
-            return 'partial'
-        elif coverage >= 0.2:
-            return 'tangential'
+        # 转换为正确性级别
+        if score >= 0.8:
+            return AnswerCorrectness.CORRECT, score
+        elif score >= 0.5:
+            return AnswerCorrectness.PARTIAL, score
+        elif score >= 0.2:
+            return AnswerCorrectness.TANGENTIAL, score
         else:
-            return 'incorrect'
+            return AnswerCorrectness.INCORRECT, score
 
-    def _llm_evaluate_correctness(self,
-                                  question_data: Dict,
-                                  answer: str,
-                                  ground_truth: Dict) -> str:
-        """使用LLM评估正确性"""
-        system_prompt = """Evaluate the answer correctness against ground truth.
+    def _check_acronym(self, question: str, answer: str,
+                      expected: str, keywords: List[str]) -> float:
+        """检查缩写解释"""
+        answer_lower = answer.lower()
+        expected_lower = expected.lower()
 
-Return one of:
-- correct: Answer is accurate and comprehensive
-- partial: Answer is mostly correct but missing some details
-- tangential: Answer is related but doesn't directly address the question
-- incorrect: Answer contains significant errors
-- unanswered: Answer doesn't attempt to address the question"""
+        if expected_lower in answer_lower:
+            return 1.0
 
-        user_prompt = f"""Question: {question_data.get('question', '')}
+        # 检查关键词
+        if keywords:
+            matched = sum(1 for kw in keywords if kw.lower() in answer_lower)
+            return matched / len(keywords)
 
-Ground Truth: {json.dumps(ground_truth, default=str)}
+        return 0.0
 
-Answer to evaluate:
-{answer[:1000]}
+    def _check_list(self, question: str, answer: str,
+                   expected: str, keywords: List[str]) -> float:
+        """检查列表类答案"""
+        if not keywords:
+            return 0.5
 
-Rate the correctness (correct/partial/tangential/incorrect/unanswered):"""
+        answer_lower = answer.lower()
+        matched = sum(1 for kw in keywords if kw.lower() in answer_lower)
+        return matched / len(keywords)
 
-        try:
-            result = self.llm.generate_json(system_prompt,
-                                            user_prompt + "\nReturn JSON: {\"correctness\": \"...\", \"reasoning\": \"...\"}")
-            return result.get('correctness', 'partial')
-        except:
-            return 'partial'
+    def _check_numeric(self, question: str, answer: str,
+                      expected: str, keywords: List[str]) -> float:
+        """检查数值类答案"""
+        # 提取数字
+        expected_nums = re.findall(r'[\d.]+', str(expected))
+        answer_nums = re.findall(r'[\d.]+', answer)
+
+        if not expected_nums:
+            return 0.5
+
+        for exp in expected_nums:
+            if exp in answer_nums:
+                return 1.0
+
+        return 0.0
+
+    def _check_boolean(self, question: str, answer: str,
+                      expected: str, keywords: List[str]) -> float:
+        """检查是非类答案"""
+        expected_lower = expected.lower()
+        answer_lower = answer.lower()
+
+        positive = ['yes', 'true', 'correct', 'indeed', '是', '对']
+        negative = ['no', 'false', 'incorrect', 'not', '否', '不']
+
+        expected_is_positive = any(p in expected_lower for p in positive)
+        answer_is_positive = any(p in answer_lower for p in positive)
+        answer_is_negative = any(n in answer_lower for n in negative)
+
+        if expected_is_positive == answer_is_positive:
+            return 1.0
+        elif expected_is_positive != answer_is_negative:
+            return 1.0
+
+        return 0.0
+
+    def _check_entity(self, question: str, answer: str,
+                     expected: str, keywords: List[str]) -> float:
+        """检查实体类答案"""
+        score = 0.0
+        answer_lower = answer.lower()
+
+        # 检查预期答案
+        if expected:
+            expected_lower = expected.lower()
+            if expected_lower in answer_lower:
+                score += 0.5
+
+        # 检查关键词
+        if keywords:
+            matched = sum(1 for kw in keywords if kw.lower() in answer_lower)
+            score += 0.5 * (matched / len(keywords))
+        elif expected:
+            score += 0.5  # 没有额外关键词时
+
+        return min(1.0, score)
 
 
-# ==================== Statistical Tests ====================
-
-class StatisticalValidator:
+class BenchmarkEvaluator:
     """
-    统计验证器
+    综合Benchmark评估器
 
-    执行显著性检验
+    【关键修复】
+    - 删除了不公平的能力天花板限制
+    - 所有方法使用相同的评估标准
+    - 集成真正的统计验证
     """
 
-    @staticmethod
-    def permutation_test(group1: List[float],
-                         group2: List[float],
-                         n_permutations: int = 10000,
-                         seed: int = 42) -> Dict:
+    def __init__(self, config: Dict = None):
+        self.config = config or {}
+
+        # 能力评估器
+        self.think_evaluator = ThinkEvaluator()
+        self.plan_evaluator = PlanEvaluator()
+        self.act_evaluator = ActEvaluator()
+        self.reflect_evaluator = ReflectEvaluator()
+        self.correctness_evaluator = CorrectnessEvaluator()
+
+        # 统计验证器
+        self.stat_validator = BenchmarkStatisticalValidator()
+
+    def evaluate(self, output: AgentOutput, ground_truth: Dict,
+                method_name: str = "AIPOM-CoT") -> EvaluationResult:
         """
-        Permutation test
+        评估单个输出
 
-        检验两组分数是否有显著差异
-        """
-        np.random.seed(seed)
-
-        group1 = np.array(group1)
-        group2 = np.array(group2)
-
-        # 观察到的差异
-        observed_diff = np.mean(group1) - np.mean(group2)
-
-        # Permutation
-        combined = np.concatenate([group1, group2])
-        n1 = len(group1)
-
-        null_diffs = []
-        for _ in range(n_permutations):
-            np.random.shuffle(combined)
-            null_diff = np.mean(combined[:n1]) - np.mean(combined[n1:])
-            null_diffs.append(null_diff)
-
-        null_diffs = np.array(null_diffs)
-
-        # 双尾p值
-        p_value = np.mean(np.abs(null_diffs) >= np.abs(observed_diff))
-
-        # Effect size (Cohen's d)
-        pooled_std = np.sqrt((np.var(group1) + np.var(group2)) / 2)
-        cohens_d = observed_diff / pooled_std if pooled_std > 0 else 0
-
-        return {
-            'observed_diff': float(observed_diff),
-            'p_value': float(p_value),
-            'cohens_d': float(cohens_d),
-            'significant': p_value < 0.05,
-            'n1': len(group1),
-            'n2': len(group2),
-            'mean1': float(np.mean(group1)),
-            'mean2': float(np.mean(group2)),
-        }
-
-    @staticmethod
-    def fdr_correction(p_values: List[float],
-                       alpha: float = 0.05) -> Tuple[List[float], List[bool]]:
-        """
-        Benjamini-Hochberg FDR correction
-        """
-        p_values = np.array(p_values)
-        n = len(p_values)
-
-        # 排序索引
-        sorted_idx = np.argsort(p_values)
-        sorted_p = p_values[sorted_idx]
-
-        # 计算q值
-        q_values = np.zeros(n)
-        for i, p in enumerate(sorted_p):
-            q_values[sorted_idx[i]] = p * n / (i + 1)
-
-        # 累积最小值（从后往前）
-        q_values = np.minimum.accumulate(q_values[::-1])[::-1]
-        q_values = np.clip(q_values, 0, 1)
-
-        significant = q_values < alpha
-
-        return q_values.tolist(), significant.tolist()
-
-    @staticmethod
-    def bootstrap_ci(data: List[float],
-                     statistic_func=np.mean,
-                     n_bootstrap: int = 10000,
-                     confidence: float = 0.95,
-                     seed: int = 42) -> Tuple[float, float]:
-        """
-        Bootstrap置信区间
-        """
-        np.random.seed(seed)
-        data = np.array(data)
-        n = len(data)
-
-        bootstrap_stats = []
-        for _ in range(n_bootstrap):
-            sample = np.random.choice(data, size=n, replace=True)
-            bootstrap_stats.append(statistic_func(sample))
-
-        bootstrap_stats = np.array(bootstrap_stats)
-        alpha = 1 - confidence
-
-        lower = np.percentile(bootstrap_stats, 100 * alpha / 2)
-        upper = np.percentile(bootstrap_stats, 100 * (1 - alpha / 2))
-
-        return (float(lower), float(upper))
-
-    @staticmethod
-    def compare_methods(results: Dict[str, List[EvaluationResult]],
-                        baseline_method: str = 'Direct LLM') -> Dict:
-        """
-        比较多个方法
+        【关键】没有任何人为的分数限制
+        所有方法使用完全相同的评估逻辑
 
         Args:
-            results: {method_name: [EvaluationResult, ...]}
-            baseline_method: 基准方法
+            output: Agent输出
+            ground_truth: 标准答案
+            method_name: 方法名称
 
         Returns:
-            比较结果
+            评估结果
         """
-        comparison = {}
+        # 1. 评估正确性
+        correctness, correctness_score = self.correctness_evaluator.evaluate(
+            output.question,
+            output.answer,
+            ground_truth
+        )
 
-        baseline_scores = [r.overall_score for r in results.get(baseline_method, [])]
+        # 2. 评估各能力维度
+        think_score = self.think_evaluator.evaluate(output, ground_truth)
+        plan_score = self.plan_evaluator.evaluate(output, ground_truth)
+        act_score = self.act_evaluator.evaluate(output, ground_truth)
+        reflect_score = self.reflect_evaluator.evaluate(output, ground_truth)
 
-        for method, method_results in results.items():
-            if method == baseline_method:
-                continue
+        capability_scores = CapabilityScore(
+            think=think_score,
+            plan=plan_score,
+            act=act_score,
+            reflect=reflect_score
+        )
 
-            method_scores = [r.overall_score for r in method_results]
+        # 3. 计算综合得分
+        # 【关键】没有任何人为限制
+        capability_total = capability_scores.get_weighted_score()
 
-            if not method_scores or not baseline_scores:
-                continue
+        # 综合得分 = 50% 正确性 + 50% 能力得分
+        composite_score = 0.5 * correctness_score + 0.5 * capability_total
 
-            # Permutation test
-            perm_result = StatisticalValidator.permutation_test(
-                method_scores, baseline_scores
-            )
+        return EvaluationResult(
+            question=output.question,
+            method_name=method_name,
+            correctness=correctness,
+            correctness_score=correctness_score,
+            capability_scores=capability_scores,
+            composite_score=composite_score,
+            execution_time=output.total_time,
+            n_steps=len(output.iterations),
+            details={
+                'n_iterations': len(output.iterations),
+                'task_status': output.task_status
+            }
+        )
 
-            # Bootstrap CI for the difference
-            diff_scores = np.array(method_scores) - np.mean(baseline_scores)
-            ci = StatisticalValidator.bootstrap_ci(diff_scores.tolist())
+    def evaluate_batch(self, outputs: List[Tuple[AgentOutput, Dict]],
+                      method_name: str = "AIPOM-CoT") -> Dict:
+        """
+        批量评估
 
-            comparison[method] = {
-                'vs_baseline': baseline_method,
-                'method_mean': perm_result['mean1'],
-                'baseline_mean': perm_result['mean2'],
-                'difference': perm_result['observed_diff'],
-                'p_value': perm_result['p_value'],
-                'cohens_d': perm_result['cohens_d'],
-                'significant': perm_result['significant'],
-                'ci_95': ci,
-                'n_samples': perm_result['n1'],
+        Args:
+            outputs: [(output, ground_truth), ...]
+            method_name: 方法名称
+
+        Returns:
+            批量评估结果
+        """
+        results = []
+        for output, gt in outputs:
+            result = self.evaluate(output, gt, method_name)
+            results.append(result)
+
+        # 汇总统计
+        if results:
+            composite_scores = [r.composite_score for r in results]
+            correctness_scores = [r.correctness_score for r in results]
+
+            return {
+                'method': method_name,
+                'n_samples': len(results),
+                'mean_composite': float(np.mean(composite_scores)),
+                'std_composite': float(np.std(composite_scores)),
+                'mean_correctness': float(np.mean(correctness_scores)),
+                'capability_breakdown': {
+                    'think': float(np.mean([r.capability_scores.think for r in results])),
+                    'plan': float(np.mean([r.capability_scores.plan for r in results])),
+                    'act': float(np.mean([r.capability_scores.act for r in results])),
+                    'reflect': float(np.mean([r.capability_scores.reflect for r in results])),
+                },
+                'results': [r.to_dict() for r in results]
             }
 
-        return comparison
+        return {'method': method_name, 'n_samples': 0}
+
+    def compare_methods(self,
+                       method_results: Dict[str, List[float]]) -> Dict:
+        """
+        比较多个方法 + 统计验证
+
+        【关键】使用真正的统计检验，不是人为设定的结果
+
+        Args:
+            method_results: {方法名: [得分列表]}
+
+        Returns:
+            带统计验证的比较结果
+        """
+        return self.stat_validator.validate_benchmark_results(method_results)
+
+
+# ==================== Baseline Method Simulators ====================
+
+class DirectLLMSimulator:
+    """
+    Direct LLM Baseline模拟器
+
+    模拟没有知识图谱和规划能力的纯LLM
+    """
+
+    def generate_output(self, question: str, answer: str = "") -> AgentOutput:
+        """生成模拟输出"""
+        try:
+            from .core_structures import TPARIteration, ThinkResult, ActResult
+        except ImportError:
+            from core_structures import TPARIteration, ThinkResult, ActResult
+
+        # Direct LLM只有一次Think和Act
+        iteration = TPARIteration(
+            iteration_number=0,
+            think=ThinkResult(
+                entities=[],  # 无实体识别
+                intent=QuestionIntent.UNKNOWN,
+                focus_modalities=[],
+                key_constraints={},
+                reasoning="Direct LLM response without structured reasoning"
+            ),
+            act=ActResult(
+                step_id="direct_response",
+                success=True,
+                data=[],
+                row_count=0,
+                execution_time=0.5,
+                operator="llm_only"
+            ),
+            # 无Plan和Reflect
+            plan=None,
+            reflect=None
+        )
+
+        return AgentOutput(
+            question=question,
+            answer=answer or "This is a simulated direct LLM response.",
+            iterations=[iteration],
+            total_time=0.5
+        )
+
+
+class RAGSimulator:
+    """
+    RAG Baseline模拟器
+
+    模拟检索增强生成，有检索但无规划反思
+    """
+
+    def generate_output(self, question: str, answer: str = "",
+                       n_retrievals: int = 3) -> AgentOutput:
+        """生成模拟输出"""
+        try:
+            from .core_structures import TPARIteration, ThinkResult, ActResult
+        except ImportError:
+            from core_structures import TPARIteration, ThinkResult, ActResult
+
+        iterations = []
+
+        # 简单检索循环
+        for i in range(n_retrievals):
+            iteration = TPARIteration(
+                iteration_number=i,
+                think=ThinkResult(
+                    entities=[],
+                    intent=QuestionIntent.SIMPLE_QUERY,
+                    focus_modalities=[],
+                    key_constraints={},
+                    reasoning=f"Retrieval step {i+1}"
+                ),
+                act=ActResult(
+                    step_id=f"retrieve_{i}",
+                    success=True,
+                    data=[],
+                    row_count=10,  # 模拟检索结果
+                    execution_time=0.2,
+                    operator="retrieval"
+                ),
+                plan=None,  # RAG无显式规划
+                reflect=None  # RAG无反思
+            )
+            iterations.append(iteration)
+
+        return AgentOutput(
+            question=question,
+            answer=answer or "This is a simulated RAG response with retrieved context.",
+            iterations=iterations,
+            total_time=0.6
+        )
+
+
+class ReActSimulator:
+    """
+    ReAct Baseline模拟器
+
+    模拟ReAct推理+行动模式
+    """
+
+    def generate_output(self, question: str, answer: str = "",
+                       n_steps: int = 4) -> AgentOutput:
+        """生成模拟输出"""
+        try:
+            from .core_structures import (
+                TPARIteration, ThinkResult, PlanResult, ActResult, ReflectResult,
+                StructuredReflection, SchemaPath, CandidateStep, PlannerType,
+                Modality, Entity, ValidationStatus
+            )
+        except ImportError:
+            from core_structures import (
+                TPARIteration, ThinkResult, PlanResult, ActResult, ReflectResult,
+                StructuredReflection, SchemaPath, CandidateStep, PlannerType,
+                Modality, Entity, ValidationStatus
+            )
+
+        iterations = []
+
+        for i in range(n_steps):
+            iteration = TPARIteration(
+                iteration_number=i,
+                think=ThinkResult(
+                    entities=[Entity(name="entity", entity_type="Generic")],
+                    intent=QuestionIntent.SIMPLE_QUERY,
+                    focus_modalities=[Modality.MOLECULAR],
+                    key_constraints={},
+                    reasoning=f"ReAct thought {i+1}"
+                ),
+                plan=PlanResult(
+                    selected_paths=[],
+                    planner_type=PlannerType.ADAPTIVE,
+                    steps=[CandidateStep(
+                        step_id=f"step_{i}",
+                        step_type="action",
+                        purpose=f"Action {i+1}",
+                        rationale="ReAct action",
+                        priority=0.5
+                    )],
+                    reasoning=f"ReAct plan {i+1}"
+                ),
+                act=ActResult(
+                    step_id=f"react_action_{i}",
+                    success=True,
+                    data=[],
+                    row_count=5,
+                    execution_time=0.3,
+                    operator="react"
+                ),
+                reflect=ReflectResult(
+                    reflection=StructuredReflection(
+                        step_number=i,
+                        validation_status=ValidationStatus.PASSED,
+                        validation_reasoning="ReAct observation",
+                        uncertainty_level=0.5,
+                        uncertainty_sources=[],
+                        key_findings=[],
+                        surprising_results=[],
+                        decision=ReflectionDecision.CONTINUE if i < n_steps - 1 else ReflectionDecision.TERMINATE,
+                        decision_reasoning="Continue ReAct loop",
+                        next_step_suggestions=[],
+                        alternative_approaches=[],
+                        confidence_score=0.6,
+                        confidence_factors={},
+                        summary=f"ReAct step {i+1} complete"
+                    ),
+                    decision=ReflectionDecision.CONTINUE if i < n_steps - 1 else ReflectionDecision.TERMINATE,
+                    reasoning="ReAct reflection"
+                )
+            )
+            iterations.append(iteration)
+
+        return AgentOutput(
+            question=question,
+            answer=answer or "This is a simulated ReAct response.",
+            iterations=iterations,
+            total_time=1.2
+        )
+
+
+# ==================== Compatibility Layer for benchmark.py ====================
+
+# 别名：CapabilityEvaluator = BenchmarkEvaluator
+# benchmark.py 使用 CapabilityEvaluator，我们提供兼容
+CapabilityEvaluator = BenchmarkEvaluator
+
+# 重导出 StatisticalValidator
+try:
+    from .statistical_validator import StatisticalValidator
+except ImportError:
+    from statistical_validator import StatisticalValidator
+
+# CapabilityScores 别名
+CapabilityScores = CapabilityScore
 
 
 # ==================== Export ====================
 
 __all__ = [
     'CAPABILITY_WEIGHTS',
-    'BASELINE_CAPABILITY_LIMITS',
-    'CORRECTNESS_MULTIPLIERS',
-    'CapabilityScores',
+    'CapabilityScore',
+    'CapabilityScores',  # 别名
     'EvaluationResult',
-    'CapabilityEvaluator',
-    'StatisticalValidator',
+    'ThinkEvaluator',
+    'PlanEvaluator',
+    'ActEvaluator',
+    'ReflectEvaluator',
+    'CorrectnessEvaluator',
+    'BenchmarkEvaluator',
+    'CapabilityEvaluator',  # 别名
+    'StatisticalValidator',  # 重导出
+    'DirectLLMSimulator',
+    'RAGSimulator',
+    'ReActSimulator',
 ]

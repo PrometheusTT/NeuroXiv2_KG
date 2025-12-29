@@ -1,6 +1,6 @@
 """
-NeuroXiv-KG Agent Core Structures
-==================================
+AIPOM-CoT Core Structures
+==========================
 统一的数据结构定义，支持完整的TPAR循环
 
 核心设计原则：
@@ -8,6 +8,10 @@ NeuroXiv-KG Agent Core Structures
 2. 可追溯 - 每个决策都有reasoning
 3. 证据驱动 - Evidence Buffer管理所有发现
 4. 预算控制 - 资源使用有上限
+
+修复内容：
+- 分析深度步数与手稿一致 (shallow: 3-4, medium: 5-8, deep: 8-12)
+- Intent分类与手稿对齐
 
 Author: Lijun
 Date: 2025-01
@@ -34,34 +38,84 @@ class Modality(Enum):
 
 
 class AnalysisDepth(Enum):
-    """分析深度"""
-    SHALLOW = "shallow"   # 1-2步: 简单查询
-    MEDIUM = "medium"     # 3-4步: 标准多模态
-    DEEP = "deep"         # 5-8步: 完整闭环
+    """
+    分析深度 - 与手稿Figure 2A一致
+
+    shallow: 3-4 steps - 简单查询
+    medium: 5-8 steps - 标准多模态
+    deep: 8-12 steps - 完整闭环
+    """
+    SHALLOW = "shallow"   # 3-4步: 简单查询
+    MEDIUM = "medium"     # 5-8步: 标准多模态
+    DEEP = "deep"         # 8-12步: 完整闭环
+
+    def get_step_range(self) -> Tuple[int, int]:
+        """获取该深度对应的步数范围"""
+        ranges = {
+            AnalysisDepth.SHALLOW: (3, 4),
+            AnalysisDepth.MEDIUM: (5, 8),
+            AnalysisDepth.DEEP: (8, 12),
+        }
+        return ranges.get(self, (3, 4))
+
+    def get_max_steps(self) -> int:
+        """获取最大步数"""
+        return self.get_step_range()[1]
+
+    def get_min_steps(self) -> int:
+        """获取最小步数"""
+        return self.get_step_range()[0]
 
 
 class QuestionIntent(Enum):
-    """问题意图"""
-    DEFINITION = "definition"           # "What is X?" / "What does X stand for?"
-    PROFILING = "profiling"             # "Tell me about X"
-    COMPARISON = "comparison"           # "Compare A and B"
-    SCREENING = "screening"             # "Which regions show..."
-    CONNECTIVITY = "connectivity"       # "Where does X project to?"
-    COMPOSITION = "composition"         # "What cell types are in X?"
-    QUANTIFICATION = "quantification"   # "How many..."
-    MECHANISM = "mechanism"             # "Why does X..."
+    """
+    问题意图 - 与手稿Figure 2A对齐
+
+    手稿定义5种主要意图:
+    - simple query
+    - deep profiling
+    - comparison
+    - screening
+    - explanation
+    """
+    # 主要意图类型（与手稿对齐）
+    SIMPLE_QUERY = "simple_query"       # 简单查询 - "What is X?"
+    DEEP_PROFILING = "profiling"        # 深度剖析 - "Tell me about X"
+    PROFILING = "profiling"             # 别名，兼容llm_intelligence.py
+    COMPARISON = "comparison"           # 比较分析 - "Compare A and B"
+    SCREENING = "screening"             # 筛选排序 - "Which regions show..."
+    EXPLANATION = "explanation"         # 解释说明 - "Why does X..."
+
+    # 扩展意图类型（用于更精细的处理）
+    DEFINITION = "definition"           # 定义查询 - "What does X stand for?"
+    CONNECTIVITY = "connectivity"       # 连接查询 - "Where does X project to?"
+    COMPOSITION = "composition"         # 组成查询 - "What cell types are in X?"
+    QUANTIFICATION = "quantification"   # 计数查询 - "How many..."
+    MECHANISM = "mechanism"             # 机制查询 - "Why/How does X..."
+
     UNKNOWN = "unknown"
 
 
 class PlannerType(Enum):
-    """规划器类型"""
+    """
+    规划器类型 - 与手稿Figure 2A对齐
+    """
     FOCUS_DRIVEN = "focus_driven"    # 深度剖析单一实体
     COMPARATIVE = "comparative"       # 系统对比/筛选
     ADAPTIVE = "adaptive"            # 自适应探索
 
 
 class ReflectionDecision(Enum):
-    """反思决策"""
+    """
+    反思决策 - 与手稿Figure 2C对齐
+
+    5种战略决策:
+    - continue: 继续执行
+    - replan: 重新规划（意外结果）
+    - deepen: 加深分析（有趣模式）
+    - pivot: 转向替代方向
+    - terminate: 证据充足，终止
+    """
     CONTINUE = "continue"      # 继续执行
     DEEPEN = "deepen"          # 加深分析
     PIVOT = "pivot"            # 转向新方向
@@ -78,6 +132,15 @@ class ValidationStatus(Enum):
     UNEXPECTED = "unexpected"
 
 
+class AnswerCorrectness(Enum):
+    """答案正确性级别"""
+    CORRECT = "correct"
+    PARTIAL = "partial"
+    TANGENTIAL = "tangential"
+    INCORRECT = "incorrect"
+    UNANSWERED = "unanswered"
+
+
 # ==================== Entity Structures ====================
 
 @dataclass
@@ -88,6 +151,7 @@ class Entity:
     canonical_name: str = ""
     confidence: float = 1.0
     metadata: Dict = field(default_factory=dict)
+    aliases: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.canonical_name:
@@ -114,6 +178,9 @@ class SchemaPath:
     hops: List[Tuple[str, str, str]]  # [(source, rel_type, target), ...]
     score: float = 0.0
     description: str = ""
+    nodes: List[str] = field(default_factory=list)
+    relationships: List[str] = field(default_factory=list)
+    estimated_cost: int = 1
 
 
 @dataclass
@@ -146,6 +213,7 @@ class StatisticalEvidence:
     fdr_q: Optional[float] = None
     sample_size: int = 0
     is_significant: bool = False
+    cohens_d: Optional[float] = None
 
     def to_dict(self) -> Dict:
         return {
@@ -155,7 +223,8 @@ class StatisticalEvidence:
             'p_value': self.p_value,
             'fdr_q': self.fdr_q,
             'n': self.sample_size,
-            'significant': self.is_significant
+            'significant': self.is_significant,
+            'cohens_d': self.cohens_d
         }
 
 
@@ -199,7 +268,8 @@ class EvidenceRecord:
             'completeness': self.data_completeness,
             'modality': self.modality.value if self.modality else None,
             'confidence': self.confidence_score,
-            'validation': self.validation_status.value
+            'validation': self.validation_status.value,
+            'statistical_evidence': self.statistical_evidence.to_dict() if self.statistical_evidence else None
         }
 
 
@@ -228,16 +298,17 @@ class EvidenceBuffer:
         return self._by_step.get(step_number)
 
     def get_overall_confidence(self) -> float:
+        """计算整体置信度 - 与手稿Figure 2C一致"""
         if not self.records:
             return 0.0
 
-        # 平均置信度
+        # 1. 平均置信度 (40%)
         avg_conf = np.mean([r.confidence_score for r in self.records])
 
-        # 模态覆盖度
+        # 2. 模态覆盖度 (30%) - 3模态为满分
         modality_coverage = min(1.0, len(self._by_modality) / 3.0)
 
-        # 统计验证比例
+        # 3. 统计验证比例 (30%)
         with_stats = [r for r in self.records if r.statistical_evidence]
         if with_stats:
             sig_ratio = sum(1 for r in with_stats
@@ -245,19 +316,31 @@ class EvidenceBuffer:
         else:
             sig_ratio = 0.5
 
-        return min(1.0, 0.5 * avg_conf + 0.3 * modality_coverage + 0.2 * sig_ratio)
+        return min(1.0, 0.4 * avg_conf + 0.3 * modality_coverage + 0.3 * sig_ratio)
 
     def get_data_completeness(self) -> float:
         if not self.records:
             return 0.0
         return np.mean([r.data_completeness for r in self.records])
 
+    def get_modality_coverage(self) -> List[str]:
+        """获取已覆盖的模态列表"""
+        return [m.value for m in self._by_modality.keys()]
+
+    def get_significance_rate(self) -> float:
+        """获取统计显著比例"""
+        with_stats = [r for r in self.records if r.statistical_evidence]
+        if not with_stats:
+            return 0.0
+        return sum(1 for r in with_stats if r.statistical_evidence.is_significant) / len(with_stats)
+
     def summarize(self) -> Dict:
         return {
             'total_records': len(self.records),
-            'modalities_covered': [m.value for m in self._by_modality.keys()],
+            'modalities_covered': self.get_modality_coverage(),
             'data_completeness': self.get_data_completeness(),
             'confidence_score': self.get_overall_confidence(),
+            'significance_rate': self.get_significance_rate(),
             'records': [r.to_dict() for r in self.records]
         }
 
@@ -295,11 +378,11 @@ class AnalysisState:
     # Schema路径使用记录
     paths_used: List[Dict] = field(default_factory=list)
 
-    # 预算控制
+    # 预算控制 - 与手稿Figure 2C一致
     budget: Dict[str, Any] = field(default_factory=lambda: {
-        'max_steps': 10,
-        'max_cypher_calls': 25,
-        'max_llm_calls': 20,
+        'max_steps': 12,  # 最大步数（deep模式）
+        'max_cypher_calls': 30,
+        'max_llm_calls': 25,
         'current_cypher_calls': 0,
         'current_llm_calls': 0,
         'time_limit_seconds': 300,
@@ -322,6 +405,9 @@ class AnalysisState:
     # 意图分类结果缓存
     _classification: Any = None
 
+    # Fingerprint数据（用于tri-modal分析）
+    fingerprints: Dict[str, Any] = field(default_factory=dict)
+
     def add_modality(self, modality: Modality):
         self.modalities_covered.add(modality)
 
@@ -336,13 +422,15 @@ class AnalysisState:
 
     def check_budget(self) -> Dict[str, bool]:
         elapsed = time.time() - self.budget['start_time']
+        max_steps = self.target_depth.get_max_steps()
+
         return {
-            'steps_ok': len(self.executed_steps) < self.budget['max_steps'],
+            'steps_ok': len(self.executed_steps) < max_steps,
             'cypher_ok': self.budget['current_cypher_calls'] < self.budget['max_cypher_calls'],
             'llm_ok': self.budget['current_llm_calls'] < self.budget['max_llm_calls'],
             'time_ok': elapsed < self.budget['time_limit_seconds'],
             'can_continue': all([
-                len(self.executed_steps) < self.budget['max_steps'],
+                len(self.executed_steps) < max_steps,
                 self.budget['current_cypher_calls'] < self.budget['max_cypher_calls'],
                 elapsed < self.budget['time_limit_seconds']
             ])
@@ -354,6 +442,7 @@ class AnalysisState:
             'intent': self.question_intent.value,
             'target_depth': self.target_depth.value,
             'steps_executed': len(self.executed_steps),
+            'max_steps': self.target_depth.get_max_steps(),
             'modalities_covered': [m.value for m in self.modalities_covered],
             'entities_found': {k: len(v) for k, v in self.discovered_entities.items()},
             'has_primary_focus': self.primary_focus is not None,
@@ -362,12 +451,25 @@ class AnalysisState:
             'replanning_count': self.replanning_count
         }
 
+    def remaining_budget(self) -> int:
+        """剩余可用步数"""
+        max_steps = self.target_depth.get_max_steps()
+        return max(0, max_steps - len(self.executed_steps))
+
+    def used_budget(self) -> int:
+        """已使用步数"""
+        return len(self.executed_steps)
+
+    def total_budget(self) -> int:
+        """总预算步数"""
+        return self.target_depth.get_max_steps()
+
 
 # ==================== Reflection Structures ====================
 
 @dataclass
 class StructuredReflection:
-    """结构化反思结果"""
+    """结构化反思结果 - 与手稿Figure 2C对齐"""
     step_number: int
 
     # 验证
@@ -382,7 +484,7 @@ class StructuredReflection:
     key_findings: List[str]
     surprising_results: List[str]
 
-    # 决策
+    # 决策 - 5种战略决策
     decision: ReflectionDecision
     decision_reasoning: str
 
@@ -396,6 +498,20 @@ class StructuredReflection:
 
     # 摘要
     summary: str
+
+    def to_dict(self) -> Dict:
+        return {
+            'step_number': self.step_number,
+            'validation_status': self.validation_status.value,
+            'validation_reasoning': self.validation_reasoning,
+            'uncertainty_level': self.uncertainty_level,
+            'key_findings': self.key_findings,
+            'surprising_results': self.surprising_results,
+            'decision': self.decision.value,
+            'decision_reasoning': self.decision_reasoning,
+            'confidence_score': self.confidence_score,
+            'summary': self.summary
+        }
 
 
 # ==================== Session Memory ====================
@@ -451,15 +567,118 @@ class AgentConfig:
     # Schema
     schema_json_path: str = "./schema.json"
 
-    # 预算
-    max_iterations: int = 10
-    max_cypher_calls: int = 25
-    max_llm_calls: int = 20
+    # 预算 - 与手稿一致
+    max_iterations: int = 12  # deep模式最大步数
+    max_cypher_calls: int = 30
+    max_llm_calls: int = 25
     timeout_seconds: int = 300
 
-    # 阈值
-    confidence_threshold: float = 0.7
+    # 阈值 - 与手稿Figure 2C一致
+    confidence_threshold: float = 0.75  # 终止阈值
     min_evidence_count: int = 3
+
+
+# ==================== TPAR结果结构（用于评估器）====================
+
+@dataclass
+class ThinkResult:
+    """Think阶段结果"""
+    entities: List[Entity]
+    intent: QuestionIntent
+    focus_modalities: List[Modality]
+    key_constraints: Dict[str, Any]
+    reasoning: str
+
+
+@dataclass
+class PlanResult:
+    """Plan阶段结果"""
+    selected_paths: List[SchemaPath]
+    planner_type: PlannerType
+    steps: List[CandidateStep]
+    reasoning: str
+
+
+@dataclass
+class ActResult:
+    """Act阶段结果"""
+    step_id: str
+    success: bool
+    data: List[Dict]
+    row_count: int
+    execution_time: float
+    operator: str = ""
+    modality: str = ""
+
+
+@dataclass
+class ReflectResult:
+    """Reflect阶段结果"""
+    reflection: StructuredReflection
+    decision: ReflectionDecision
+    reasoning: str
+
+
+@dataclass
+class TPARIteration:
+    """单次TPAR迭代"""
+    iteration_number: int
+    think: Optional[ThinkResult] = None
+    plan: Optional[PlanResult] = None
+    act: Optional[ActResult] = None
+    reflect: Optional[ReflectResult] = None
+
+
+@dataclass
+class AgentOutput:
+    """Agent完整输出（用于评估）"""
+    question: str
+    answer: str
+    iterations: List[TPARIteration] = field(default_factory=list)
+    final_state: Optional[AnalysisState] = None
+    total_time: float = 0.0
+    task_status: str = "completed"
+
+    def get_think_traces(self) -> List[Dict]:
+        """获取所有Think记录"""
+        traces = []
+        for it in self.iterations:
+            if it.think:
+                traces.append({
+                    'entities': [e.name for e in it.think.entities],
+                    'intent': it.think.intent.value,
+                    'reasoning': it.think.reasoning,
+                    'modalities': [m.value for m in it.think.focus_modalities]
+                })
+        return traces
+
+    def get_executed_steps(self) -> List[Dict]:
+        """获取所有执行的步骤"""
+        steps = []
+        for it in self.iterations:
+            if it.act:
+                steps.append({
+                    'step_id': it.act.step_id,
+                    'success': it.act.success,
+                    'row_count': it.act.row_count,
+                    'operator': it.act.operator,
+                    'modality': it.act.modality
+                })
+        return steps
+
+    def get_reflections(self) -> List[Dict]:
+        """获取所有反思记录"""
+        reflections = []
+        for it in self.iterations:
+            if it.reflect:
+                reflections.append({
+                    'decision': it.reflect.decision.value,
+                    'confidence': it.reflect.reflection.confidence_score,
+                    'reasoning': it.reflect.reasoning,
+                    'data_completeness': it.reflect.reflection.confidence_factors.get('data_completeness', 0),
+                    'evidence_strength': it.reflect.reflection.confidence_factors.get('evidence_strength', 0)
+                })
+        return reflections
 
 
 # ==================== Export ====================
@@ -468,6 +687,7 @@ __all__ = [
     # Enums
     'Modality', 'AnalysisDepth', 'QuestionIntent',
     'PlannerType', 'ReflectionDecision', 'ValidationStatus',
+    'AnswerCorrectness',
 
     # Entity
     'Entity', 'EntityCluster',
@@ -489,4 +709,8 @@ __all__ = [
 
     # Config
     'AgentConfig',
+
+    # TPAR Results
+    'ThinkResult', 'PlanResult', 'ActResult', 'ReflectResult',
+    'TPARIteration', 'AgentOutput',
 ]
